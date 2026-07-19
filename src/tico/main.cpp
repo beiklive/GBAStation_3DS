@@ -5,6 +5,8 @@
 #include "tico/switch_libnx.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <csignal>
@@ -24,7 +26,9 @@
 #include "audio_core/input_details.h"
 #include "audio_core/sink_details.h"
 #include "tico/emu_window_switch.h"
+#include "tico/overlay/overlay_ui.h"
 #include "tico/overlay/tico_config.h"
+#include "tico/overlay/vulkan_overlay.h"
 #include "tico/switch_keyboard.h"
 #include "common/file_util.h"
 #include "common/logging/backend.h"
@@ -33,6 +37,9 @@
 #include "common/string_util.h"
 #include "common/thread.h"
 #include "core/core.h"
+#include "core/loader/loader.h"
+#include "core/movie.h"
+#include "core/savestate.h"
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/image_interface.h"
 #include "core/hle/service/cfg/cfg.h"
@@ -41,6 +48,7 @@
 #include "input_common/switch_hid.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
+#include "video_core/renderer_vulkan/renderer_vulkan.h"
 
 extern "C" {
 u32 __nx_applet_type = AppletType_Application;
@@ -70,6 +78,13 @@ constexpr const char* StderrLogPath = "sdmc:/123/system/3ds/debug/stderr.txt";
 constexpr const char* FallbackRomPath = "sdmc:/GBAStation/3ds/3Dlandchs.cci";
 constexpr const char* MemMapLogPath = "sdmc:/123/system/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
+
+struct LaunchOptions {
+    std::string rom_path;
+    std::string title;
+    std::string return_nro_path{LauncherPath};
+    bool return_to_nro{true};
+};
 #if defined(TICO_SWITCH_DIAGNOSTIC_LOGS)
 constexpr bool DiagnosticLogsEnabled = true;
 #else
@@ -252,7 +267,11 @@ void DebugLog(const char* fmt, ...) {
     va_end(args);
 }
 
-bool QueueLauncherReturn() {
+bool QueueLauncherReturn(const LaunchOptions& options) {
+    if (!options.return_to_nro) {
+        StartupLog("QueueLauncherReturn: --exit-to-home requested");
+        return true;
+    }
     if (!envHasNextLoad()) {
         StartupLog("QueueLauncherReturn: loader does not support envSetNextLoad");
         return false;
@@ -260,17 +279,18 @@ bool QueueLauncherReturn() {
 
     const char* target = nullptr;
     struct stat st {};
-    if (stat(LauncherPath, &st) == 0) {
-        target = LauncherPath;
+    if (!options.return_nro_path.empty() && stat(options.return_nro_path.c_str(), &st) == 0) {
+        target = options.return_nro_path.c_str();
     }
 
     if (!target) {
-        StartupLog("QueueLauncherReturn: no launcher found at %s", LauncherPath);
+        StartupLog("QueueLauncherReturn: no launcher found at %s",
+                   options.return_nro_path.c_str());
         return false;
     }
 
-    char args[512];
-    std::snprintf(args, sizeof(args), "%s --resume", target);
+    char args[1024];
+    std::snprintf(args, sizeof(args), "\"%s\"", target);
     const LibnxResult rc = envSetNextLoad(target, args);
     StartupLog("QueueLauncherReturn: envSetNextLoad target=%s args=%s rc=0x%x", target, args,
                rc);
@@ -535,17 +555,67 @@ const char* ResultStatusName(Core::System::ResultStatus status) {
     return "Unknown";
 }
 
-std::string GetRomPath(int argc, char** argv) {
-    for (int i = 1; i < argc; i++) {
+bool EndsWithNoCase(std::string_view value, std::string_view suffix) {
+    if (value.size() < suffix.size()) {
+        return false;
+    }
+    const std::size_t offset = value.size() - suffix.size();
+    for (std::size_t i = 0; i < suffix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(value[offset + i])) !=
+            std::tolower(static_cast<unsigned char>(suffix[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string TitleFromPath(std::string_view path) {
+    const std::size_t slash = path.find_last_of("/\\");
+    const std::size_t begin = slash == std::string_view::npos ? 0 : slash + 1;
+    const std::size_t dot = path.find_last_of('.');
+    const std::size_t end = dot == std::string_view::npos || dot < begin ? path.size() : dot;
+    if (end <= begin) {
+        return "Nintendo 3DS";
+    }
+    return std::string{path.substr(begin, end - begin)};
+}
+
+LaunchOptions ParseLaunchOptions(int argc, char** argv) {
+    LaunchOptions options;
+    for (int i = 1; i < argc; ++i) {
         if (!argv[i] || std::strcmp(argv[i], "ticoSetup") == 0) {
             continue;
         }
-        StartupLog("GetRomPath: using argv[%d]=%s", i, argv[i]);
-        return argv[i];
+        const std::string_view argument{argv[i]};
+        if (argument == "--return" && i + 1 < argc && argv[i + 1]) {
+            options.return_nro_path = argv[++i];
+            continue;
+        }
+        if (argument == "--exit-to-home") {
+            options.return_to_nro = false;
+            continue;
+        }
+        if (argument.starts_with("--")) {
+            StartupLog("ParseLaunchOptions: ignoring unknown option %s", argv[i]);
+            continue;
+        }
+        if (EndsWithNoCase(argument, ".nro")) {
+            continue;
+        }
+        if (options.rom_path.empty()) {
+            options.rom_path = argument;
+        }
     }
 
-    StartupLog("GetRomPath: no argv ROM, using fallback %s", FallbackRomPath);
-    return FallbackRomPath;
+    if (options.rom_path.empty()) {
+        options.rom_path = FallbackRomPath;
+        StartupLog("ParseLaunchOptions: no ROM argument, using fallback %s", FallbackRomPath);
+    }
+    options.title = TitleFromPath(options.rom_path);
+    StartupLog("ParseLaunchOptions: rom=%s title=%s return=%s target=%s",
+               options.rom_path.c_str(), options.title.c_str(),
+               options.return_to_nro ? "nro" : "home", options.return_nro_path.c_str());
+    return options;
 }
 
 void ConfigureSettings() {
@@ -781,12 +851,13 @@ int Run(int argc, char** argv) {
     }
 
     StartupLog("Run: parsing ROM path");
-    const std::string rom_path = GetRomPath(argc, argv);
+    const LaunchOptions launch_options = ParseLaunchOptions(argc, argv);
+    const std::string& rom_path = launch_options.rom_path;
     if (rom_path.empty()) {
         DebugLog("no ROM path supplied");
         thread_core_guard.Restore("no-rom");
         DebugClose();
-        const bool queued_launcher_return = QueueLauncherReturn();
+        const bool queued_launcher_return = QueueLauncherReturn(launch_options);
         appletUnlockExit();
         return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -856,7 +927,7 @@ int Run(int argc, char** argv) {
         }
         thread_core_guard.Restore("load-failed");
         DebugClose();
-        const bool queued_launcher_return = QueueLauncherReturn();
+        const bool queued_launcher_return = QueueLauncherReturn(launch_options);
         appletUnlockExit();
         return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -867,6 +938,34 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: ApplySettings");
     system.ApplySettings();
+
+    using SlotStateCache =
+        std::array<std::atomic_bool, SwitchFrontend::OverlayUI::StateSlotCount + 1>;
+    const auto slot_state_cache = std::make_shared<SlotStateCache>();
+    for (auto& occupied : *slot_state_cache) {
+        occupied.store(false, std::memory_order_relaxed);
+    }
+    u64 program_id{};
+    if (system.GetAppLoader().ReadProgramId(program_id) == Loader::ResultStatus::Success) {
+        const u64 movie_id = system.Movie().GetCurrentMovieID();
+        for (const Core::SaveStateInfo& state : Core::ListSaveStates(program_id, movie_id)) {
+            if (state.slot > 0 && state.slot <= SwitchFrontend::OverlayUI::StateSlotCount) {
+                (*slot_state_cache)[state.slot].store(true, std::memory_order_relaxed);
+            }
+        }
+    }
+    SwitchFrontend::OverlayUI::SetGameTitle(launch_options.title);
+    SwitchFrontend::OverlayUI::SetSlotOccupiedCallback(
+        [slot_state_cache](int slot) {
+            return slot > 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
+                   (*slot_state_cache)[slot].load(std::memory_order_acquire);
+        });
+
+    auto& vulkan_renderer = static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer());
+    bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(vulkan_renderer);
+    DebugLog("GBAStation menu init=%d hotkey=ZL+ZR return=%s target=%s",
+             menu_initialized ? 1 : 0, launch_options.return_to_nro ? "nro" : "home",
+             launch_options.return_nro_path.c_str());
 
     DebugLog("startup keepalive armed");
 
@@ -884,6 +983,8 @@ int Run(int argc, char** argv) {
     auto last_heartbeat = Clock::now();
     u64 last_heartbeat_loop_count = loop_count;
     s32 last_heartbeat_frame = last_logged_frame;
+    bool menu_was_visible = false;
+    bool block_game_input_until_release = false;
     const char* exit_reason = "loop condition ended";
     while (true) {
         const auto now = Clock::now();
@@ -913,13 +1014,67 @@ int Run(int argc, char** argv) {
             last_keepalive = now;
         }
 
-        window.PollEvents();
-        InputCommon::SwitchHID::Update();
         padUpdate(&pad);
 
-        if (ExitComboPressed()) {
-            exit_reason = "ZL+ZR requested exit";
-            DebugLog("exit combo pressed: ZL+ZR after %llu iterations",
+        if (menu_initialized) {
+            SwitchFrontend::VulkanOverlay::Update(&pad);
+        }
+        const bool menu_visible =
+            menu_initialized && SwitchFrontend::VulkanOverlay::IsVisible();
+        if (menu_visible != menu_was_visible) {
+            block_game_input_until_release = true;
+            DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
+            menu_was_visible = menu_visible;
+        }
+        if (!menu_visible && block_game_input_until_release && padGetButtons(&pad) == 0) {
+            block_game_input_until_release = false;
+        }
+        const bool suppress_game_input = menu_visible || block_game_input_until_release;
+        window.SetInputSuppressed(suppress_game_input);
+        InputCommon::SwitchHID::SetInputSuppressed(suppress_game_input);
+        window.PollEvents();
+        InputCommon::SwitchHID::Update();
+
+        const auto menu_action = static_cast<SwitchFrontend::OverlayUI::Action>(
+            menu_initialized ? SwitchFrontend::VulkanOverlay::ConsumeAction() : 0);
+        if (SwitchFrontend::OverlayUI::IsSaveStateAction(menu_action) ||
+            SwitchFrontend::OverlayUI::IsLoadStateAction(menu_action)) {
+            const int slot = SwitchFrontend::OverlayUI::GetStateSlotForAction(menu_action);
+            const bool saving = SwitchFrontend::OverlayUI::IsSaveStateAction(menu_action);
+            const bool accepted = system.SendSignal(
+                saving ? Core::System::Signal::Save : Core::System::Signal::Load,
+                static_cast<u32>(slot));
+            if (accepted) {
+                if (saving) {
+                    (*slot_state_cache)[slot].store(true, std::memory_order_release);
+                }
+                char message[64]{};
+                std::snprintf(message, sizeof(message), saving ? "正在保存到存档位 %d"
+                                                              : "正在读取存档位 %d",
+                              slot);
+                SwitchFrontend::OverlayUI::ShowToast(message);
+                DebugLog("menu %s state slot=%d", saving ? "save" : "load", slot);
+            } else {
+                SwitchFrontend::OverlayUI::ShowToast("已有状态操作正在进行");
+            }
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::Reset) {
+            if (system.SendSignal(Core::System::Signal::Reset)) {
+                SwitchFrontend::OverlayUI::ShowToast("正在重置游戏");
+                DebugLog("menu requested game reset");
+            }
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::Exit) {
+            exit_reason = "GBAStation menu requested exit";
+            DebugLog("menu requested exit after %llu iterations",
+                     static_cast<unsigned long long>(loop_count));
+            Common::RequestFastShutdown();
+            break;
+        }
+
+        if (!menu_initialized && ExitComboPressed()) {
+            exit_reason = "ZL+ZR fallback exit";
+            DebugLog("menu unavailable; fallback exit combo after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
             Common::RequestFastShutdown();
             break;
@@ -965,6 +1120,9 @@ int Run(int argc, char** argv) {
             DebugLog("savestate operation failed after %llu iterations: %s",
                      static_cast<unsigned long long>(loop_count),
                      details.empty() ? "unknown error" : details.c_str());
+            if (menu_initialized) {
+                SwitchFrontend::OverlayUI::ShowToast("状态操作失败");
+            }
             continue;
         }
         if (run_result != Core::System::ResultStatus::Success) {
@@ -980,6 +1138,14 @@ int Run(int argc, char** argv) {
              system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
              static_cast<unsigned long long>(loop_count));
     const auto shutdown_started = Clock::now();
+    if (menu_initialized) {
+        DebugLog("shutdown step: VulkanOverlay::Shutdown begin");
+        SwitchFrontend::VulkanOverlay::Shutdown();
+        menu_initialized = false;
+        DebugLog("shutdown step: VulkanOverlay::Shutdown done");
+    }
+    window.SetInputSuppressed(false);
+    InputCommon::SwitchHID::SetInputSuppressed(false);
     if (system.IsPoweredOn()) {
         DebugLog("shutdown step: system.Shutdown begin");
         const auto step_started = Clock::now();
@@ -1010,7 +1176,7 @@ int Run(int argc, char** argv) {
                                         .count()));
     DebugLog("shutdown step: DebugClose begin");
     DebugClose();
-    const bool queued_launcher_return = QueueLauncherReturn();
+    const bool queued_launcher_return = QueueLauncherReturn(launch_options);
     DumpMemoryMap("after-shutdown");
     StartupLog("Run: appletUnlockExit begin");
     const LibnxResult unlock_exit_rc = appletUnlockExit();

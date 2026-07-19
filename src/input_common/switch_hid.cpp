@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include "tico/switch_libnx.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
@@ -17,6 +18,7 @@ namespace InputCommon {
 namespace SwitchHID {
 
 static PadState g_pad{};
+static std::atomic_bool g_input_suppressed{};
 static std::array<HidSixAxisSensorHandle, 6> g_sixaxis_handles{};
 static std::array<bool, 6> g_sixaxis_started{};
 
@@ -65,7 +67,12 @@ void Update() {
     padUpdate(&g_pad);
 }
 
+void SetInputSuppressed(bool suppressed) {
+    g_input_suppressed.store(suppressed, std::memory_order_release);
+}
+
 void Shutdown() {
+    g_input_suppressed.store(false, std::memory_order_release);
     for (std::size_t i = 0; i < g_sixaxis_handles.size(); ++i) {
         if (g_sixaxis_started[i]) {
             hidStopSixAxisSensor(g_sixaxis_handles[i]);
@@ -81,6 +88,9 @@ public:
     explicit SwitchHIDButton(u64 mask) : m_mask(mask) {}
 
     bool GetStatus() const override {
+        if (g_input_suppressed.load(std::memory_order_acquire)) {
+            return false;
+        }
         return (padGetButtons(&g_pad) & m_mask) != 0;
     }
 
@@ -102,6 +112,9 @@ public:
     explicit SwitchHIDAnalog(int stick_idx) : m_stick(stick_idx) {}
 
     std::tuple<float, float> GetStatus() const override {
+        if (g_input_suppressed.load(std::memory_order_acquire)) {
+            return {0.0f, 0.0f};
+        }
         const HidAnalogStickState pos = padGetStickPos(&g_pad, m_stick);
         // Normalize to [-1, 1]. Range is -32768..32767; use 32767.0f to avoid clamping +1.
         constexpr float kScale = 1.0f / 32767.0f;
@@ -127,6 +140,10 @@ public:
     explicit SwitchHIDMotion(float sensitivity_) : sensitivity(sensitivity_) {}
 
     std::tuple<Common::Vec3<float>, Common::Vec3<float>> GetStatus() const override {
+        if (g_input_suppressed.load(std::memory_order_acquire)) {
+            return {Common::Vec3<float>{0.0f, 0.0f, -1.0f},
+                    Common::Vec3<float>{0.0f, 0.0f, 0.0f}};
+        }
         HidSixAxisSensorState state{};
         if (!ReadSixAxisState(state)) {
             return {Common::Vec3<float>{0.0f, 0.0f, -1.0f},

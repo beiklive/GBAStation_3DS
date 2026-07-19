@@ -18,6 +18,7 @@ public:
 
     void PollEvents() override;
     CursorInfo GetCursorInfo() const override;
+    void SetInputSuppressed(bool suppressed);
 
 private:
     void RefreshDimensions();
@@ -32,6 +33,7 @@ private:
     bool physical_touch_pressed{};
     bool cursor_visible{};
     bool cursor_touch_pressed{};
+    bool input_suppressed{};
     float cursor_x{};
     float cursor_y{};
     std::chrono::steady_clock::time_point last_cursor_update{};

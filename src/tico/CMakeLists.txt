@@ -6,19 +6,37 @@ add_executable(tico
     switch_keyboard.h
     switch_compat.cpp
     switch_libnx.h
+    overlay/overlay_ui.cpp
+    overlay/overlay_ui.h
     overlay/tico_config.cpp
     overlay/tico_config.h
+    overlay/vulkan_overlay.cpp
+    overlay/vulkan_overlay.h
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui.cpp
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui_draw.cpp
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui_tables.cpp
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui_widgets.cpp
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
 )
 
 create_target_directory_groups(tico)
 set_target_properties(tico PROPERTIES OUTPUT_NAME "azahar-switch.elf")
-target_compile_definitions(tico PRIVATE __SWITCH__)
+target_compile_definitions(tico PRIVATE
+    __SWITCH__
+    VK_NO_PROTOTYPES
+    IMGUI_DISABLE_DEMO_WINDOWS
+    IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
+)
 option(TICO_SWITCH_DIAGNOSTIC_LOGS "Enable first-boot Switch filesystem logs" OFF)
 if(TICO_SWITCH_DIAGNOSTIC_LOGS)
     target_compile_definitions(tico PRIVATE TICO_SWITCH_DIAGNOSTIC_LOGS=1)
 endif()
 
-target_include_directories(tico PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_include_directories(tico PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui
+    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/backends
+)
 
 if(NOT DEVKITPRO)
     if(DEFINED ENV{DEVKITPRO})
@@ -123,6 +141,7 @@ target_link_libraries(tico PRIVATE
     tsl::robin_map
     ${PLATFORM_LIBRARIES}
     Threads::Threads
+    vulkan-headers
     SwitchNVK::Vulkan
     z
     zstd

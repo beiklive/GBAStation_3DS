@@ -22,6 +22,10 @@ namespace Vulkan {
 
 namespace {
 
+std::atomic<OverlayDrawCallback> overlay_draw_callback{};
+std::atomic<OverlayResetCallback> overlay_reset_callback{};
+std::mutex overlay_callback_mutex;
+
 #ifdef __SWITCH__
 extern "C" u32 svcSetThreadCoreMask(u32 handle, s32 preferred_core, u32 affinity_mask);
 extern "C" u32 svcGetThreadCoreMask(s32* out_preferred_core, u64* out_affinity_mask, u32 handle);
@@ -115,6 +119,16 @@ bool CanBlitToSwapchain(const vk::PhysicalDevice& physical_device, vk::Format fo
 }
 
 } // Anonymous namespace
+
+void SetOverlayDrawCallback(OverlayDrawCallback callback) {
+    std::scoped_lock lock{overlay_callback_mutex};
+    overlay_draw_callback.store(callback, std::memory_order_release);
+}
+
+void SetOverlayResetCallback(OverlayResetCallback callback) {
+    std::scoped_lock lock{overlay_callback_mutex};
+    overlay_reset_callback.store(callback, std::memory_order_release);
+}
 
 PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& instance_,
                              Scheduler& scheduler_, bool low_refresh_rate_)
@@ -378,6 +392,12 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
 #endif
         std::scoped_lock submit_lock{scheduler.submit_mutex};
         graphics_queue.waitIdle();
+        {
+            std::scoped_lock overlay_lock{overlay_callback_mutex};
+            if (const auto reset = overlay_reset_callback.load(std::memory_order_acquire)) {
+                reset();
+            }
+        }
         swapchain.Create(frame->width, frame->height, surface, low_refresh_rate);
     };
 
@@ -439,10 +459,27 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
             },
         },
     };
-    const vk::ImageMemoryBarrier post_barrier{
+    const vk::ImageMemoryBarrier overlay_barrier{
         .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-        .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead |
+                         vk::AccessFlagBits::eColorAttachmentWrite,
         .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+        .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = swapchain_image,
+        .subresourceRange{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        },
+    };
+    const vk::ImageMemoryBarrier present_barrier{
+        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+        .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
+        .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
         .newLayout = vk::ImageLayout::ePresentSrcKHR,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -471,9 +508,25 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
                          MakeImageCopy(frame->width, frame->height, extent.width, extent.height));
     }
 
-    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                           vk::DependencyFlagBits::eByRegion, {}, {}, overlay_barrier);
+
+    {
+        // ImGui's Vulkan backend may submit and wait on the graphics queue while
+        // uploading a newly-created font/texture atlas.  Vulkan queues require
+        // external synchronization, so serialize that work with every other
+        // scheduler submission just like the present submission below.
+        std::scoped_lock submit_lock{scheduler.submit_mutex};
+        std::scoped_lock overlay_lock{overlay_callback_mutex};
+        if (const auto draw = overlay_draw_callback.load(std::memory_order_acquire)) {
+            draw(cmdbuf, swapchain_image, extent, swapchain.GetSurfaceFormat().format);
+        }
+    }
+
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
                            vk::PipelineStageFlagBits::eAllCommands,
-                           vk::DependencyFlagBits::eByRegion, {}, {}, post_barrier);
+                           vk::DependencyFlagBits::eByRegion, {}, {}, present_barrier);
 
     cmdbuf.end();
 

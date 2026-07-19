@@ -50,10 +50,22 @@ EmuWindowSwitch::EmuWindowSwitch(NWindow* window_)
 
 void EmuWindowSwitch::PollEvents() {
     RefreshDimensions();
+    if (input_suppressed) {
+        if (physical_touch_pressed || cursor_touch_pressed) {
+            TouchReleased();
+            physical_touch_pressed = false;
+            cursor_touch_pressed = false;
+        }
+        return;
+    }
     const bool physical_touch_active = PollTouch();
     if (!physical_touch_active) {
         PollControllerCursor();
     }
+}
+
+void EmuWindowSwitch::SetInputSuppressed(bool suppressed) {
+    input_suppressed = suppressed;
 }
 
 void EmuWindowSwitch::RefreshDimensions() {
@@ -137,11 +149,7 @@ void EmuWindowSwitch::PollControllerCursor() {
     }
     last_cursor_update = now;
 
-    const bool trigger_combo_down =
-        (buttons & HidNpadButton_ZL) && (buttons & HidNpadButton_ZR);
-    const bool toggle_cursor =
-        (buttons_down & HidNpadButton_StickR) ||
-        (trigger_combo_down && (buttons_down & (HidNpadButton_ZL | HidNpadButton_ZR)));
+    const bool toggle_cursor = (buttons_down & HidNpadButton_StickR) != 0;
 
     if (toggle_cursor) {
         cursor_visible = !cursor_visible;
@@ -167,7 +175,7 @@ void EmuWindowSwitch::PollControllerCursor() {
                           static_cast<float>(Core::kScreenBottomHeight - 1));
 
     const auto [framebuffer_x, framebuffer_y] = CursorFramebufferPosition();
-    if ((buttons & HidNpadButton_ZR) && !trigger_combo_down) {
+    if (buttons & HidNpadButton_ZR) {
         if (cursor_touch_pressed) {
             TouchMoved(framebuffer_x, framebuffer_y);
         } else {

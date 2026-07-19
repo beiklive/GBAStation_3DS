@@ -141,6 +141,10 @@ mkdir -p "${ROMFS_DIR}"
 if [ -d "${SCRIPT_DIR}/src/tico/config" ]; then
     cp -R "${SCRIPT_DIR}/src/tico/config" "${ROMFS_DIR}/config"
 fi
+if [ -f "${SCRIPT_DIR}/src/tico/fonts/font.ttf" ]; then
+    mkdir -p "${ROMFS_DIR}/fonts"
+    cp "${SCRIPT_DIR}/src/tico/fonts/font.ttf" "${ROMFS_DIR}/fonts/font.ttf"
+fi
 cp "${ELF_FILE}" "${DEBUG_ELF}"
 cp "${ELF_FILE}" "${STRIPPED_ELF}"
 if [ "${GENERATED_LINKER_MAP}" != "${LINKER_MAP}" ]; then

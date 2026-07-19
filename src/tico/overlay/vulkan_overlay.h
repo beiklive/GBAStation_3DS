@@ -12,13 +12,11 @@ class RendererVulkan;
 
 namespace SwitchFrontend::VulkanOverlay {
 
-// Initializes the ImGui Vulkan backend against azahar's Vulkan renderer and
-// registers a present-time draw callback. Must be called after at least one guest
-// frame has been presented (so the swapchain exists). Returns false if the renderer
-// is not ready yet; safe to retry.
+// Initializes the GBAStation menu against Azahar's Vulkan renderer and registers
+// its present-time draw callback.
 bool Init(Vulkan::RendererVulkan& renderer);
 
-// Polls the pad: toggles the overlay on Plus+Minus and feeds D-pad/stick navigation.
+// Polls the pad: toggles the menu on ZL+ZR and feeds D-pad/stick navigation.
 void Update(PadState* pad);
 
 bool IsVisible();

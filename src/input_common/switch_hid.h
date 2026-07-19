@@ -17,6 +17,8 @@ namespace SwitchHID {
 void Init();
 /// Call each frame before RunLoop to refresh button state
 void Update();
+/// Returns neutral controller input while the frontend menu owns the pad.
+void SetInputSuppressed(bool suppressed);
 void Shutdown();
 
 class SwitchHIDButtonFactory final : public Input::Factory<Input::ButtonDevice> {

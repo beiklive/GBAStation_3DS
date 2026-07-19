@@ -1,5 +1,4 @@
 // Copyright 2026 Azahar Emulator Project
-// Copyright 2026 Dan | ticoverse.com
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -9,18 +8,33 @@
 
 namespace SwitchFrontend::OverlayUI {
 
+constexpr int StateSlotCount = 10;
+
 enum class Action {
     None,
     Resume,
+    Reset,
     Exit,
     SaveStateSlot1,
     SaveStateSlot2,
     SaveStateSlot3,
     SaveStateSlot4,
+    SaveStateSlot5,
+    SaveStateSlot6,
+    SaveStateSlot7,
+    SaveStateSlot8,
+    SaveStateSlot9,
+    SaveStateSlot10,
     LoadStateSlot1,
     LoadStateSlot2,
     LoadStateSlot3,
     LoadStateSlot4,
+    LoadStateSlot5,
+    LoadStateSlot6,
+    LoadStateSlot7,
+    LoadStateSlot8,
+    LoadStateSlot9,
+    LoadStateSlot10,
 };
 
 enum class ToastCorner {
@@ -35,17 +49,12 @@ bool IsLoadStateAction(Action action);
 int GetStateSlotForAction(Action action);
 
 void SetVisible(bool visible);
-
 Action Render(int display_w, int display_h);
 
 void SetGameTitle(std::string title);
-void SetNickname(std::string nickname);
-void SetAvatarTextureId(unsigned long long texture_id);
-void ShowToast(std::string message, ToastCorner corner = ToastCorner::TopLeft);
+void ShowToast(std::string message, ToastCorner corner = ToastCorner::BottomRight);
 bool HasTransientContent();
 
-// Predicate the overlay uses to label save/load slots as "In Use" or "Empty".
-// The Switch frontend registers one that queries azahar's savestate listing.
 using SlotOccupiedFn = std::function<bool(int slot)>;
 void SetSlotOccupiedCallback(SlotOccupiedFn callback);
 

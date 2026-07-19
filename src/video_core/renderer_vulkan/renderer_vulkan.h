@@ -83,6 +83,14 @@ public:
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override;
 
+    [[nodiscard]] const Instance& GetVulkanInstance() const noexcept {
+        return instance;
+    }
+
+    [[nodiscard]] PresentWindow& GetMainPresentWindow() noexcept {
+        return main_present_window;
+    }
+
 private:
     void ReloadPipeline(Settings::StereoRenderOption render_3d);
     void CompileShaders();
