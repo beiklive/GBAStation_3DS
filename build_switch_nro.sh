@@ -125,9 +125,8 @@ if [ -z "${ELF_FILE}" ] || [ ! -f "${ELF_FILE}" ]; then
     exit 1
 fi
 
-NACP_FILE="${BUILD_DIR}/azahar-switch.nacp"
-NRO_FILE="${SCRIPT_DIR}/azahar-switch${OUTPUT_SUFFIX}.nro"
-TICO_NRO_FILE="${SCRIPT_DIR}/tico-azahar${OUTPUT_SUFFIX}.nro"
+NACP_FILE="${BUILD_DIR}/GBAStation3DSStub.nacp"
+NRO_FILE="${SCRIPT_DIR}/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
 ROMFS_DIR="${BUILD_DIR}/tico_romfs"
 DEBUG_ELF="${BUILD_DIR}/azahar-switch${OUTPUT_SUFFIX}.debug.elf"
 STRIPPED_ELF="${BUILD_DIR}/azahar-switch${OUTPUT_SUFFIX}.stripped.elf"
@@ -136,7 +135,7 @@ LINKER_MAP="${BUILD_DIR}/azahar-switch${OUTPUT_SUFFIX}.map"
 AUDIT_LOG="${BUILD_DIR}/M6_LINK_AUDIT${OUTPUT_SUFFIX}.txt"
 NM="${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-nm"
 STRINGS="${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-strings"
-nacptool --create "Azahar" "Azahar Emulator Project" "1.0.5" "${NACP_FILE}"
+nacptool --create "GBAStation 3DS Stub" "GBAStation" "1.0.5" "${NACP_FILE}"
 rm -rf "${ROMFS_DIR}"
 mkdir -p "${ROMFS_DIR}"
 if [ -d "${SCRIPT_DIR}/src/tico/config" ]; then
@@ -149,7 +148,6 @@ if [ "${GENERATED_LINKER_MAP}" != "${LINKER_MAP}" ]; then
 fi
 "${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-strip" --strip-all "${STRIPPED_ELF}"
 elf2nro "${STRIPPED_ELF}" "${NRO_FILE}" --nacp="${NACP_FILE}" --romfsdir="${ROMFS_DIR}"
-cp "${NRO_FILE}" "${TICO_NRO_FILE}"
 
 required_symbols=(
     vk_icdGetInstanceProcAddr
@@ -212,7 +210,6 @@ hash_files=(
     "${DEFINED_SYMBOLS}"
     "${UNDEFINED_SYMBOLS}"
     "${NRO_FILE}"
-    "${TICO_NRO_FILE}"
 )
 if [ -f "${BUILD_DIR}/switch-nvk-kept-entrypoints.txt" ]; then
     hash_files+=("${BUILD_DIR}/switch-nvk-kept-entrypoints.txt")
@@ -224,21 +221,17 @@ SHA256_FILE="${BUILD_DIR}/SHA256SUMS${OUTPUT_SUFFIX}"
 sha256sum "${hash_files[@]}" > "${SHA256_FILE}"
 
 if [ -n "${SWITCH_SD_ROOT:-}" ]; then
-    mkdir -p "${SWITCH_SD_ROOT}/switch" "${SWITCH_SD_ROOT}/tico/cores"
-    cp "${NRO_FILE}" "${SWITCH_SD_ROOT}/switch/azahar-switch${OUTPUT_SUFFIX}.nro"
-    cp "${TICO_NRO_FILE}" "${SWITCH_SD_ROOT}/tico/cores/tico-azahar${OUTPUT_SUFFIX}.nro"
-    echo "Installed: ${SWITCH_SD_ROOT}/switch/azahar-switch${OUTPUT_SUFFIX}.nro"
-    echo "Installed: ${SWITCH_SD_ROOT}/tico/cores/tico-azahar${OUTPUT_SUFFIX}.nro"
+    mkdir -p "${SWITCH_SD_ROOT}/switch"
+    cp "${NRO_FILE}" "${SWITCH_SD_ROOT}/switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
+    echo "Installed: ${SWITCH_SD_ROOT}/switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
 fi
 
 echo "Variant: ${BUILD_VARIANT} (diagnostic logs: ${DIAGNOSTIC_LOGS})"
 echo "Output: ${NRO_FILE}"
-echo "Output: ${TICO_NRO_FILE}"
 echo "Debug ELF: ${DEBUG_ELF}"
 echo "Linker map: ${LINKER_MAP}"
 echo "M6 audit: ${AUDIT_LOG}"
 echo "SHA-256: ${SHA256_FILE}"
-echo "Copy standalone to SD as: /switch/azahar-switch${OUTPUT_SUFFIX}.nro"
-echo "Copy chainload core to SD as: /tico/cores/tico-azahar${OUTPUT_SUFFIX}.nro"
+echo "Copy to SD as: /switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
 echo "ROM fallback path: sdmc:/GBAStation/3ds/3Dlandchs.cci"
 echo "Boot markers: sdmc:/123/system/3ds/azahar_boot.txt and sdmc:/123/system/3ds/debug/startup.txt"

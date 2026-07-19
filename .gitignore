@@ -59,6 +59,7 @@ node_modules/
 VULKAN_SDK/
 .switchvk-sdk/
 dist-switch/
+/GBAStation3DSStub*.nro
 
 # Version info files
 GIT-COMMIT

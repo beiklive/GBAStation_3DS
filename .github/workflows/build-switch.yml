@@ -38,24 +38,10 @@ jobs:
         shell: bash
         run: bash build_switch_nro.sh clean release
 
-      - name: Collect release artifacts
-        shell: bash
-        run: |
-          mkdir -p dist-switch
-          cp azahar-switch.nro dist-switch/GBAStation3DSStub.nro
-          cp tico-azahar.nro dist-switch/tico-azahar.nro
-          cp build_switch/azahar-switch.debug.elf dist-switch/
-          cp build_switch/azahar-switch.map dist-switch/
-          cp build_switch/M6_LINK_AUDIT.txt dist-switch/
-          cp build_switch/SHA256SUMS dist-switch/
-          printf 'switchVK SDK archive SHA-256: %s\n' \
-            "${{ steps.switchvk.outputs.sdk_sha256 }}" \
-            > dist-switch/SWITCHVK-SDK.txt
-
       - name: Upload Nintendo Switch build
         uses: actions/upload-artifact@v4
         with:
           name: GBAStation-3DS-Switch-${{ github.sha }}
-          path: dist-switch/
+          path: GBAStation3DSStub.nro
           if-no-files-found: error
           retention-days: 30
