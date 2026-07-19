@@ -3,6 +3,12 @@
 doc-build/
 build-*/
 
+# zstd's upstream CMake project lives below a directory named "build".  It is
+# source code, not a generated GBAStation build directory.
+!externals/zstd/build/
+!externals/zstd/build/cmake/
+!externals/zstd/build/cmake/**
+
 # NSIS built executables
 src/installer/*.exe
 

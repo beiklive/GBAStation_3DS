@@ -283,7 +283,13 @@ if (ENABLE_NATIVE_OPTIMIZATION)
     endif()
 endif()
 
-# Sanity check : Check that all submodules are present
+# Sanity check: verify that all external source trees are present.
+#
+# GBAStation_3DS vendors these dependencies as ordinary source directories.
+# A fresh checkout therefore does not contain the per-directory .git files
+# left behind by the old submodule layout.  Checking for .git made local
+# Windows builds pass while clean Linux CI checkouts failed even though the
+# source itself was present.
 # =======================================================================
 
 function(check_submodules_present)
@@ -291,14 +297,13 @@ function(check_submodules_present)
     string(REGEX MATCHALL "path *= *[^ \t\r\n]*" gitmodules ${gitmodules})
     foreach(module ${gitmodules})
         string(REGEX REPLACE "path *= *" "" module ${module})
-        if (NOT EXISTS "${PROJECT_SOURCE_DIR}/${module}/.git")
-            message(SEND_ERROR "Git submodule ${module} not found.\n"
-                    "Please run: git submodule update --init --recursive")
+        if (NOT IS_DIRECTORY "${PROJECT_SOURCE_DIR}/${module}")
+            message(SEND_ERROR "External source tree ${module} not found.\n"
+                    "Please use a complete GBAStation_3DS source checkout.")
         endif()
     endforeach()
 endfunction()
-if (EXISTS "${PROJECT_SOURCE_DIR}/.git/objects")
-    # only check submodules when source is obtained via Git
+if (EXISTS "${PROJECT_SOURCE_DIR}/.gitmodules")
     check_submodules_present()
 endif()
 

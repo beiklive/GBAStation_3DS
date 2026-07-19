@@ -20,11 +20,10 @@ jobs:
       image: devkitpro/devkita64:latest
 
     steps:
-      - name: Check out GBAStation_3DS and submodules
+      - name: Check out GBAStation_3DS source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
 
       - name: Fetch pinned private switchVK SDK
         id: switchvk

@@ -2,3 +2,7 @@ dist/languages/* linguist-vendored
 dist/qt_themes/* linguist-vendored
 externals/* linguist-vendored
 *.h linguist-language=cpp
+
+# Shell entrypoints run inside Linux CI even when the repository is prepared
+# on Windows.  Keep them executable by bash after a clean checkout/archive.
+*.sh text eol=lf
