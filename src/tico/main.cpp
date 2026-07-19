@@ -1,0 +1,1082 @@
+// Copyright Citra Emulator Project / Azahar Emulator Project
+// Licensed under GPLv2 or any later version
+// Refer to the license.txt file included.
+
+#include "tico/switch_libnx.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <csignal>
+#include <cstdarg>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <fcntl.h>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "audio_core/input_details.h"
+#include "audio_core/sink_details.h"
+#include "tico/emu_window_switch.h"
+#include "tico/overlay/tico_config.h"
+#include "tico/switch_keyboard.h"
+#include "common/file_util.h"
+#include "common/logging/backend.h"
+#include "common/param_package.h"
+#include "common/settings.h"
+#include "common/string_util.h"
+#include "common/thread.h"
+#include "core/core.h"
+#include "core/frontend/applets/default_applets.h"
+#include "core/frontend/image_interface.h"
+#include "core/hle/service/cfg/cfg.h"
+#include "core/hle/service/service.h"
+#include "input_common/main.h"
+#include "input_common/switch_hid.h"
+#include "video_core/gpu.h"
+#include "video_core/renderer_base.h"
+
+extern "C" {
+u32 __nx_applet_type = AppletType_Application;
+size_t __nx_heap_size = 0;
+u32 __nx_exception_ignoredebug = 1;
+alignas(16) u8 __nx_exception_stack[0x10000];
+u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+}
+
+extern "C" {
+extern const u8 __tdata_lma[];
+extern const u8 __tdata_lma_end[];
+extern u8 __tls_start[];
+extern u8 __tls_end[];
+extern size_t __tls_align;
+}
+
+namespace {
+
+constexpr const char* SystemDir = "sdmc:/123/system/3ds";
+constexpr const char* DebugDir = "sdmc:/123/system/3ds/debug";
+constexpr const char* BootMarkerPath = "sdmc:/123/system/3ds/azahar_boot.txt";
+constexpr const char* StartupLogPath = "sdmc:/123/system/3ds/debug/startup.txt";
+constexpr const char* DebugLogPath = "sdmc:/123/system/3ds/debug/azahar_switch.txt";
+constexpr const char* StdoutLogPath = "sdmc:/123/system/3ds/debug/stdout.txt";
+constexpr const char* StderrLogPath = "sdmc:/123/system/3ds/debug/stderr.txt";
+constexpr const char* FallbackRomPath = "sdmc:/GBAStation/3ds/3Dlandchs.cci";
+constexpr const char* MemMapLogPath = "sdmc:/123/system/3ds/debug/memmap.txt";
+constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
+#if defined(TICO_SWITCH_DIAGNOSTIC_LOGS)
+constexpr bool DiagnosticLogsEnabled = true;
+#else
+constexpr bool DiagnosticLogsEnabled = false;
+#endif
+// Keep memory-map dumping separate because it is substantially heavier than boot logging.
+constexpr bool EnableStartupLogFile = DiagnosticLogsEnabled;
+constexpr bool EnableStdStreamLogs = DiagnosticLogsEnabled;
+constexpr bool EnableMemMapLogFile = false;
+constexpr bool EnableSwitchDebugLogFile = DiagnosticLogsEnabled;
+constexpr bool EnableCommonLogFile = DiagnosticLogsEnabled;
+constexpr bool EnableBootMarkerFile = DiagnosticLogsEnabled;
+FILE* startup_log{};
+FILE* debug_log{};
+bool raw_marker_enabled = true;
+PadState pad{};
+
+void EnsureSystemDirs() {
+    mkdir("sdmc:/tico", 0777);
+    mkdir("sdmc:/tico/system", 0777);
+    mkdir(SystemDir, 0777);
+}
+
+void WriteRawBootMarker(const char* message) {
+    if (!EnableBootMarkerFile) {
+        return;
+    }
+
+    EnsureSystemDirs();
+    const int fd = open(BootMarkerPath, O_CREAT | O_WRONLY | O_APPEND, 0666);
+    if (fd < 0) {
+        return;
+    }
+
+    write(fd, message, std::strlen(message));
+    write(fd, "\n", 1);
+    close(fd);
+}
+
+
+void LogTlsLayoutEarly(const char* tag) {
+    const auto tls_size = static_cast<unsigned long long>(__tls_end - __tls_start);
+    const auto tdata_size = static_cast<unsigned long long>(__tdata_lma_end - __tdata_lma);
+    char buffer[256];
+    std::snprintf(buffer, sizeof(buffer),
+                  "%s: tls_start=%p tls_end=%p tls_size=0x%llx tdata_size=0x%llx align=%zu",
+                  tag, __tls_start, __tls_end, tls_size, tdata_size, __tls_align);
+    WriteRawBootMarker(buffer);
+}
+
+void WriteRawBootMarkerV(const char* prefix, const char* fmt, std::va_list args) {
+    char buffer[1024];
+    const int prefix_len = std::snprintf(buffer, sizeof(buffer), "%s", prefix);
+    if (prefix_len < 0 || static_cast<std::size_t>(prefix_len) >= sizeof(buffer)) {
+        return;
+    }
+
+    const int body_len = std::vsnprintf(buffer + prefix_len, sizeof(buffer) - prefix_len, fmt, args);
+    if (body_len < 0) {
+        return;
+    }
+
+    const std::size_t used = std::min(sizeof(buffer) - 1,
+                                      static_cast<std::size_t>(prefix_len) +
+                                          static_cast<std::size_t>(body_len));
+    buffer[used] = 0;
+    WriteRawBootMarker(buffer);
+}
+
+void EnsureDebugDirs() {
+    EnsureSystemDirs();
+    mkdir(DebugDir, 0777);
+}
+
+void WriteLogLine(FILE* file, const char* prefix, const char* fmt, std::va_list args) {
+    if (!file) {
+        return;
+    }
+
+    std::fprintf(file, "%s", prefix);
+    std::vfprintf(file, fmt, args);
+    std::fprintf(file, "\n");
+    std::fflush(file);
+}
+
+void OpenStartupLogIfNeeded(const char* mode = "a") {
+    if (!EnableStartupLogFile) {
+        return;
+    }
+    if (startup_log) {
+        return;
+    }
+
+    WriteRawBootMarker("OpenStartupLogIfNeeded: entry");
+    EnsureDebugDirs();
+    startup_log = std::fopen(StartupLogPath, mode);
+    if (startup_log) {
+        std::setvbuf(startup_log, nullptr, _IONBF, 0);
+        std::fprintf(startup_log, "=== Azahar Switch startup log open (%s) ===\n", mode);
+        std::fflush(startup_log);
+        WriteRawBootMarker("OpenStartupLogIfNeeded: startup.txt opened");
+    } else {
+        WriteRawBootMarker("OpenStartupLogIfNeeded: startup.txt fopen failed");
+    }
+}
+
+void StartupLog(const char* fmt, ...) {
+    std::va_list args;
+    va_start(args, fmt);
+    if (startup_log) {
+        std::va_list startup_args;
+        va_copy(startup_args, args);
+        WriteLogLine(startup_log, "[startup] ", fmt, startup_args);
+        va_end(startup_args);
+    }
+    std::va_list raw_args;
+    va_copy(raw_args, args);
+    WriteRawBootMarkerV("[startup] ", fmt, raw_args);
+    va_end(raw_args);
+    va_end(args);
+}
+
+void CloseStartupLog() {
+    if (startup_log) {
+        std::fprintf(startup_log, "=== Azahar Switch startup log close ===\n");
+        std::fflush(startup_log);
+        std::fclose(startup_log);
+        startup_log = nullptr;
+    }
+}
+
+void DebugOpen() {
+    OpenStartupLogIfNeeded("a");
+    if (!EnableSwitchDebugLogFile) {
+        StartupLog("DebugOpen: %s disabled", DebugLogPath);
+        return;
+    }
+
+    StartupLog("DebugOpen: opening %s", DebugLogPath);
+    EnsureDebugDirs();
+    debug_log = std::fopen(DebugLogPath, "w");
+    if (debug_log) {
+        std::setvbuf(debug_log, nullptr, _IONBF, 0);
+        std::fprintf(debug_log, "=== Azahar Switch standalone start ===\n");
+    } else {
+        StartupLog("DebugOpen: failed to open %s", DebugLogPath);
+    }
+}
+
+void DebugClose() {
+    StartupLog("DebugClose");
+    if (debug_log) {
+        std::fprintf(debug_log, "=== Azahar Switch standalone end ===\n");
+        std::fclose(debug_log);
+        debug_log = nullptr;
+    }
+}
+
+void DebugLog(const char* fmt, ...) {
+    std::va_list args;
+    va_start(args, fmt);
+    if (debug_log) {
+        std::va_list debug_args;
+        va_copy(debug_args, args);
+        WriteLogLine(debug_log, "[azahar-switch] ", fmt, debug_args);
+        va_end(debug_args);
+    }
+    if (startup_log) {
+        std::va_list startup_args;
+        va_copy(startup_args, args);
+        WriteLogLine(startup_log, "[azahar-switch] ", fmt, startup_args);
+        va_end(startup_args);
+    }
+    if (raw_marker_enabled) {
+        std::va_list raw_args;
+        va_copy(raw_args, args);
+        WriteRawBootMarkerV("[azahar-switch] ", fmt, raw_args);
+        va_end(raw_args);
+    }
+    va_end(args);
+}
+
+bool QueueLauncherReturn() {
+    if (!envHasNextLoad()) {
+        StartupLog("QueueLauncherReturn: loader does not support envSetNextLoad");
+        return false;
+    }
+
+    const char* target = nullptr;
+    struct stat st {};
+    if (stat(LauncherPath, &st) == 0) {
+        target = LauncherPath;
+    }
+
+    if (!target) {
+        StartupLog("QueueLauncherReturn: no launcher found at %s", LauncherPath);
+        return false;
+    }
+
+    char args[512];
+    std::snprintf(args, sizeof(args), "%s --resume", target);
+    const LibnxResult rc = envSetNextLoad(target, args);
+    StartupLog("QueueLauncherReturn: envSetNextLoad target=%s args=%s rc=0x%x", target, args,
+               rc);
+    return rc == 0;
+}
+
+const char* AppletMessageName(u32 message) {
+    switch (message) {
+    case AppletMessage_ExitRequest:
+        return "ExitRequest";
+    case AppletMessage_FocusStateChanged:
+        return "FocusStateChanged";
+    case AppletMessage_Resume:
+        return "Resume";
+    case AppletMessage_OperationModeChanged:
+        return "OperationModeChanged";
+    case AppletMessage_PerformanceModeChanged:
+        return "PerformanceModeChanged";
+    case AppletMessage_RequestToDisplay:
+        return "RequestToDisplay";
+    case AppletMessage_CaptureButtonShortPressed:
+        return "CaptureButtonShortPressed";
+    case AppletMessage_AlbumScreenShotTaken:
+        return "AlbumScreenShotTaken";
+    case AppletMessage_AlbumRecordingSaved:
+        return "AlbumRecordingSaved";
+    default:
+        return "Unknown";
+    }
+}
+
+bool PumpAppletMessages() {
+    u32 message = 0;
+    const LibnxResult rc = appletGetMessage(&message);
+    if (rc != 0) {
+        return true;
+    }
+
+    DebugLog("applet message: %u (%s)", message, AppletMessageName(message));
+    const bool keep_running = appletProcessMessage(message);
+    if (!keep_running) {
+        DebugLog("applet message requested exit: %u (%s)", message, AppletMessageName(message));
+    }
+    return keep_running;
+}
+
+const char* MemTypeName(u32 type) {
+    switch (type & 0xFF) {
+    case MemType_Unmapped:            return "Unmapped";
+    case MemType_Io:                  return "Io";
+    case MemType_Normal:              return "Normal";
+    case MemType_CodeStatic:          return "CodeStatic";
+    case MemType_CodeMutable:         return "CodeMutable";
+    case MemType_Heap:                return "Heap";
+    case MemType_SharedMem:           return "SharedMem";
+    case MemType_WeirdMappedMem:      return "WeirdMapped";
+    case MemType_ModuleCodeStatic:    return "ModCodeStatic";
+    case MemType_ModuleCodeMutable:   return "ModCodeMutable";
+    case MemType_IpcBuffer0:          return "IpcBuffer0";
+    case MemType_MappedMemory:        return "MappedMemory";
+    case MemType_ThreadLocal:         return "ThreadLocal";
+    case MemType_TransferMemIsolated: return "TransferMemIso";
+    case MemType_TransferMem:         return "TransferMem";
+    case MemType_ProcessMem:          return "ProcessMem";
+    case MemType_Reserved:            return "Reserved";
+    case MemType_IpcBuffer1:          return "IpcBuffer1";
+    case MemType_IpcBuffer3:          return "IpcBuffer3";
+    case MemType_KernelStack:         return "KernelStack";
+    case MemType_CodeReadOnly:        return "CodeReadOnly";
+    case MemType_CodeWritable:        return "CodeWritable";
+    default:                          return "Unknown";
+    }
+}
+
+// After the NRO returns, hbl unmaps our segments and reloads hbmenu into the same
+// heap. Any page still Borrowed / IPC-mapped / device-mapped / transfer-mem /
+// svcMapMemory'd (leaked thread stack) at that point makes hbl's next kernel memory
+// operation fail with 0xD401 (InvalidCurrentMemory) and abort. Dump the address
+// space so the subsystem that leaked the mapping can be identified from SD logs.
+void DumpMemoryMap(const char* phase) {
+    if (!EnableMemMapLogFile) {
+        return;
+    }
+
+    static bool first_dump = true;
+    FILE* map_file = std::fopen(MemMapLogPath, first_dump ? "w" : "a");
+    first_dump = false;
+
+    u64 region_count = 0;
+    u64 suspect_count = 0;
+    u64 suspect_bytes = 0;
+    MemoryInfo info{};
+    u32 page_info = 0;
+    u64 addr = 0;
+    for (;;) {
+        if (R_FAILED(svcQueryMemory(&info, &page_info, addr))) {
+            break;
+        }
+        const u32 mem_type = info.type & 0xFF;
+        if (mem_type != MemType_Unmapped && mem_type != MemType_Reserved) {
+            region_count++;
+            const bool suspect =
+                info.attr != 0 || info.ipc_refcount != 0 || info.device_refcount != 0 ||
+                mem_type == MemType_MappedMemory || mem_type == MemType_WeirdMappedMem ||
+                mem_type == MemType_TransferMem || mem_type == MemType_TransferMemIsolated ||
+                mem_type == MemType_IpcBuffer0 || mem_type == MemType_IpcBuffer1 ||
+                mem_type == MemType_IpcBuffer3 || mem_type == MemType_CodeReadOnly ||
+                mem_type == MemType_CodeWritable;
+            if (suspect) {
+                suspect_count++;
+                suspect_bytes += info.size;
+            }
+            if (map_file) {
+                std::fprintf(map_file,
+                             "[%s] 0x%010llx-0x%010llx %-14s perm=%c%c%c attr=0x%x ipc=%u dev=%u%s\n",
+                             phase, static_cast<unsigned long long>(info.addr),
+                             static_cast<unsigned long long>(info.addr + info.size),
+                             MemTypeName(mem_type), (info.perm & Perm_R) ? 'r' : '-',
+                             (info.perm & Perm_W) ? 'w' : '-', (info.perm & Perm_X) ? 'x' : '-',
+                             static_cast<unsigned>(info.attr), static_cast<unsigned>(info.ipc_refcount),
+                             static_cast<unsigned>(info.device_refcount),
+                             suspect ? "  <-- SUSPECT" : "");
+            }
+        }
+        const u64 next = info.addr + info.size;
+        if (next <= addr) { // wrapped past the end of the address space
+            break;
+        }
+        addr = next;
+    }
+    if (map_file) {
+        std::fflush(map_file);
+        std::fclose(map_file);
+    }
+
+    char summary[192];
+    std::snprintf(summary, sizeof(summary),
+                  "memmap[%s]: regions=%llu suspects=%llu suspect_bytes=0x%llx", phase,
+                  static_cast<unsigned long long>(region_count),
+                  static_cast<unsigned long long>(suspect_count),
+                  static_cast<unsigned long long>(suspect_bytes));
+    WriteRawBootMarker(summary);
+}
+
+void PinCurrentThreadToCore(s32 core, const char* tag) {
+    if (core < 0) {
+        core = 0;
+    }
+    if (core > 2) {
+        core = 2;
+    }
+
+    const u32 mask = 1u << static_cast<u32>(core);
+    const LibnxResult set_rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, mask);
+    s32 preferred_core = -1;
+    u64 affinity_mask = 0;
+    const LibnxResult get_rc = svcGetThreadCoreMask(&preferred_core, &affinity_mask,
+                                                    CUR_THREAD_HANDLE);
+    DebugLog("thread affinity %s: set core=%d mask=0x%x rc=0x%x get_rc=0x%x preferred=%d affinity=0x%llx",
+             tag, core, mask, set_rc, get_rc, preferred_core,
+             static_cast<unsigned long long>(affinity_mask));
+}
+
+class ThreadCoreMaskGuard {
+public:
+    ThreadCoreMaskGuard() {
+        const LibnxResult rc =
+            svcGetThreadCoreMask(&original_preferred_core, &original_affinity_mask,
+                                 CUR_THREAD_HANDLE);
+        restore_available = rc == 0;
+        DebugLog("thread affinity capture: rc=0x%x preferred=%d affinity=0x%llx", rc,
+                 original_preferred_core,
+                 static_cast<unsigned long long>(original_affinity_mask));
+    }
+
+    ~ThreadCoreMaskGuard() {
+        Restore("destructor");
+    }
+
+    void Restore(const char* tag) {
+        if (!restore_available || restored) {
+            return;
+        }
+
+        // Chainloaded NROs run on hbloader's same process/thread context. Do not hand Tico
+        // a single-core affinity inherited from this core or from Tico's own launch path.
+        const LibnxResult app_core_rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 0x7);
+        restored = app_core_rc == 0;
+        if (!restored) {
+            const LibnxResult fallback_rc = svcSetThreadCoreMask(
+                CUR_THREAD_HANDLE, original_preferred_core, original_affinity_mask);
+            restored = fallback_rc == 0;
+            DebugLog("thread affinity restore %s: app_core_rc=0x%x fallback preferred=%d "
+                     "affinity=0x%llx fallback_rc=0x%x",
+                     tag, app_core_rc, original_preferred_core,
+                     static_cast<unsigned long long>(original_affinity_mask), fallback_rc);
+            return;
+        }
+
+        DebugLog("thread affinity restore %s: preferred=0 affinity=0x7 rc=0x%x", tag,
+                 app_core_rc);
+    }
+
+private:
+    s32 original_preferred_core = -1;
+    u64 original_affinity_mask = 0;
+    bool restore_available = false;
+    bool restored = false;
+};
+
+void InstallFatalHandlers() {
+    StartupLog("InstallFatalHandlers");
+    std::set_terminate([] {
+        DebugLog("std::terminate called");
+        StartupLog("std::terminate called");
+        std::abort();
+    });
+
+    auto signal_handler = [](int sig) {
+        DebugLog("fatal signal %d", sig);
+        StartupLog("fatal signal %d", sig);
+        _Exit(128 + sig);
+    };
+    std::signal(SIGABRT, signal_handler);
+    std::signal(SIGBUS, signal_handler);
+    std::signal(SIGFPE, signal_handler);
+    std::signal(SIGILL, signal_handler);
+    std::signal(SIGSEGV, signal_handler);
+}
+
+const char* ResultStatusName(Core::System::ResultStatus status) {
+    switch (status) {
+    case Core::System::ResultStatus::Success:
+        return "Success";
+    case Core::System::ResultStatus::ErrorNotInitialized:
+        return "ErrorNotInitialized";
+    case Core::System::ResultStatus::ErrorGetLoader:
+        return "ErrorGetLoader";
+    case Core::System::ResultStatus::ErrorSystemMode:
+        return "ErrorSystemMode";
+    case Core::System::ResultStatus::ErrorLoader:
+        return "ErrorLoader";
+    case Core::System::ResultStatus::ErrorLoader_ErrorEncrypted:
+        return "ErrorLoader_ErrorEncrypted";
+    case Core::System::ResultStatus::ErrorLoader_ErrorInvalidFormat:
+        return "ErrorLoader_ErrorInvalidFormat";
+    case Core::System::ResultStatus::ErrorLoader_ErrorGbaTitle:
+        return "ErrorLoader_ErrorGbaTitle";
+    case Core::System::ResultStatus::ErrorSystemFiles:
+        return "ErrorSystemFiles";
+    case Core::System::ResultStatus::ErrorSavestate:
+        return "ErrorSavestate";
+    case Core::System::ResultStatus::ErrorArticDisconnected:
+        return "ErrorArticDisconnected";
+    case Core::System::ResultStatus::ErrorN3DSApplication:
+        return "ErrorN3DSApplication";
+    case Core::System::ResultStatus::ShutdownRequested:
+        return "ShutdownRequested";
+    case Core::System::ResultStatus::ErrorUnknown:
+        return "ErrorUnknown";
+    }
+    return "Unknown";
+}
+
+std::string GetRomPath(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i] || std::strcmp(argv[i], "ticoSetup") == 0) {
+            continue;
+        }
+        StartupLog("GetRomPath: using argv[%d]=%s", i, argv[i]);
+        return argv[i];
+    }
+
+    StartupLog("GetRomPath: no argv ROM, using fallback %s", FallbackRomPath);
+    return FallbackRomPath;
+}
+
+void ConfigureSettings() {
+    Settings::RestoreGlobalState(false);
+    Settings::values.use_cpu_jit.SetValue(true);
+    Settings::values.cpu_clock_percentage.SetValue(100);
+    Settings::values.is_new_3ds.SetValue(true);
+    Settings::values.enable_required_online_lle_modules.SetValue(false);
+    Settings::values.delay_start_for_lle_modules.SetValue(false);
+    Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::Vulkan);
+    Settings::values.physical_device.SetValue(0);
+    Settings::values.use_gles.SetValue(false);
+    Settings::values.renderer_debug.SetValue(false);
+    Settings::values.dump_command_buffers.SetValue(false);
+    Settings::values.async_shader_compilation.SetValue(true);
+    Settings::values.async_presentation.SetValue(true);
+    Settings::values.spirv_shader_gen.SetValue(true);
+    Settings::values.disable_spirv_optimizer.SetValue(true);
+    Settings::values.use_hw_shader.SetValue(true);
+    Settings::values.disable_right_eye_render.SetValue(true);
+    Settings::values.use_disk_shader_cache.SetValue(true);
+    Settings::values.use_shader_jit.SetValue(true);
+    Settings::values.resolution_factor.SetValue(1);
+    Settings::values.use_vsync.SetValue(true);
+    Settings::values.frame_limit.SetValue(100.0);
+    Settings::values.layout_option.SetValue(Settings::LayoutOption::Default);
+    Settings::values.audio_emulation.SetValue(Settings::AudioEmulation::HLE);
+    Settings::values.enable_audio_stretching.SetValue(false);
+    Settings::values.enable_realtime_audio.SetValue(true);
+    Settings::values.output_type.SetValue(AudioCore::SinkType::Auto);
+    Settings::values.input_type.SetValue(AudioCore::InputType::Null);
+
+    auto& profile = Settings::values.current_input_profile;
+    const auto MakeButton = [](u64 mask) {
+        Common::ParamPackage pkg;
+        pkg.Set("engine", "switch_hid");
+        pkg.Set("button", static_cast<int>(mask));
+        return pkg.Serialize();
+    };
+    profile.buttons[Settings::NativeButton::A]      = MakeButton(HidNpadButton_A);
+    profile.buttons[Settings::NativeButton::B]      = MakeButton(HidNpadButton_B);
+    profile.buttons[Settings::NativeButton::X]      = MakeButton(HidNpadButton_X);
+    profile.buttons[Settings::NativeButton::Y]      = MakeButton(HidNpadButton_Y);
+    profile.buttons[Settings::NativeButton::Up]     = MakeButton(HidNpadButton_Up);
+    profile.buttons[Settings::NativeButton::Down]   = MakeButton(HidNpadButton_Down);
+    profile.buttons[Settings::NativeButton::Left]   = MakeButton(HidNpadButton_Left);
+    profile.buttons[Settings::NativeButton::Right]  = MakeButton(HidNpadButton_Right);
+    profile.buttons[Settings::NativeButton::L]      = MakeButton(HidNpadButton_L);
+    profile.buttons[Settings::NativeButton::R]      = MakeButton(HidNpadButton_R);
+    profile.buttons[Settings::NativeButton::Start]  = MakeButton(HidNpadButton_Plus);
+    profile.buttons[Settings::NativeButton::Select] = MakeButton(HidNpadButton_Minus);
+    profile.buttons[Settings::NativeButton::ZL]     = MakeButton(HidNpadButton_ZL);
+    profile.buttons[Settings::NativeButton::ZR]     = MakeButton(HidNpadButton_ZR);
+
+    const auto MakeAnalog = [](int axis) {
+        Common::ParamPackage pkg;
+        pkg.Set("engine", "switch_hid_analog");
+        pkg.Set("axis", axis);
+        return pkg.Serialize();
+    };
+    profile.analogs[Settings::NativeAnalog::CirclePad] = MakeAnalog(0);
+    profile.analogs[Settings::NativeAnalog::CStick]    = MakeAnalog(1);
+    profile.motion_device = "engine:switch_hid_motion,sensitivity:1.25";
+    profile.touch_device = "engine:emu_window";
+    profile.controller_touch_device.clear();
+    profile.use_touchpad = false;
+    profile.use_touch_from_button = false;
+    profile.touch_from_button_map_index = 0;
+
+    DebugLog("switch settings: cpu_jit=%d cpu_clock=%d new3ds=%d vulkan=%d hw_shader=%d shader_jit=%d async_shader=%d async_present=%d disk_cache=%d audio_hle=%d audio_stretch=%d realtime_audio=%d res=%u",
+             Settings::values.use_cpu_jit.GetValue() ? 1 : 0,
+             Settings::values.cpu_clock_percentage.GetValue(),
+             Settings::values.is_new_3ds.GetValue() ? 1 : 0,
+             Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Vulkan ? 1 : 0,
+             Settings::values.use_hw_shader.GetValue() ? 1 : 0,
+             Settings::values.use_shader_jit.GetValue() ? 1 : 0,
+             Settings::values.async_shader_compilation.GetValue() ? 1 : 0,
+             Settings::values.async_presentation.GetValue() ? 1 : 0,
+             Settings::values.use_disk_shader_cache.GetValue() ? 1 : 0,
+             Settings::values.audio_emulation.GetValue() == Settings::AudioEmulation::HLE ? 1 : 0,
+             Settings::values.enable_audio_stretching.GetValue() ? 1 : 0,
+             Settings::values.enable_realtime_audio.GetValue() ? 1 : 0,
+             Settings::values.resolution_factor.GetValue());
+
+    for (const auto& service_module : Service::service_module_map) {
+        Settings::values.lle_modules.emplace(service_module.name, false);
+    }
+}
+
+bool ExitComboPressed() {
+    static bool was_down = false;
+    const u64 buttons = padGetButtons(&pad);
+    const bool down = (buttons & HidNpadButton_ZL) && (buttons & HidNpadButton_ZR);
+    const bool triggered = down && !was_down;
+    was_down = down;
+    return triggered;
+}
+
+std::string LowerCopy(std::string_view value) {
+    std::string out(value);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+bool TryParseSystemLanguage(std::string_view value, Service::CFG::SystemLanguage& language) {
+    const std::string lower = LowerCopy(value);
+    if (lower == "japanese" || lower == "jp" || lower == "ja" || lower == "0") {
+        language = Service::CFG::LANGUAGE_JP;
+        return true;
+    }
+    if (lower == "english" || lower == "en" || lower == "1") {
+        language = Service::CFG::LANGUAGE_EN;
+        return true;
+    }
+    if (lower == "french" || lower == "fr" || lower == "2") {
+        language = Service::CFG::LANGUAGE_FR;
+        return true;
+    }
+    if (lower == "german" || lower == "de" || lower == "3") {
+        language = Service::CFG::LANGUAGE_DE;
+        return true;
+    }
+    if (lower == "italian" || lower == "it" || lower == "4") {
+        language = Service::CFG::LANGUAGE_IT;
+        return true;
+    }
+    if (lower == "spanish" || lower == "es" || lower == "5") {
+        language = Service::CFG::LANGUAGE_ES;
+        return true;
+    }
+    if (lower == "simplified chinese" || lower == "simplified_chinese" || lower == "zh" ||
+        lower == "zh-cn" || lower == "6") {
+        language = Service::CFG::LANGUAGE_ZH;
+        return true;
+    }
+    if (lower == "korean" || lower == "ko" || lower == "kr" || lower == "7") {
+        language = Service::CFG::LANGUAGE_KO;
+        return true;
+    }
+    if (lower == "dutch" || lower == "nl" || lower == "8") {
+        language = Service::CFG::LANGUAGE_NL;
+        return true;
+    }
+    if (lower == "portuguese" || lower == "pt" || lower == "9") {
+        language = Service::CFG::LANGUAGE_PT;
+        return true;
+    }
+    if (lower == "russian" || lower == "ru" || lower == "10") {
+        language = Service::CFG::LANGUAGE_RU;
+        return true;
+    }
+    if (lower == "traditional chinese" || lower == "traditional_chinese" || lower == "tw" ||
+        lower == "zh-tw" || lower == "11") {
+        language = Service::CFG::LANGUAGE_TW;
+        return true;
+    }
+    return false;
+}
+
+void ApplyConfiguredSystemLanguage(Core::System& system) {
+    const std::string language_value = SwitchFrontend::TicoConfig::GetConfiguredSystemLanguage();
+    if (language_value.empty()) {
+        return;
+    }
+
+    Service::CFG::SystemLanguage language = Service::CFG::LANGUAGE_EN;
+    if (!TryParseSystemLanguage(language_value, language)) {
+        DebugLog("invalid configured 3ds language: %s", language_value.c_str());
+        return;
+    }
+
+    auto cfg = Service::CFG::GetModule(system);
+    cfg->SetSystemLanguage(language);
+    const Result rc = cfg->UpdateConfigNANDSavegame();
+    DebugLog("configured 3ds language: %s (%u) rc=0x%x", language_value.c_str(),
+             static_cast<unsigned>(language), rc.raw);
+}
+
+void ApplyConfiguredUsername(Core::System& system) {
+    std::string username = SwitchFrontend::TicoConfig::GetConfiguredUsername();
+    if (username.empty()) {
+        return;
+    }
+
+    std::u16string username_utf16 = Common::UTF8ToUTF16(username);
+    if (username_utf16.empty()) {
+        return;
+    }
+    if (username_utf16.size() > 10) {
+        username_utf16.resize(10);
+        username = Common::UTF16ToUTF8(username_utf16);
+    }
+
+    auto cfg = Service::CFG::GetModule(system);
+    cfg->SetUsername(username_utf16);
+    const Result rc = cfg->UpdateConfigNANDSavegame();
+    DebugLog("configured 3ds username: %s rc=0x%x", username.c_str(), rc.raw);
+}
+
+int Run(int argc, char** argv) {
+#if defined(TICO_SWITCH_DIAGNOSTIC_LOGS)
+    // Raw NVK normally submits asynchronously.  Near the known scene-change
+    // fault, serialize individual submits so the backend captures the exact
+    // faulting pushbuffer rather than a later submit observing channel reset.
+    setenv("NVK_SWITCH_DIAGNOSTIC_SYNC_AFTER", "9000", 1);
+    // A/B test the raw backend completion fence.  The normal sequence waits
+    // for ROP writes before signaling; this diagnostic sequence explicitly
+    // idles both graphics and compute first so resources cannot be reclaimed
+    // while either engine still references them.
+    setenv("NVK_SWITCH_DIAGNOSTIC_FULL_IDLE_COMPLETION", "1", 1);
+    // The scene-change fault is now isolated to one 0x235c-byte graphics
+    // push.  Split that push after its existing WAIT_FOR_IDLE packets and
+    // check the channel after each segment to locate the first bad draw.
+    setenv("NVK_SWITCH_DIAGNOSTIC_SPLIT_EXEC_BYTES", "0x235c", 1);
+    // Segments 0-10 pass; the fault is inside the final 0x8cf..0x8d7 tail.
+    // Split every packet in that tail to distinguish MME accounting from the
+    // compute QMD launch and its wait.
+    setenv("NVK_SWITCH_DIAGNOSTIC_FINE_SPLIT_FROM_DW", "0x8cf", 1);
+#endif
+    OpenStartupLogIfNeeded("a");
+    StartupLog("Run: entry argc=%d", argc);
+    StartupLog("Run: appletLockExit");
+    const LibnxResult lock_exit_rc = appletLockExit();
+    StartupLog("Run: appletLockExit rc=0x%x", lock_exit_rc);
+    DebugOpen();
+    InstallFatalHandlers();
+    ThreadCoreMaskGuard thread_core_guard;
+
+    DebugLog("argc=%d", argc);
+    for (int i = 0; i < argc; i++) {
+        DebugLog("argv[%d]=%s", i, argv[i] ? argv[i] : "(null)");
+    }
+
+    StartupLog("Run: parsing ROM path");
+    const std::string rom_path = GetRomPath(argc, argv);
+    if (rom_path.empty()) {
+        DebugLog("no ROM path supplied");
+        thread_core_guard.Restore("no-rom");
+        DebugClose();
+        const bool queued_launcher_return = QueueLauncherReturn();
+        appletUnlockExit();
+        return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+    StartupLog("Run: romfsInit");
+    const LibnxResult romfs_result = romfsInit();
+    const bool romfs_initialized = romfs_result == 0;
+    DebugLog("romfsInit=0x%x", romfs_result);
+
+    StartupLog("Run: pin main thread affinity");
+    PinCurrentThreadToCore(2, "main");
+
+    StartupLog("Run: pad init");
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&pad);
+
+    StartupLog("Run: InputCommon::Init");
+    InputCommon::Init();
+
+    StartupLog("Run: ConfigureSettings");
+    ConfigureSettings();
+    SwitchFrontend::TicoConfig::ReloadConfig();
+    SwitchFrontend::TicoConfig::ApplyConfig();
+    // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
+    // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
+    // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
+    // though the emulated system and renderer are still advancing.
+    Settings::values.use_skip_duplicate_frames.SetValue(false);
+    DebugLog("tico config applied: path=%s options=%zu upscale=%s effective_res=%u skip_duplicate=%d",
+             SwitchFrontend::TicoConfig::GetLoadedConfigPath().c_str(),
+             SwitchFrontend::TicoConfig::GetLoadedOptionCount(),
+             SwitchFrontend::TicoConfig::GetConfigValue("upscale", "default").c_str(),
+             Settings::values.resolution_factor.GetValue(),
+             Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0);
+    StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
+    FileUtil::SetUserPath(std::string{SystemDir} + "/");
+    StartupLog("Run: Common::Log init");
+    bool common_log_started = false;
+    if (EnableCommonLogFile) {
+        Common::Log::Initialize("azahar_common.txt");
+        Common::Log::Start();
+        common_log_started = true;
+    } else {
+        StartupLog("Run: Common::Log disabled");
+    }
+
+    StartupLog("Run: Core::System::GetInstance");
+    auto& system = Core::System::GetInstance();
+    StartupLog("Run: frontend applets/image interface");
+    system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
+    Frontend::RegisterDefaultApplets(system);
+    system.RegisterSoftwareKeyboard(std::make_shared<SwitchFrontend::SwitchKeyboard>());
+
+    StartupLog("Run: creating NWindow frontend");
+    SwitchFrontend::EmuWindowSwitch window{nwindowGetDefault()};
+    DebugLog("loading ROM: %s", rom_path.c_str());
+    const Core::System::ResultStatus load_result = system.Load(window, rom_path);
+    if (load_result != Core::System::ResultStatus::Success) {
+        DebugLog("load failed: %s (%u)", ResultStatusName(load_result),
+                 static_cast<unsigned>(load_result));
+        if (common_log_started) {
+            Common::Log::Stop();
+            common_log_started = false;
+        }
+        if (romfs_initialized) {
+            romfsExit();
+        }
+        thread_core_guard.Restore("load-failed");
+        DebugClose();
+        const bool queued_launcher_return = QueueLauncherReturn();
+        appletUnlockExit();
+        return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    ApplyConfiguredSystemLanguage(system);
+    ApplyConfiguredUsername(system);
+    DebugLog("renderer resolution scale factor=%u",
+             system.GPU().Renderer().GetResolutionScaleFactor());
+
+    StartupLog("Run: ApplySettings");
+    system.ApplySettings();
+
+    DebugLog("startup keepalive armed");
+
+    DebugLog("entering main loop");
+    raw_marker_enabled = false;
+
+    using Clock = std::chrono::steady_clock;
+    auto last_keepalive = Clock::now();
+    u64 loop_count = 0;
+    u64 keepalive_count = 0;
+    bool applet_loop_active = true;
+    const s32 initial_renderer_frame = system.GPU().Renderer().GetCurrentFrame();
+    bool saw_guest_frame = initial_renderer_frame > 0;
+    s32 last_logged_frame = initial_renderer_frame;
+    auto last_heartbeat = Clock::now();
+    u64 last_heartbeat_loop_count = loop_count;
+    s32 last_heartbeat_frame = last_logged_frame;
+    const char* exit_reason = "loop condition ended";
+    while (true) {
+        const auto now = Clock::now();
+        applet_loop_active = PumpAppletMessages();
+        if (!applet_loop_active) {
+            exit_reason = "applet message requested exit";
+            DebugLog("main loop exit: applet message requested exit after %llu iterations",
+                     static_cast<unsigned long long>(loop_count));
+            break;
+        }
+        if (!system.IsPoweredOn()) {
+            exit_reason = "system powered off before RunLoop";
+            DebugLog("main loop exit: system powered off before RunLoop after %llu iterations",
+                     static_cast<unsigned long long>(loop_count));
+            break;
+        }
+
+        auto& renderer = system.GPU().Renderer();
+
+        if (!saw_guest_frame && now - last_keepalive >= std::chrono::seconds(2)) {
+            keepalive_count++;
+            DebugLog("startup keepalive present #%llu: renderer_frame=%d",
+                     static_cast<unsigned long long>(keepalive_count), renderer.GetCurrentFrame());
+            renderer.TryPresent(0);
+            DebugLog("startup keepalive present #%llu complete",
+                     static_cast<unsigned long long>(keepalive_count));
+            last_keepalive = now;
+        }
+
+        window.PollEvents();
+        InputCommon::SwitchHID::Update();
+        padUpdate(&pad);
+
+        if (ExitComboPressed()) {
+            exit_reason = "ZL+ZR requested exit";
+            DebugLog("exit combo pressed: ZL+ZR after %llu iterations",
+                     static_cast<unsigned long long>(loop_count));
+            Common::RequestFastShutdown();
+            break;
+        }
+
+        const Core::System::ResultStatus run_result = system.RunLoop();
+        loop_count++;
+        const s32 renderer_frame =
+            system.IsPoweredOn() ? system.GPU().Renderer().GetCurrentFrame() : last_logged_frame;
+        if (!saw_guest_frame && renderer_frame > 0) {
+            saw_guest_frame = true;
+            DebugLog("first guest frame reached: renderer_frame=%d keepalives=%llu", renderer_frame,
+                     static_cast<unsigned long long>(keepalive_count));
+        }
+        if (renderer_frame != last_logged_frame) {
+            last_logged_frame = renderer_frame;
+        }
+        if (now - last_heartbeat >= std::chrono::seconds(1)) {
+            const auto heartbeat_elapsed = std::chrono::duration<double>(now - last_heartbeat).count();
+            const u64 loop_delta = loop_count - last_heartbeat_loop_count;
+            const s32 frame_delta = renderer_frame - last_heartbeat_frame;
+            const auto stats = system.GetAndResetPerfStats();
+            DebugLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f powered=%d applet=%d keepalives=%llu",
+                     static_cast<unsigned long long>(loop_count),
+                     heartbeat_elapsed > 0.0 ? static_cast<double>(loop_delta) / heartbeat_elapsed : 0.0,
+                     renderer_frame, frame_delta,
+                     heartbeat_elapsed > 0.0 ? static_cast<double>(frame_delta) / heartbeat_elapsed : 0.0,
+                     stats.system_fps, stats.game_fps, stats.emulation_speed,
+                     system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
+                     static_cast<unsigned long long>(keepalive_count));
+            last_heartbeat = now;
+            last_heartbeat_loop_count = loop_count;
+            last_heartbeat_frame = renderer_frame;
+        }
+        if (run_result == Core::System::ResultStatus::ShutdownRequested) {
+            exit_reason = "RunLoop returned ShutdownRequested";
+            DebugLog("core requested shutdown after %llu iterations",
+                     static_cast<unsigned long long>(loop_count));
+            break;
+        }
+        if (run_result == Core::System::ResultStatus::ErrorSavestate) {
+            const std::string details = system.GetStatusDetails();
+            DebugLog("savestate operation failed after %llu iterations: %s",
+                     static_cast<unsigned long long>(loop_count),
+                     details.empty() ? "unknown error" : details.c_str());
+            continue;
+        }
+        if (run_result != Core::System::ResultStatus::Success) {
+            exit_reason = "RunLoop returned error";
+            DebugLog("run loop failed after %llu iterations: %s (%u)",
+                     static_cast<unsigned long long>(loop_count), ResultStatusName(run_result),
+                     static_cast<unsigned>(run_result));
+            break;
+        }
+    }
+
+    DebugLog("shutting down: reason=%s powered=%d applet=%d iterations=%llu", exit_reason,
+             system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
+             static_cast<unsigned long long>(loop_count));
+    const auto shutdown_started = Clock::now();
+    if (system.IsPoweredOn()) {
+        DebugLog("shutdown step: system.Shutdown begin");
+        const auto step_started = Clock::now();
+        system.Shutdown();
+        DebugLog("shutdown step: system.Shutdown done (%lld ms)",
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            Clock::now() - step_started)
+                                            .count()));
+    }
+    DebugLog("shutdown step: InputCommon::Shutdown begin");
+    InputCommon::Shutdown();
+    DebugLog("shutdown step: InputCommon::Shutdown done");
+    DebugLog("shutdown step: Common::Log::Stop begin");
+    if (common_log_started) {
+        Common::Log::Stop();
+        common_log_started = false;
+    }
+    DebugLog("shutdown step: Common::Log::Stop done");
+    if (romfs_initialized) {
+        DebugLog("shutdown step: romfsExit begin");
+        romfsExit();
+        DebugLog("shutdown step: romfsExit done");
+    }
+    thread_core_guard.Restore("normal-shutdown");
+    DebugLog("shutdown total before launcher: %lld ms",
+             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        Clock::now() - shutdown_started)
+                                        .count()));
+    DebugLog("shutdown step: DebugClose begin");
+    DebugClose();
+    const bool queued_launcher_return = QueueLauncherReturn();
+    DumpMemoryMap("after-shutdown");
+    StartupLog("Run: appletUnlockExit begin");
+    const LibnxResult unlock_exit_rc = appletUnlockExit();
+    StartupLog("Run: appletUnlockExit rc=0x%x", unlock_exit_rc);
+    return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+} // namespace
+
+extern "C" void userAppInit() {
+    WriteRawBootMarker("userAppInit: entry");
+    LogTlsLayoutEarly("userAppInit TLS");
+    OpenStartupLogIfNeeded("w");
+    StartupLog("userAppInit: begin");
+    if (EnableStdStreamLogs) {
+        std::freopen(StdoutLogPath, "w", stdout);
+        std::freopen(StderrLogPath, "w", stderr);
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        std::setvbuf(stderr, nullptr, _IONBF, 0);
+    }
+    setenv("HOME", SystemDir, 1);
+    StartupLog("userAppInit: stdout/stderr logs %s HOME=%s",
+               EnableStdStreamLogs ? "enabled" : "disabled", SystemDir);
+}
+
+extern "C" void userAppExit() {
+    WriteRawBootMarker("userAppExit: entry");
+    // Runs after C++ static destructors — the closest observable state to what hbl
+    // inherits. Anything still flagged SUSPECT here is what kills hbl with 0xD401.
+    DumpMemoryMap("static-dtors-done");
+    StartupLog("userAppExit");
+    CloseStartupLog();
+}
+
+extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    WriteRawBootMarker("__libnx_exception_handler: entry");
+    OpenStartupLogIfNeeded("a");
+    StartupLog("module anchor: exception_handler=%p",
+               reinterpret_cast<void*>(&__libnx_exception_handler));
+    if (ctx) {
+        StartupLog("libnx exception: desc=0x%08x pc=0x%016llx lr=0x%016llx sp=0x%016llx far=0x%016llx esr=0x%08x",
+                   static_cast<unsigned>(ctx->error_desc),
+                   static_cast<unsigned long long>(ctx->pc.x),
+                   static_cast<unsigned long long>(ctx->lr.x),
+                   static_cast<unsigned long long>(ctx->sp.x),
+                   static_cast<unsigned long long>(ctx->far.x), static_cast<unsigned>(ctx->esr));
+        StartupLog("libnx exception: x0=0x%016llx x1=0x%016llx x2=0x%016llx x3=0x%016llx",
+                   static_cast<unsigned long long>(ctx->cpu_gprs[0].x),
+                   static_cast<unsigned long long>(ctx->cpu_gprs[1].x),
+                   static_cast<unsigned long long>(ctx->cpu_gprs[2].x),
+                   static_cast<unsigned long long>(ctx->cpu_gprs[3].x));
+        StartupLog("libnx exception: x4=0x%016llx x5=0x%016llx x6=0x%016llx x7=0x%016llx",
+                   static_cast<unsigned long long>(ctx->cpu_gprs[4].x),
+                   static_cast<unsigned long long>(ctx->cpu_gprs[5].x),
+                   static_cast<unsigned long long>(ctx->cpu_gprs[6].x),
+                   static_cast<unsigned long long>(ctx->cpu_gprs[7].x));
+    } else {
+        StartupLog("libnx exception: null context");
+    }
+}
+
+int main(int argc, char** argv) {
+    WriteRawBootMarker("main: entry");
+    OpenStartupLogIfNeeded("a");
+    StartupLog("main: entry argc=%d", argc);
+    const int result = Run(argc, argv);
+    StartupLog("main: exit result=%d", result);
+    return result;
+}

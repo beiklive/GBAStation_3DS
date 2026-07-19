@@ -1,0 +1,5 @@
+Upstream: https://github.com/azahar-emu/dynarmic.git
+Vendored commit: 526227eebe1efff3fb14dbf494b9c5b44c2e9c1f
+
+The Dynarmic source is tracked directly by the parent tico-azahar repository.
+Its third-party dependencies under externals/ remain registered submodules.

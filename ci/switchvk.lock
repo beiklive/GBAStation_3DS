@@ -1,0 +1,12 @@
+# shellcheck shell=bash
+# Private switchVK SDK selected by GBAStation_3DS.
+SWITCHVK_REPOSITORY="beiklive/switchVK"
+SWITCHVK_TAG="switchvk-mesa-25.3.6-r1"
+SWITCHVK_ASSET="switchVK-switchvk-mesa-25.3.6-r1.tar.xz"
+SWITCHVK_CHECKSUM_ASSET="switchVK-switchvk-mesa-25.3.6-r1.tar.xz.sha256"
+SWITCHVK_ROOT_DIRECTORY="nvk-switch-25.3.6"
+
+# After the first trusted r1 release, paste its 64-character SHA-256 here for
+# an independent immutable pin. While empty, fetch-switchvk.sh obtains the
+# checksum sidecar from the same authenticated private Release.
+SWITCHVK_SHA256=""
