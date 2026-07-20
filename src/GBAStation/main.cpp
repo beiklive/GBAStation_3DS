@@ -919,6 +919,8 @@ int Run(int argc, char** argv) {
                 std::clamp(parsed, 0.1f, 5.0f);
         }
     }
+    Settings::values.resolution_factor.SetValue(
+        static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
@@ -977,6 +979,8 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: ApplySettings");
     system.ApplySettings();
+    SwitchFrontend::GameDatabase::UpdatePlayStats(
+        launch_options.rom_path, launch_options.title, true, 0);
 
     using SlotStateCache =
         std::array<std::atomic_bool, SwitchFrontend::OverlayUI::StateSlotCount + 1>;
@@ -1013,6 +1017,7 @@ int Run(int argc, char** argv) {
     raw_marker_enabled = false;
 
     using Clock = std::chrono::steady_clock;
+    auto play_stats_checkpoint = Clock::now();
     auto last_keepalive = Clock::now();
     u64 loop_count = 0;
     u64 keepalive_count = 0;
@@ -1033,6 +1038,7 @@ int Run(int argc, char** argv) {
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
     bool last_fast_forward_active = false;
+    const bool normal_vsync = Settings::values.use_vsync.GetValue();
     const char* exit_reason = "loop condition ended";
     while (true) {
         const auto now = Clock::now();
@@ -1088,6 +1094,10 @@ int Run(int argc, char** argv) {
         Settings::temporary_frame_limit =
             fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
         if (fast_forward_active != last_fast_forward_active) {
+            Settings::values.use_vsync.SetValue(fast_forward_active ? false : normal_vsync);
+            SwitchFrontend::VulkanOverlay::SetFastForwardActive(fast_forward_active);
+            static_cast<Vulkan::RendererVulkan&>(renderer).SetFastForward(
+                fast_forward_active, fast_forward_multiplier);
             DebugLog("fast forward %s multiplier=%.2f limit=%.1f",
                      fast_forward_active ? "on" : "off", fast_forward_multiplier,
                      Settings::temporary_frame_limit);
@@ -1156,6 +1166,12 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::DisplaySettingsChanged) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            if (Settings::values.resolution_factor.GetValue() !=
+                static_cast<u32>(display.internal_resolution)) {
+                Settings::values.resolution_factor.SetValue(
+                    static_cast<u16>(display.internal_resolution));
+                system.ApplySettings();
+            }
             window.SetDisplaySettings(display);
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
@@ -1268,6 +1284,14 @@ int Run(int argc, char** argv) {
             last_heartbeat_loop_count = loop_count;
             last_heartbeat_frame = renderer_frame;
         }
+        const auto unflushed_play_time =
+            std::chrono::duration_cast<std::chrono::seconds>(now - play_stats_checkpoint).count();
+        if (unflushed_play_time >= 30 && SwitchFrontend::GameDatabase::UpdatePlayStats(
+                                                  launch_options.rom_path,
+                                                  launch_options.title, false,
+                                                  static_cast<int>(unflushed_play_time))) {
+            play_stats_checkpoint += std::chrono::seconds(unflushed_play_time);
+        }
         if (run_result == Core::System::ResultStatus::ShutdownRequested) {
             exit_reason = "RunLoop returned ShutdownRequested";
             DebugLog("core requested shutdown after %llu iterations",
@@ -1296,6 +1320,16 @@ int Run(int argc, char** argv) {
     DebugLog("shutting down: reason=%s powered=%d applet=%d iterations=%llu", exit_reason,
              system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
              static_cast<unsigned long long>(loop_count));
+    const auto remaining_play_time = std::chrono::duration_cast<std::chrono::seconds>(
+                                         Clock::now() - play_stats_checkpoint)
+                                         .count();
+    if (remaining_play_time > 0) {
+        SwitchFrontend::GameDatabase::UpdatePlayStats(
+            launch_options.rom_path, launch_options.title, false,
+            static_cast<int>(remaining_play_time));
+    }
+    Settings::values.use_vsync.SetValue(normal_vsync);
+    SwitchFrontend::VulkanOverlay::SetFastForwardActive(false);
     Settings::ResetTemporaryFrameLimit();
     const auto shutdown_started = Clock::now();
     if (menu_initialized) {

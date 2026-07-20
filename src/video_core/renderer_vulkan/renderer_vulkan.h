@@ -87,6 +87,9 @@ public:
     // The Switch menu uses this to keep navigation responsive while emulation is paused.
     void PresentLastFrame();
 
+    // Reduces presentation work while the frontend runs the core above real time.
+    void SetFastForward(bool enabled, float multiplier);
+
     [[nodiscard]] const Instance& GetVulkanInstance() const noexcept {
         return instance;
     }
@@ -169,6 +172,9 @@ private:
     bool isSecondaryWindow;
     bool secondaryWindowEnabled;
     bool screenRendered;
+    bool fast_forward_enabled{};
+    u32 fast_forward_present_divisor{1};
+    u32 fast_forward_present_counter{};
 };
 
 } // namespace Vulkan

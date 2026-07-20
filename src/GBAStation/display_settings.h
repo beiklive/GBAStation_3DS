@@ -9,6 +9,7 @@ namespace SwitchFrontend {
 
 struct GBAStationDisplaySettings {
     float fast_forward_multiplier{4.0f};
+    int internal_resolution{1};
     std::string screen_layout{"priority_top"};
     int screen_orientation{};
     bool integer_scale{true};

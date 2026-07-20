@@ -64,15 +64,28 @@ Common::Rectangle<u32> PlaceCustomScreen(float framebuffer_width, float framebuf
                                          float native_width, float native_height, float scale,
                                          float center_x, float center_y, float offset_x,
                                          float offset_y) {
-    const float maximum_scale = std::min(framebuffer_width / native_width,
-                                         framebuffer_height / native_height);
-    scale = std::clamp(scale, 0.01f, maximum_scale);
+    scale = std::clamp(scale, 1.0f, 10.0f);
     const float screen_width = native_width * scale;
     const float screen_height = native_height * scale;
+    constexpr float movement_margin = 64.0f;
+    if (screen_width + movement_margin * 2.0f <= framebuffer_width) {
+        center_x = std::clamp(center_x, screen_width * 0.5f + movement_margin,
+                              framebuffer_width - screen_width * 0.5f - movement_margin);
+    } else if (screen_width <= framebuffer_width) {
+        center_x = framebuffer_width * 0.5f;
+    }
+    if (screen_height + movement_margin * 2.0f <= framebuffer_height) {
+        center_y = std::clamp(center_y, screen_height * 0.5f + movement_margin,
+                              framebuffer_height - screen_height * 0.5f - movement_margin);
+    } else if (screen_height <= framebuffer_height) {
+        center_y = framebuffer_height * 0.5f;
+    }
     float left = center_x - screen_width * 0.5f + offset_x;
     float top = center_y - screen_height * 0.5f + offset_y;
-    left = std::clamp(left, 0.0f, std::max(0.0f, framebuffer_width - screen_width));
-    top = std::clamp(top, 0.0f, std::max(0.0f, framebuffer_height - screen_height));
+    // Framebuffer rectangles may extend past the right/bottom edge and are clipped by the
+    // presenter. Keeping the requested position is what makes offsets useful at large scales.
+    left = std::max(0.0f, left);
+    top = std::max(0.0f, top);
     const u32 x = static_cast<u32>(std::round(left));
     const u32 y = static_cast<u32>(std::round(top));
     const u32 right = static_cast<u32>(std::round(left + screen_width));
@@ -142,14 +155,22 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
                                            Core::kScreenBottomHeight, settings.integer_scale);
         layout.top_screen_enabled = false;
     } else if (settings.screen_layout == "custom") {
-        const float top_center_y = h * 0.25f - gap * 0.5f;
-        const float bottom_center_y = h * 0.75f + gap * 0.5f;
+        // Match nds_stub's custom canvas: both screens share the vertical center and use
+        // independent offsets, with the large screen on the left and small screen on the right.
+        const bool portrait_canvas = h > w;
+        const float top_center_x = portrait_canvas ? w * 0.5f : w * (352.0f / 1280.0f);
+        const float bottom_center_x = portrait_canvas ? w * 0.5f : w * (928.0f / 1280.0f);
+        const float top_center_y = portrait_canvas ? h * 0.5f - Core::kScreenTopHeight * 0.5f
+                                                   : h * 0.5f;
+        const float bottom_center_y =
+            portrait_canvas ? h * 0.5f + Core::kScreenBottomHeight * 0.5f : h * 0.5f;
         layout.top_screen = PlaceCustomScreen(
-            w, h, Core::kScreenTopWidth, Core::kScreenTopHeight, settings.top_scale, w * 0.5f,
-            top_center_y, settings.top_offset_x, settings.top_offset_y);
+            w, h, Core::kScreenTopWidth, Core::kScreenTopHeight, settings.top_scale,
+            top_center_x, top_center_y, settings.top_offset_x, settings.top_offset_y);
         layout.bottom_screen = PlaceCustomScreen(
             w, h, Core::kScreenBottomWidth, Core::kScreenBottomHeight, settings.bottom_scale,
-            w * 0.5f, bottom_center_y, settings.bottom_offset_x, settings.bottom_offset_y);
+            bottom_center_x, bottom_center_y, settings.bottom_offset_x,
+            settings.bottom_offset_y);
     } else {
         const float small_width = std::max(1.0f, (w - positive_gap) / 3.0f);
         const Region top{0.0f, 0.0f, w - small_width - positive_gap, h};

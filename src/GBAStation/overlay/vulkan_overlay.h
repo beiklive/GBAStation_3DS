@@ -27,6 +27,7 @@ int ConsumeAction();
 
 void SetDisplaySettings(const GBAStationDisplaySettings& settings);
 GBAStationDisplaySettings GetDisplaySettings();
+void SetFastForwardActive(bool active);
 
 void Shutdown();
 

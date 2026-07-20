@@ -7,6 +7,8 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <ctime>
 #include <cmath>
 #include <filesystem>
 #include <mutex>
@@ -29,7 +31,7 @@ namespace {
 
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
-constexpr int DisplayControlCount = 7;
+constexpr int DisplayControlCount = 8;
 constexpr int CustomLayoutControlCount = 6;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
@@ -46,6 +48,7 @@ std::atomic_bool initialized{};
 std::atomic_bool visible{};
 std::atomic_bool exit_requested{};
 std::atomic_bool content_focused{};
+std::atomic_bool fast_forward_active{};
 std::atomic_int pending_action{};
 std::atomic_int selected_item{};
 std::atomic_int content_focus{};
@@ -53,6 +56,7 @@ std::atomic_bool custom_layout_sidebar{};
 std::atomic_int custom_layout_focus{};
 std::atomic_int display_layout{2};
 std::atomic_int display_orientation{};
+std::atomic_int display_internal_resolution{1};
 std::atomic<float> fast_forward_multiplier{4.0f};
 std::atomic_bool display_integer_scale{true};
 std::atomic_int display_gap{};
@@ -67,11 +71,13 @@ std::atomic_bool overlay_sidebar{};
 std::atomic_int overlay_focus{};
 std::atomic_bool file_picker{};
 std::atomic_int file_picker_focus{};
+std::atomic_bool file_preview{};
 
 std::mutex display_data_mutex;
 std::string display_overlay_path;
 std::string file_picker_path{OverlayRoot};
 std::vector<VulkanMenuRenderer::FileEntry> file_entries;
+std::string file_preview_path;
 
 bool previous_combo{};
 vk::Device device;
@@ -117,7 +123,7 @@ bool CustomLayoutEnabled() {
 int NextDisplayFocus(int focus, int direction) {
     for (int i = 0; i < DisplayControlCount; ++i) {
         focus = (focus + direction + DisplayControlCount) % DisplayControlCount;
-        if (focus != 3 || CustomLayoutEnabled()) {
+        if (focus != 4 || CustomLayoutEnabled()) {
             return focus;
         }
     }
@@ -163,7 +169,22 @@ bool EndsWithPng(const std::string& value) {
     return suffix == ".png";
 }
 
-void ReloadFilePicker(const std::string& requested_path) {
+std::string FormatFileTime(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto file_time = std::filesystem::last_write_time(path, ec);
+    if (ec) return {};
+    const auto system_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        file_time - std::filesystem::file_time_type::clock::now() +
+        std::chrono::system_clock::now());
+    const std::time_t value = std::chrono::system_clock::to_time_t(system_time);
+    const std::tm* local = std::localtime(&value);
+    if (!local) return {};
+    char text[32]{};
+    std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M", local);
+    return text;
+}
+
+void ReloadFilePicker(const std::string& requested_path, const std::string& focus_path = {}) {
     namespace fs = std::filesystem;
     std::error_code ec;
     fs::path directory = requested_path.empty() ? fs::path{OverlayRoot} : fs::path{requested_path};
@@ -173,24 +194,48 @@ void ReloadFilePicker(const std::string& requested_path) {
     fs::create_directories(fs::path{OverlayRoot}, ec);
 
     std::vector<VulkanMenuRenderer::FileEntry> next;
+    if (directory.has_parent_path()) {
+        next.push_back({"..", directory.parent_path().string(), {}, 0, true});
+    }
+    std::vector<VulkanMenuRenderer::FileEntry> directories;
+    std::vector<VulkanMenuRenderer::FileEntry> files;
     for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec)) {
         const bool is_directory = it->is_directory(ec);
         const std::string path = it->path().string();
         if (!is_directory && !EndsWithPng(path)) {
             continue;
         }
-        next.push_back({it->path().filename().string(), path, is_directory});
-    }
-    std::sort(next.begin(), next.end(), [](const auto& left_entry, const auto& right_entry) {
-        if (left_entry.directory != right_entry.directory) {
-            return left_entry.directory > right_entry.directory;
+        VulkanMenuRenderer::FileEntry entry{
+            it->path().filename().string(), path, FormatFileTime(it->path()), 0, is_directory,
+        };
+        if (!is_directory) {
+            entry.size = static_cast<u64>(it->file_size(ec));
         }
+        (is_directory ? directories : files).push_back(std::move(entry));
+    }
+    const auto sort_entries = [](const auto& left_entry, const auto& right_entry) {
         return left_entry.name < right_entry.name;
-    });
+    };
+    std::sort(directories.begin(), directories.end(), sort_entries);
+    std::sort(files.begin(), files.end(), sort_entries);
+    next.insert(next.end(), directories.begin(), directories.end());
+    next.insert(next.end(), files.begin(), files.end());
+    int next_focus = 0;
+    if (!focus_path.empty()) {
+        const std::string normalized = fs::path{focus_path}.lexically_normal().string();
+        for (int i = 0; i < static_cast<int>(next.size()); ++i) {
+            if (fs::path{next[i].path}.lexically_normal().string() == normalized) {
+                next_focus = i;
+                break;
+            }
+        }
+    }
     std::lock_guard lock{display_data_mutex};
     file_picker_path = directory.string();
     file_entries = std::move(next);
-    file_picker_focus.store(0, std::memory_order_release);
+    file_preview_path.clear();
+    file_preview.store(false, std::memory_order_release);
+    file_picker_focus.store(next_focus, std::memory_order_release);
 }
 
 int UpdateHeldAdjustment(bool active, bool decrease, bool increase) {
@@ -249,6 +294,7 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     }
     VulkanMenuRenderer::State state{};
     state.menu_visible = visible.load(std::memory_order_acquire);
+    state.fast_forward_active = fast_forward_active.load(std::memory_order_acquire);
     state.item = static_cast<VulkanMenuRenderer::Item>(std::clamp(
         selected_item.load(std::memory_order_relaxed), 0, MenuItemCount - 1));
     state.content_focused = content_focused.load(std::memory_order_relaxed);
@@ -259,17 +305,20 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     state.overlay_focus = overlay_focus.load(std::memory_order_relaxed);
     state.file_picker = file_picker.load(std::memory_order_relaxed);
     state.file_picker_focus = file_picker_focus.load(std::memory_order_relaxed);
+    state.file_preview = file_preview.load(std::memory_order_relaxed);
     {
         std::lock_guard lock{display_data_mutex};
         state.file_picker_path = file_picker_path;
         state.file_entries = file_entries;
+        state.file_preview_path = file_preview_path;
     }
     state.toast = OverlayUI::GetToast();
     for (int slot = 0; slot < static_cast<int>(state.occupied.size()); ++slot) {
         state.occupied[slot] = OverlayUI::IsSlotOccupied(slot + 1);
     }
     state.display = GetDisplaySettings();
-    if (!state.menu_visible && !state.display.overlay_enabled && state.toast.empty()) {
+    if (!state.menu_visible && !state.fast_forward_active &&
+        !state.display.overlay_enabled && state.toast.empty()) {
         return;
     }
     VulkanMenuRenderer::Draw(command_buffer, image, extent, format, state);
@@ -299,21 +348,28 @@ void HandleDisplayAdjustment(int row, int direction) {
         return;
     }
     case 1:
+        display_internal_resolution.store(
+            (display_internal_resolution.load(std::memory_order_relaxed) + direction - 1 + 4) %
+                    4 +
+                1,
+            std::memory_order_release);
+        break;
+    case 2:
         display_integer_scale.store(!display_integer_scale.load(std::memory_order_relaxed),
                                     std::memory_order_release);
         break;
-    case 2:
+    case 3:
         display_layout.store((display_layout.load(std::memory_order_relaxed) + direction +
                               static_cast<int>(LayoutIds.size())) %
                                  static_cast<int>(LayoutIds.size()),
                              std::memory_order_release);
         break;
-    case 4:
+    case 5:
         display_orientation.store(
             (display_orientation.load(std::memory_order_relaxed) + direction + 4) % 4,
             std::memory_order_release);
         break;
-    case 5:
+    case 6:
         display_gap.store(std::clamp(display_gap.load(std::memory_order_relaxed) + direction,
                                      -256, 256),
                           std::memory_order_release);
@@ -404,6 +460,7 @@ bool Init(Vulkan::RendererVulkan& renderer) {
     overlay_focus.store(0);
     file_picker.store(false);
     file_picker_focus.store(0);
+    file_preview.store(false);
     previous_combo = false;
     previous_navigation = {};
     selector_repeat_start = 0;
@@ -450,6 +507,7 @@ void Update(PadState* pad) {
             overlay_sidebar.store(false, std::memory_order_release);
             overlay_focus.store(0, std::memory_order_release);
             file_picker.store(false, std::memory_order_release);
+            file_preview.store(false, std::memory_order_release);
         }
     }
     previous_combo = combo;
@@ -464,9 +522,22 @@ void Update(PadState* pad) {
     const bool shoulder_right = (held & HidNpadButton_R) != 0;
     const bool accept = (held & HidNpadButton_A) != 0;
     const bool cancel = (held & HidNpadButton_B) != 0;
+    const bool preview_pressed = (padGetButtonsDown(pad) & HidNpadButton_X) != 0;
 
     if (visible.load(std::memory_order_acquire)) {
         if (file_picker.load(std::memory_order_acquire)) {
+            if (file_preview.load(std::memory_order_acquire)) {
+                if ((accept && !previous_navigation.accept) ||
+                    (cancel && !previous_navigation.cancel)) {
+                    AudioCore::PlayLibnxUiSound(cancel ? AudioCore::LibnxUiSound::Back
+                                                       : AudioCore::LibnxUiSound::Click);
+                    file_preview.store(false, std::memory_order_release);
+                    std::lock_guard lock{display_data_mutex};
+                    file_preview_path.clear();
+                }
+                previous_navigation = {up, down, left, right, accept, cancel};
+                return;
+            }
             const int repeated_navigation = UpdateHeldNavigation(up, down);
             int focus = file_picker_focus.load(std::memory_order_relaxed);
             std::vector<VulkanMenuRenderer::FileEntry> entries;
@@ -477,10 +548,10 @@ void Update(PadState* pad) {
             const int count = static_cast<int>(entries.size());
             const int previous_focus = focus;
             if (count > 0 && ((up && !previous_navigation.up) || repeated_navigation < 0)) {
-                focus = (focus - 1 + count) % count;
+                focus = std::max(0, focus - 1);
             }
             if (count > 0 && ((down && !previous_navigation.down) || repeated_navigation > 0)) {
-                focus = (focus + 1) % count;
+                focus = std::min(count - 1, focus + 1);
             }
             file_picker_focus.store(focus, std::memory_order_release);
             if (focus != previous_focus) {
@@ -489,6 +560,7 @@ void Update(PadState* pad) {
             if (cancel && !previous_navigation.cancel) {
                 AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Back);
                 file_picker.store(false, std::memory_order_release);
+                file_preview.store(false, std::memory_order_release);
                 overlay_sidebar.store(true, std::memory_order_release);
                 navigation_repeat_direction = 0;
             } else if (accept && !previous_navigation.accept && count > 0) {
@@ -506,6 +578,18 @@ void Update(PadState* pad) {
                     file_picker.store(false, std::memory_order_release);
                     overlay_sidebar.store(true, std::memory_order_release);
                     PublishAction(OverlayUI::Action::OverlaySettingsChanged, false);
+                }
+            } else if (preview_pressed && count > 0) {
+                const auto entry = entries[std::clamp(focus, 0, count - 1)];
+                if (!entry.directory && EndsWithPng(entry.path)) {
+                    {
+                        std::lock_guard lock{display_data_mutex};
+                        file_preview_path = entry.path;
+                    }
+                    file_preview.store(true, std::memory_order_release);
+                    AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
+                } else {
+                    AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
                 }
             }
             previous_navigation = {up, down, left, right, accept, cancel};
@@ -536,14 +620,16 @@ void Update(PadState* pad) {
                     HandleOverlayToggle();
                 } else {
                     std::string start_path;
+                    std::string selected_path;
                     {
                         std::lock_guard lock{display_data_mutex};
-                        start_path = display_overlay_path;
+                        selected_path = display_overlay_path;
+                        start_path = selected_path;
                     }
                     if (!start_path.empty()) {
                         start_path = std::filesystem::path{start_path}.parent_path().string();
                     }
-                    ReloadFilePicker(start_path);
+                    ReloadFilePicker(start_path, selected_path);
                     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
                     overlay_sidebar.store(false, std::memory_order_release);
                     file_picker.store(true, std::memory_order_release);
@@ -674,9 +760,9 @@ void Update(PadState* pad) {
                         OverlayUI::ShowToast("该存档位为空");
                     }
                 } else if (item == VulkanMenuRenderer::Item::Display) {
-                    if (focus == 1) {
+                    if (focus == 2) {
                         HandleDisplayAdjustment(focus, 1);
-                    } else if (focus == 3) {
+                    } else if (focus == 4) {
                         if (CustomLayoutEnabled()) {
                             AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
                             custom_layout_focus.store(0, std::memory_order_release);
@@ -685,9 +771,9 @@ void Update(PadState* pad) {
                         } else {
                             AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
                         }
-                    } else if (focus == 5) {
-                        ResetScreenGap();
                     } else if (focus == 6) {
+                        ResetScreenGap();
+                    } else if (focus == 7) {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
                         overlay_focus.store(0, std::memory_order_release);
                         overlay_sidebar.store(true, std::memory_order_release);
@@ -719,6 +805,8 @@ void SetDisplaySettings(const GBAStationDisplaySettings& settings) {
     fast_forward_multiplier.store(
         std::clamp(settings.fast_forward_multiplier, 0.1f, 5.0f),
         std::memory_order_release);
+    display_internal_resolution.store(std::clamp(settings.internal_resolution, 1, 4),
+                                      std::memory_order_release);
     display_layout.store(LayoutIndex(settings.screen_layout), std::memory_order_release);
     int orientation = 0;
     if (settings.screen_orientation == 90) orientation = 1;
@@ -750,6 +838,8 @@ GBAStationDisplaySettings GetDisplaySettings() {
     GBAStationDisplaySettings settings;
     settings.fast_forward_multiplier =
         fast_forward_multiplier.load(std::memory_order_acquire);
+    settings.internal_resolution =
+        display_internal_resolution.load(std::memory_order_acquire);
     settings.screen_layout = LayoutIds[std::clamp(display_layout.load(std::memory_order_acquire),
                                                   0, static_cast<int>(LayoutIds.size()) - 1)];
     constexpr std::array<int, 4> Orientations{{0, 90, 180, 270}};
@@ -771,6 +861,10 @@ GBAStationDisplaySettings GetDisplaySettings() {
     return settings;
 }
 
+void SetFastForwardActive(bool active) {
+    fast_forward_active.store(active, std::memory_order_release);
+}
+
 void Shutdown() {
     if (!initialized.exchange(false, std::memory_order_acq_rel)) {
         return;
@@ -783,11 +877,13 @@ void Shutdown() {
     VulkanMenuRenderer::Shutdown();
     device = VK_NULL_HANDLE;
     visible.store(false);
+    fast_forward_active.store(false);
     exit_requested.store(false);
     content_focused.store(false);
     custom_layout_sidebar.store(false);
     overlay_sidebar.store(false);
     file_picker.store(false);
+    file_preview.store(false);
     selector_repeat_direction = 0;
     navigation_repeat_direction = 0;
     pending_action.store(0);

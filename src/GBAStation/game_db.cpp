@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <ctime>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -57,6 +58,7 @@ GBAStationDisplaySettings ReadDisplaySettings(const nlohmann::json& item) {
         settings.screen_layout = layout;
     }
     settings.screen_orientation = ParseOrientation(item);
+    settings.internal_resolution = std::clamp(item.value("ndsInternalResolution", 1), 1, 4);
     settings.integer_scale = item.value("ndsIntegerScale", true);
     settings.screen_gap = std::clamp(item.value("ndsScreenGap", 0), -256, 256);
     settings.top_scale = std::clamp(item.value("ndsTopScale", 1.0f), 1.0f, 10.0f);
@@ -76,6 +78,7 @@ void WriteDisplaySettings(nlohmann::json& item, const GBAStationDisplaySettings&
     item["ndsScreenLayout"] = IsKnownLayout(settings.screen_layout) ? settings.screen_layout
                                                                     : "priority_top";
     item["ndsScreenOrientation"] = std::to_string(settings.screen_orientation);
+    item["ndsInternalResolution"] = std::clamp(settings.internal_resolution, 1, 4);
     item["ndsIntegerScale"] = settings.integer_scale;
     item["ndsScreenGap"] = std::clamp(settings.screen_gap, -256, 256);
     item["ndsTopScale"] = std::clamp(settings.top_scale, 1.0f, 10.0f);
@@ -133,6 +136,42 @@ bool WriteDatabase(const char* path, const nlohmann::json& data) {
     return true;
 }
 
+std::string CurrentTimestamp() {
+    const std::time_t now = std::time(nullptr);
+    const std::tm* local = std::localtime(&now);
+    if (!local) {
+        return {};
+    }
+    char text[32]{};
+    std::strftime(text, sizeof(text), "%y-%m-%d %H-%M-%S", local);
+    return text;
+}
+
+bool LoadWritableDatabase(nlohmann::json& data, const char*& target_path) {
+    data = nlohmann::json::array();
+    target_path = DatabasePaths.front();
+    for (const char* path : DatabasePaths) {
+        if (ReadDatabase(path, data)) {
+            target_path = path;
+            return true;
+        }
+    }
+    return false;
+}
+
+nlohmann::json& FindOrCreateRecord(nlohmann::json& data, const std::string& rom_path,
+                                   const std::string& title) {
+    const std::string normalized_rom = NormalizePath(rom_path);
+    for (auto& item : data) {
+        if (item.is_object() && NormalizePath(item.value("path", "")) == normalized_rom) {
+            if (!title.empty()) item["title"] = title;
+            return item;
+        }
+    }
+    data.push_back(nlohmann::json::object({{"path", rom_path}, {"title", title}}));
+    return data.back();
+}
+
 } // namespace
 
 GameRecord LoadGameRecord(const std::string& rom_path) {
@@ -160,34 +199,35 @@ GameRecord LoadGameRecord(const std::string& rom_path) {
 
 bool SaveDisplaySettings(const std::string& rom_path, const std::string& title,
                          const GBAStationDisplaySettings& settings) {
-    const std::string normalized_rom = NormalizePath(rom_path);
-    const char* target_path = DatabasePaths.front();
-    nlohmann::json data = nlohmann::json::array();
-    for (const char* path : DatabasePaths) {
-        if (ReadDatabase(path, data)) {
-            target_path = path;
-            break;
-        }
-    }
-
-    nlohmann::json* matched = nullptr;
-    for (auto& item : data) {
-        if (item.is_object() && NormalizePath(item.value("path", "")) == normalized_rom) {
-            matched = &item;
-            break;
-        }
-    }
-    if (!matched) {
-        data.push_back(nlohmann::json::object({{"path", rom_path}, {"title", title}}));
-        matched = &data.back();
-    }
-    if (!title.empty()) {
-        (*matched)["title"] = title;
-    }
-    WriteDisplaySettings(*matched, settings);
+    const char* target_path = nullptr;
+    nlohmann::json data;
+    LoadWritableDatabase(data, target_path);
+    auto& matched = FindOrCreateRecord(data, rom_path, title);
+    WriteDisplaySettings(matched, settings);
     const bool saved = WriteDatabase(target_path, data);
     LOG_INFO(Frontend, "3DS GameDB display settings save {} path={}", saved ? "ok" : "failed",
              target_path);
+    return saved;
+}
+
+bool UpdatePlayStats(const std::string& rom_path, const std::string& title,
+                     bool increment_count, int additional_seconds) {
+    const char* target_path = nullptr;
+    nlohmann::json data;
+    LoadWritableDatabase(data, target_path);
+    auto& item = FindOrCreateRecord(data, rom_path, title);
+    if (increment_count) {
+        item["playCount"] = std::max(0, item.value("playCount", 0)) + 1;
+        item["lastPlayed"] = CurrentTimestamp();
+    }
+    if (additional_seconds > 0) {
+        item["playTime"] = std::max(0, item.value("playTime", 0)) + additional_seconds;
+    }
+    const bool saved = WriteDatabase(target_path, data);
+    LOG_INFO(Frontend,
+             "3DS GameDB play stats save {} count_increment={} seconds={} path={}",
+             saved ? "ok" : "failed", increment_count ? 1 : 0,
+             std::max(0, additional_seconds), target_path);
     return saved;
 }
 

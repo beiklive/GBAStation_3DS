@@ -79,6 +79,7 @@ vk::DescriptorSetLayout descriptor_set_layout;
 vk::DescriptorPool descriptor_pool;
 vk::DescriptorSet descriptor_set;
 vk::DescriptorSet overlay_descriptor_set;
+vk::DescriptorSet preview_descriptor_set;
 vk::PipelineLayout pipeline_layout;
 vk::Pipeline pipeline;
 vk::RenderPass render_pass;
@@ -92,6 +93,8 @@ BufferResource gradient_staging;
 BufferResource vertex_buffer;
 ImageResource overlay_image;
 BufferResource overlay_staging;
+ImageResource preview_image;
+BufferResource preview_staging;
 std::unordered_map<VkImage, SwapResource> swap_resources;
 vk::Extent2D framebuffer_extent{};
 bool atlas_uploaded{};
@@ -101,6 +104,13 @@ u32 overlay_width{};
 u32 overlay_height{};
 u32 overlay_vertex_count{};
 std::string loaded_overlay_path;
+bool preview_uploaded{};
+bool preview_active{};
+u32 preview_width{};
+u32 preview_height{};
+u32 preview_vertex_first{};
+u32 preview_vertex_count{};
+std::string loaded_preview_path;
 bool initialized{};
 
 std::vector<u8> font_data;
@@ -123,6 +133,7 @@ constexpr std::array<int, static_cast<int>(Item::Count)> ItemIcons{{
 
 constexpr int NintendoIconA = 0xE0E0;
 constexpr int NintendoIconB = 0xE0E1;
+constexpr int NintendoIconX = 0xE0E2;
 constexpr int NintendoIconL = 0xE0E4;
 constexpr int NintendoIconR = 0xE0E5;
 
@@ -224,8 +235,8 @@ bool BuildFontAtlas() {
         "档位已有状态空存档槽继续按确定返回列表不可用"
         "暂无金手指功能将在后续版本提供屏幕布局画面方向整数倍缩放屏幕间距"
         "自定义画面布局调整当前项上屏布局下屏布局缩放偏移"
-        "基础画面设置布局设置个性化设置快进倍率遮罩选择遮罩开关遮罩文件"
-        "选择遮罩未选择文件夹图片列表目录暂无可用文件"
+        "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
+        "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
         "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
         "GBAStation 3DS Resume Save Load Cheats Display Reset Exit Slot Empty Occupied A B X";
@@ -238,11 +249,11 @@ bool BuildFontAtlas() {
     }
     std::vector<int> regular_codepoints(unique.begin(), unique.end());
     const std::vector<int> nintendo_codepoints{
-        NintendoIconA, NintendoIconB, NintendoIconL, NintendoIconR,
+        NintendoIconA, NintendoIconB, NintendoIconX, NintendoIconL, NintendoIconR,
     };
     const std::vector<int> material_codepoints{
         0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE5D5, 0xE879,
-        0xE01F, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
+        0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
         0xE5CC, 0xE2C7, 0xE873,
     };
     codepoints = regular_codepoints;
@@ -438,14 +449,15 @@ bool CreateDescriptors() {
     });
     const vk::DescriptorPoolSize pool_size{
         .type = vk::DescriptorType::eCombinedImageSampler,
-        .descriptorCount = 4,
+        .descriptorCount = 6,
     };
     descriptor_pool = device.createDescriptorPool({
-        .maxSets = 2,
+        .maxSets = 3,
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
     });
-    const std::array layouts{descriptor_set_layout, descriptor_set_layout};
+    const std::array layouts{descriptor_set_layout, descriptor_set_layout,
+                             descriptor_set_layout};
     const vk::DescriptorSetAllocateInfo allocate_info{
         .descriptorPool = descriptor_pool,
         .descriptorSetCount = static_cast<u32>(layouts.size()),
@@ -454,6 +466,7 @@ bool CreateDescriptors() {
     const auto sets = device.allocateDescriptorSets(allocate_info);
     descriptor_set = sets[0];
     overlay_descriptor_set = sets[1];
+    preview_descriptor_set = sets[2];
     const vk::SamplerCreateInfo font_sampler_info{
         .magFilter = vk::Filter::eLinear,
         .minFilter = vk::Filter::eLinear,
@@ -520,6 +533,24 @@ bool CreateDescriptors() {
         },
     };
     device.updateDescriptorSets(static_cast<u32>(overlay_writes.size()), overlay_writes.data(),
+                                0, nullptr);
+    const std::array preview_writes{
+        vk::WriteDescriptorSet{
+            .dstSet = preview_descriptor_set,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .pImageInfo = &image_infos[0],
+        },
+        vk::WriteDescriptorSet{
+            .dstSet = preview_descriptor_set,
+            .dstBinding = 1,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .pImageInfo = &image_infos[1],
+        },
+    };
+    device.updateDescriptorSets(static_cast<u32>(preview_writes.size()), preview_writes.data(),
                                 0, nullptr);
     const vk::PipelineLayoutCreateInfo layout_info{
         .setLayoutCount = 1,
@@ -798,6 +829,74 @@ bool EnsureOverlayTexture(const State& state) {
     return true;
 }
 
+bool EnsurePreviewTexture(const State& state) {
+    if (!state.file_preview || state.file_preview_path.empty()) {
+        preview_active = false;
+        return true;
+    }
+    if (loaded_preview_path == state.file_preview_path && preview_image.image) {
+        preview_active = true;
+        return true;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    u8* pixels = stbi_load(state.file_preview_path.c_str(), &width, &height, &channels, 4);
+    if (!pixels || width <= 0 || height <= 0) {
+        if (pixels) stbi_image_free(pixels);
+        preview_active = false;
+        loaded_preview_path = state.file_preview_path;
+        LOG_ERROR(Render_Vulkan, "{} failed to load preview {}", Tag,
+                  state.file_preview_path);
+        return false;
+    }
+
+    if (preview_image.image || preview_staging.buffer) {
+        device.waitIdle();
+        DestroyBuffer(preview_staging);
+        DestroyImage(preview_image);
+    }
+    const std::size_t byte_size = static_cast<std::size_t>(width) * height * 4;
+    const bool created =
+        CreateImage(vk::Format::eR8G8B8A8Unorm, static_cast<u32>(width),
+                    static_cast<u32>(height), preview_image) &&
+        CreateBuffer(byte_size, vk::BufferUsageFlagBits::eTransferSrc,
+                     vk::MemoryPropertyFlagBits::eHostVisible |
+                         vk::MemoryPropertyFlagBits::eHostCoherent,
+                     preview_staging, true);
+    if (!created) {
+        stbi_image_free(pixels);
+        DestroyBuffer(preview_staging);
+        DestroyImage(preview_image);
+        preview_active = false;
+        return false;
+    }
+    std::memcpy(preview_staging.mapped, pixels, byte_size);
+    armDCacheFlush(preview_staging.mapped, byte_size);
+    stbi_image_free(pixels);
+
+    const vk::DescriptorImageInfo preview_info{
+        .sampler = gradient_sampler,
+        .imageView = preview_image.view,
+        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+    };
+    const vk::WriteDescriptorSet write{
+        .dstSet = preview_descriptor_set,
+        .dstBinding = 1,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+        .pImageInfo = &preview_info,
+    };
+    device.updateDescriptorSets(1, &write, 0, nullptr);
+    preview_width = static_cast<u32>(width);
+    preview_height = static_cast<u32>(height);
+    preview_uploaded = false;
+    preview_active = true;
+    loaded_preview_path = state.file_preview_path;
+    return true;
+}
+
 void UploadTextures(vk::CommandBuffer command_buffer) {
     if (!atlas_uploaded) {
         UploadImage(command_buffer, atlas_staging.buffer, atlas_image.image, AtlasWidth, AtlasHeight);
@@ -809,6 +908,11 @@ void UploadTextures(vk::CommandBuffer command_buffer) {
         UploadImage(command_buffer, overlay_staging.buffer, overlay_image.image,
                     overlay_width, overlay_height);
         overlay_uploaded = true;
+    }
+    if (preview_active && preview_image.image && !preview_uploaded) {
+        UploadImage(command_buffer, preview_staging.buffer, preview_image.image,
+                    preview_width, preview_height);
+        preview_uploaded = true;
     }
 }
 
@@ -945,12 +1049,31 @@ void Icon(float center_x, float baseline, float size, const std::array<float, 4>
             q.s0, q.t0, q.s1, q.t1, color, 1.0f);
 }
 
-void SelectorValue(float row_x, float row_y, float row_w, std::string_view value,
+void IconCentered(float center_x, float center_y, float size,
+                  const std::array<float, 4>& color, int codepoint) {
+    const auto it = glyph_indices.find(codepoint);
+    if (it == glyph_indices.end()) return;
+    const float scale = size / PackedFontSize;
+    float qx = 0.0f;
+    float qy = 0.0f;
+    stbtt_aligned_quad q{};
+    stbtt_GetPackedQuad(packed_chars.data(), AtlasWidth, AtlasHeight,
+                        static_cast<int>(it->second), &qx, &qy, &q, 1);
+    const float width = (q.x1 - q.x0) * scale;
+    const float height = (q.y1 - q.y0) * scale;
+    AddQuad(center_x - width * 0.5f, center_y - height * 0.5f,
+            center_x + width * 0.5f, center_y + height * 0.5f,
+            q.s0, q.t0, q.s1, q.t1, color, 1.0f);
+}
+
+void SelectorValue(float row_x, float row_y, float row_w, float row_h,
+                   std::string_view value,
                    const std::array<float, 4>& color) {
-    Icon(row_x + row_w - 194.0f, row_y + 34.0f, 28.0f, color, NintendoIconL);
+    const float center_y = row_y + row_h * 0.5f;
+    IconCentered(row_x + row_w - 194.0f, center_y, 26.0f, color, NintendoIconL);
     Text(row_x + row_w - 110.0f - MeasureText(value, 18.0f) * 0.5f,
-         row_y + 34.0f, 18.0f, color, value);
-    Icon(row_x + row_w - 24.0f, row_y + 34.0f, 28.0f, color, NintendoIconR);
+         row_y + row_h * 0.5f + 7.0f, 18.0f, color, value);
+    IconCentered(row_x + row_w - 24.0f, center_y, 26.0f, color, NintendoIconR);
 }
 
 std::string Filename(std::string_view path) {
@@ -969,6 +1092,16 @@ void DrawToast(const State& state) {
     Rect(x, 626, width, 48, {0.02f, 0.025f, 0.035f, 0.94f});
     Border(x, 626, width, 48, 1.0f, {0.31f, 0.70f, 1.0f, 0.72f});
     Text(x + 22, 657, 18, {0.94f, 0.97f, 1.0f, 0.96f}, state.toast);
+}
+
+void DrawFastForwardIndicator(const State& state) {
+    if (!state.fast_forward_active) {
+        return;
+    }
+    IconCentered(34, 34, 28, {0.44f, 0.80f, 1.0f, 1.0f}, 0xE01F);
+    char value[20]{};
+    std::snprintf(value, sizeof(value), "%.1fx", state.display.fast_forward_multiplier);
+    Text(54, 41, 18, {0.94f, 0.97f, 1.0f, 0.94f}, value);
 }
 
 const char* DisplayLayoutLabel(std::string_view layout) {
@@ -992,8 +1125,8 @@ void DrawCustomLayoutSidebar(const State& state) {
     constexpr float RowW = 420.0f;
     constexpr float RowH = 52.0f;
 
-    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.28f});
-    Rect(PanelX, 0, PanelW, 720, {0.015f, 0.020f, 0.030f, 0.97f});
+    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.04f});
+    Rect(PanelX, 0, PanelW, 720, {0.015f, 0.020f, 0.030f, 0.52f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
     Text(830, 54, 27, White, "自定义画面布局");
     Text(830, 87, 16, Muted, "B 返回   A 重置当前项");
@@ -1014,7 +1147,7 @@ void DrawCustomLayoutSidebar(const State& state) {
             Border(RowX, y, RowW, RowH, 1.0f, {1.0f, 1.0f, 1.0f, 0.10f});
         }
         Text(RowX + 18, y + 34, 19, White, label);
-        SelectorValue(RowX, y, RowW, value, Cyan);
+        SelectorValue(RowX, y, RowW, RowH, value, Cyan);
     };
     auto scaleValue = [](float value) {
         char text[24]{};
@@ -1047,7 +1180,7 @@ void DrawOverlaySidebar(const State& state) {
     Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.28f});
     Rect(PanelX, 0, 480, 720, {0.015f, 0.020f, 0.030f, 0.97f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
-    Icon(850, 53, 29, Cyan, 0xE53B);
+    IconCentered(850, 47, 27, Cyan, 0xE53B);
     Text(878, 54, 27, White, "遮罩选择");
     Text(830, 88, 16, Muted, "选择 PNG 遮罩文件");
     const std::array<const char*, 2> labels{{"遮罩开关", "遮罩文件"}};
@@ -1066,47 +1199,134 @@ void DrawOverlaySidebar(const State& state) {
         Text(RowX + 18, y + 35, 20, White, labels[row]);
         TextRight(RowX + RowW - (row == 1 ? 48.0f : 18.0f), y + 34, 17, Cyan,
                   values[row]);
-        if (row == 1) Icon(RowX + RowW - 20, y + 34, 25, Cyan, 0xE5CC);
+        if (row == 1) IconCentered(RowX + RowW - 20, y + 27, 23, Cyan, 0xE5CC);
     }
-    Icon(1030, 674, 29, Muted, NintendoIconB);
+    IconCentered(1030, 672, 27, Muted, NintendoIconB);
     Text(1052, 681, 18, Muted, "返回并保存");
+}
+
+std::string FormatBytes(u64 bytes) {
+    char text[32]{};
+    if (bytes >= 1024 * 1024) {
+        std::snprintf(text, sizeof(text), "%.1f MB",
+                      static_cast<double>(bytes) / (1024.0 * 1024.0));
+    } else if (bytes >= 1024) {
+        std::snprintf(text, sizeof(text), "%.1f KB", static_cast<double>(bytes) / 1024.0);
+    } else {
+        std::snprintf(text, sizeof(text), "%llu B",
+                      static_cast<unsigned long long>(bytes));
+    }
+    return text;
+}
+
+bool IsPngPath(std::string_view path) {
+    if (path.size() < 4) return false;
+    const std::string_view suffix = path.substr(path.size() - 4);
+    return (suffix[0] == '.') && (suffix[1] == 'p' || suffix[1] == 'P') &&
+           (suffix[2] == 'n' || suffix[2] == 'N') &&
+           (suffix[3] == 'g' || suffix[3] == 'G');
 }
 
 void DrawFilePicker(const State& state) {
     constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
     constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.72f};
     constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
-    Rect(0, 0, 1280, 720, {0.025f, 0.032f, 0.045f, 0.985f});
-    Icon(68, 60, 31, Cyan, 0xE2C7);
-    Text(96, 61, 28, White, "选择遮罩");
-    Text(68, 92, 16, Muted, state.file_picker_path);
-    Rect(56, 112, 1168, 1, {1, 1, 1, 0.16f});
+    constexpr float TopH = 96.0f;
+    constexpr float FooterH = 96.0f;
+    constexpr float BodyY = 114.0f;
+    constexpr float BodyH = 492.0f;
+    constexpr float RowH = 84.0f;
+
+    Rect(0, 0, 1280, 720, {0.010f, 0.014f, 0.020f, 0.985f});
+    Rect(0, 0, 1280, TopH, {0.0f, 0.0f, 0.0f, 0.42f});
+    Rect(0, TopH, 1280, 1, {1, 1, 1, 0.12f});
+    Text(32, 61, 24, White, state.file_picker_path.empty() ? "/" : state.file_picker_path);
+
     const int count = static_cast<int>(state.file_entries.size());
-    const int visible_rows = 7;
     const int focus = count == 0 ? 0 : std::clamp(state.file_picker_focus, 0, count - 1);
-    const int first = std::clamp(focus - visible_rows / 2, 0, std::max(0, count - visible_rows));
+    char index_text[48]{};
+    std::snprintf(index_text, sizeof(index_text), "%d / %d", count == 0 ? 0 : focus + 1, count);
+    TextRight(1246, 61, 23, Muted, index_text);
+
+    constexpr int VisibleRows = 6;
+    const int first = std::clamp(focus - VisibleRows / 2, 0,
+                                 std::max(0, count - VisibleRows));
     if (count == 0) {
-        Text(72, 190, 22, Muted, "目录中暂无可用 PNG 文件");
+        Text(48, 180, 22, Muted, "目录中暂无可用 PNG 文件");
     }
-    for (int row = 0; row < std::min(visible_rows, count - first); ++row) {
+    for (int row = 0; row < std::min(VisibleRows, count - first); ++row) {
         const int index = first + row;
         const auto& entry = state.file_entries[index];
-        const float y = 136.0f + row * 68.0f;
+        const float y = BodyY + row * RowH;
         const bool focused = index == focus;
-        Rect(64, y, 1152, 54,
-             focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
-                     : std::array<float, 4>{1, 1, 1, 0.04f});
-        if (focused) FlowBorder(64, y, 1152, 54, 3.0f);
-        else Border(64, y, 1152, 54, 1.0f, {1, 1, 1, 0.08f});
-        Icon(94, y + 35, 27, entry.directory ? Cyan : White,
-             entry.directory ? 0xE2C7 : 0xE873);
-        Text(122, y + 35, 20, White, entry.name);
-        if (entry.directory) Icon(1184, y + 35, 25, Cyan, 0xE5CC);
+        if (focused) {
+            FlowBorder(30, y + 7, 1220, RowH - 14, 3.0f);
+        } else {
+            Rect(30, y + 8, 1220, RowH - 16, {1, 1, 1, 0.025f});
+        }
+        IconCentered(78, y + RowH * 0.5f, 39,
+             entry.directory ? std::array<float, 4>{0.50f, 0.78f, 1.0f, 0.92f}
+                             : std::array<float, 4>{0.66f, 0.90f, 0.74f, 0.88f},
+             entry.directory ? 0xE2C7 : 0xE3F4);
+        Text(128, y + 38, 27, focused ? White : std::array<float, 4>{1, 1, 1, 0.78f},
+             entry.name);
+        std::string meta;
+        if (entry.directory) {
+            meta = entry.name == ".." ? "上级目录" : "文件夹";
+        } else {
+            meta = FormatBytes(entry.size);
+            if (!entry.modified_time.empty()) meta += "   " + entry.modified_time;
+        }
+        Text(128, y + 65, 17, focused ? Muted : std::array<float, 4>{0.72f, 0.82f, 0.90f, 0.50f},
+             meta);
     }
-    Icon(1000, 682, 29, Muted, NintendoIconA);
-    Text(1022, 689, 18, Muted, "选择");
-    Icon(1112, 682, 29, Muted, NintendoIconB);
-    Text(1134, 689, 18, Muted, "返回");
+
+    const bool selected_image = count > 0 && !state.file_entries[focus].directory &&
+                                IsPngPath(state.file_entries[focus].path);
+    if (state.file_preview) {
+        Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.82f});
+        if (preview_active && preview_width > 0 && preview_height > 0) {
+            constexpr float MaxW = 1160.0f;
+            constexpr float MaxH = 504.0f;
+            const float aspect = static_cast<float>(preview_width) /
+                                 static_cast<float>(preview_height);
+            float draw_w = MaxW;
+            float draw_h = draw_w / aspect;
+            if (draw_h > MaxH) {
+                draw_h = MaxH;
+                draw_w = draw_h * aspect;
+            }
+            const float draw_x = (1280.0f - draw_w) * 0.5f;
+            const float draw_y = 76.0f + (MaxH - draw_h) * 0.5f;
+            Rect(draw_x - 12, draw_y - 12, draw_w + 24, draw_h + 24,
+                 {1, 1, 1, 0.055f});
+            preview_vertex_first = static_cast<u32>(vertices.size());
+            AddQuad(draw_x, draw_y, draw_x + draw_w, draw_y + draw_h,
+                    0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
+            preview_vertex_count = 6;
+        } else {
+            Text(498, 350, 22, Muted, "图片预览加载失败");
+        }
+        Text(60, 61, 24, White,
+             state.file_preview_path.empty() ? "图片预览" : Filename(state.file_preview_path));
+    }
+
+    const float footer_y = 720.0f - FooterH;
+    Rect(0, footer_y, 1280, FooterH, {0.0f, 0.0f, 0.0f, 0.42f});
+    Rect(0, footer_y, 1280, 1, {1, 1, 1, 0.12f});
+    float right = 1244.0f;
+    auto hint = [&](int icon, const char* label, const std::array<float, 4>& color,
+                    float width) {
+        right -= width;
+        IconCentered(right + 19, footer_y + 48, 34, {1, 1, 1, 0.92f}, icon);
+        Text(right + 44, footer_y + 57, 26, color, label);
+        right -= 34.0f;
+    };
+    hint(NintendoIconA, state.file_preview ? "关闭" : "选择", Cyan, 112.0f);
+    hint(NintendoIconB, state.file_preview ? "关闭" : "返回", White, 112.0f);
+    if (!state.file_preview && selected_image) {
+        hint(NintendoIconX, "预览", Muted, 112.0f);
+    }
 }
 
 void BuildMenu(const State& state) {
@@ -1157,7 +1377,8 @@ void BuildMenu(const State& state) {
                 FlowBorder(LeftX, y, MenuW, ItemH, 3.0f);
             }
         }
-        Icon(LeftX + 34, y + 45, 29, focused ? White : Muted, ItemIcons[i]);
+        IconCentered(LeftX + 34, y + ItemH * 0.5f, 25,
+                     focused ? White : Muted, ItemIcons[i]);
         Text(LeftX + 64, y + 44, 22, focused ? White : Muted, ItemLabels[i]);
     }
     Rect(LeftX + 18, LeftY + 5 * Step - 14, MenuW - 36, 1, {1, 1, 1, 0.14f});
@@ -1195,15 +1416,15 @@ void BuildMenu(const State& state) {
         Border(976, 166, 240, 440, 1, {0.0f, 0.48f, 0.80f, 0.40f});
         Text(1020, 380, 24, Muted, "NO THUMB");
     } else if (item == Item::Display) {
-        const std::array<const char*, 7> labels{{
-            "快进倍率", "整数倍缩放", "屏幕布局", "自定义画面布局",
-            "画面方向", "屏幕间距", "遮罩选择",
+        const std::array<const char*, 8> labels{{
+            "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局",
+            "自定义画面布局", "画面方向", "屏幕间距", "遮罩选择",
         }};
-        const std::array<int, 7> icons{{
-            0xE01F, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
+        const std::array<int, 8> icons{{
+            0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
         }};
         const bool custom_enabled = state.display.screen_layout == "custom";
-        std::array<std::string, 7> values{};
+        std::array<std::string, 8> values{};
         char multiplier[24]{};
         std::snprintf(multiplier, sizeof(multiplier),
                       std::fabs(state.display.fast_forward_multiplier -
@@ -1212,37 +1433,42 @@ void BuildMenu(const State& state) {
                           : "%.2fx",
                       state.display.fast_forward_multiplier);
         values[0] = multiplier;
-        values[1] = state.display.integer_scale ? "开启" : "关闭";
-        values[2] = DisplayLayoutLabel(state.display.screen_layout);
-        values[3] = custom_enabled ? "调整" : "不可用";
-        values[4] = std::to_string(state.display.screen_orientation) + "°";
-        values[5] = std::to_string(state.display.screen_gap) + " px";
-        values[6] = state.display.overlay_enabled ? "已开启" : "设置";
-        constexpr std::array<float, 7> RowY{{214, 264, 338, 388, 438, 488, 562}};
-        Text(ContentX, 190, 16, Cyan, "基础画面设置");
-        Text(ContentX, 314, 16, Cyan, "布局设置");
-        Text(ContentX, 538, 16, Cyan, "个性化设置");
-        for (int row = 0; row < 7; ++row) {
+        values[1] = std::to_string(state.display.internal_resolution) + "x";
+        values[2] = state.display.integer_scale ? "开启" : "关闭";
+        values[3] = DisplayLayoutLabel(state.display.screen_layout);
+        values[4] = custom_enabled ? "调整" : "不可用";
+        values[5] = std::to_string(state.display.screen_orientation) + "°";
+        values[6] = std::to_string(state.display.screen_gap) + " px";
+        values[7] = state.display.overlay_enabled ? "已开启" : "设置";
+        constexpr float RowH = 44.0f;
+        constexpr std::array<float, 8> RowY{{190, 240, 290, 372, 422, 472, 522, 604}};
+        Text(ContentX, 176, 16, Cyan, "基础画面设置");
+        Text(ContentX, 358, 16, Cyan, "布局设置");
+        Text(ContentX, 590, 16, Cyan, "个性化设置");
+        for (int row = 0; row < 8; ++row) {
             const float y = RowY[row];
             const bool focused = state.content_focused && state.content_focus == row;
-            const bool enabled = row != 3 || custom_enabled;
-            Rect(ContentX, y, ContentW, 42,
+            const bool enabled = row != 4 || custom_enabled;
+            Rect(ContentX, y, ContentW, RowH,
                   focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
                           : std::array<float, 4>{1, 1, 1, 0.045f});
             if (focused) {
-                FlowBorder(ContentX, y, ContentW, 42, 3.0f);
+                FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
             } else {
-                Border(ContentX, y, ContentW, 42, 1.0f, {1, 1, 1, 0.10f});
+                Border(ContentX, y, ContentW, RowH, 1.0f, {1, 1, 1, 0.10f});
             }
-            Icon(ContentX + 24, y + 29, 23, enabled ? Cyan : Muted, icons[row]);
-            Text(ContentX + 46, y + 29, 18, enabled ? White : Muted, labels[row]);
-            if (row == 0 || row == 2 || row == 4 || row == 5) {
-                SelectorValue(ContentX, y - 5, ContentW, values[row], enabled ? Cyan : Muted);
+            IconCentered(ContentX + 24, y + RowH * 0.5f, 20,
+                         enabled ? Cyan : Muted, icons[row]);
+            Text(ContentX + 46, y + 30, 18, enabled ? White : Muted, labels[row]);
+            if (row == 0 || row == 1 || row == 3 || row == 5 || row == 6) {
+                SelectorValue(ContentX, y, ContentW, RowH, values[row],
+                              enabled ? Cyan : Muted);
             } else {
-                TextRight(ContentX + ContentW - (row == 3 || row == 6 ? 46.0f : 18.0f),
-                          y + 28, 17, enabled ? Cyan : Muted, values[row]);
-                if (row == 3 || row == 6) {
-                    Icon(ContentX + ContentW - 20, y + 29, 23, enabled ? Cyan : Muted, 0xE5CC);
+                TextRight(ContentX + ContentW - (row == 4 || row == 7 ? 46.0f : 18.0f),
+                          y + 29, 17, enabled ? Cyan : Muted, values[row]);
+                if (row == 4 || row == 7) {
+                    IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
+                                 enabled ? Cyan : Muted, 0xE5CC);
                 }
             }
         }
@@ -1258,9 +1484,9 @@ void BuildMenu(const State& state) {
         Text(ContentX, 260, 26, {0.80f, 0.90f, 0.98f, 0.86f}, body);
     }
 
-    Icon(1020, 680, 30, Muted, NintendoIconB);
+    IconCentered(1020, 678, 27, Muted, NintendoIconB);
     Text(1042, 687, 19, Muted, state.content_focused ? "返回列表" : "返回");
-    Icon(1152, 680, 30, Muted, NintendoIconA);
+    IconCentered(1152, 678, 27, Muted, NintendoIconA);
     Text(1174, 687, 19, Muted, "确定");
     DrawToast(state);
 }
@@ -1326,9 +1552,12 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
         return;
     }
     EnsureOverlayTexture(state);
+    EnsurePreviewTexture(state);
     UploadTextures(command_buffer);
     vertices.clear();
     overlay_vertex_count = 0;
+    preview_vertex_first = 0;
+    preview_vertex_count = 0;
     if (overlay_active) {
         AddQuad(0, 0, 1280, 720, 0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
         overlay_vertex_count = 6;
@@ -1338,6 +1567,7 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     } else {
         DrawToast(state);
     }
+    DrawFastForwardIndicator(state);
     TransformVertices(extent);
     const vk::Framebuffer framebuffer = GetFramebuffer(image, extent);
     if (!framebuffer || vertices.empty() || vertices.size() * sizeof(Vertex) > VertexBufferSize) {
@@ -1363,7 +1593,24 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
                                           overlay_descriptor_set, {});
         command_buffer.draw(overlay_vertex_count, 1, 0, 0);
     }
-    if (vertices.size() > overlay_vertex_count) {
+    const u32 vertex_count = static_cast<u32>(vertices.size());
+    const u32 normal_first = overlay_vertex_count;
+    if (preview_vertex_count != 0 && preview_vertex_first >= normal_first) {
+        if (preview_vertex_first > normal_first) {
+            command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
+                                              descriptor_set, {});
+            command_buffer.draw(preview_vertex_first - normal_first, 1, normal_first, 0);
+        }
+        command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
+                                          preview_descriptor_set, {});
+        command_buffer.draw(preview_vertex_count, 1, preview_vertex_first, 0);
+        const u32 trailing_first = preview_vertex_first + preview_vertex_count;
+        if (vertex_count > trailing_first) {
+            command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
+                                              descriptor_set, {});
+            command_buffer.draw(vertex_count - trailing_first, 1, trailing_first, 0);
+        }
+    } else if (vertices.size() > overlay_vertex_count) {
         command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
                                           descriptor_set, {});
         command_buffer.draw(static_cast<u32>(vertices.size()) - overlay_vertex_count, 1,
@@ -1388,9 +1635,11 @@ void Shutdown() {
     DestroyBuffer(atlas_staging);
     DestroyBuffer(gradient_staging);
     DestroyBuffer(overlay_staging);
+    DestroyBuffer(preview_staging);
     DestroyImage(atlas_image);
     DestroyImage(gradient_image);
     DestroyImage(overlay_image);
+    DestroyImage(preview_image);
     if (font_sampler) device.destroySampler(font_sampler);
     if (gradient_sampler) device.destroySampler(gradient_sampler);
     if (pipeline_layout) device.destroyPipelineLayout(pipeline_layout);
@@ -1407,6 +1656,7 @@ void Shutdown() {
     fragment_shader = VK_NULL_HANDLE;
     descriptor_set = VK_NULL_HANDLE;
     overlay_descriptor_set = VK_NULL_HANDLE;
+    preview_descriptor_set = VK_NULL_HANDLE;
     font_data.clear();
     nintendo_font_data.clear();
     material_font_data.clear();
@@ -1423,6 +1673,13 @@ void Shutdown() {
     overlay_height = 0;
     overlay_vertex_count = 0;
     loaded_overlay_path.clear();
+    preview_uploaded = false;
+    preview_active = false;
+    preview_width = 0;
+    preview_height = 0;
+    preview_vertex_first = 0;
+    preview_vertex_count = 0;
+    loaded_preview_path.clear();
     initialized = false;
     device = VK_NULL_HANDLE;
 }

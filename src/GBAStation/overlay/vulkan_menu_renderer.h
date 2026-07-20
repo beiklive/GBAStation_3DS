@@ -20,6 +20,8 @@ namespace SwitchFrontend::VulkanMenuRenderer {
 struct FileEntry {
     std::string name;
     std::string path;
+    std::string modified_time;
+    u64 size{};
     bool directory{};
 };
 
@@ -36,6 +38,7 @@ enum class Item {
 
 struct State {
     bool menu_visible{true};
+    bool fast_forward_active{};
     Item item{Item::Resume};
     bool content_focused{};
     int content_focus{};
@@ -47,6 +50,8 @@ struct State {
     int file_picker_focus{};
     std::string file_picker_path;
     std::vector<FileEntry> file_entries;
+    bool file_preview{};
+    std::string file_preview_path;
     std::string toast;
     std::array<bool, 10> occupied{};
     GBAStationDisplaySettings display{};

@@ -25,6 +25,7 @@
 #include "video_core/host_shaders/vulkan_cursor_vert.h"
 
 #include <cstddef>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -357,6 +358,13 @@ void RendererVulkan::PresentLastFrame() {
     isSecondaryWindow = false;
     RenderToWindow(main_present_window, layout, false, true);
     scheduler.DispatchWork();
+}
+
+void RendererVulkan::SetFastForward(bool enabled, float multiplier) {
+    fast_forward_enabled = enabled;
+    fast_forward_present_divisor =
+        enabled ? std::max(1U, static_cast<u32>(std::floor(std::max(1.0f, multiplier)))) : 1U;
+    fast_forward_present_counter = 0;
 }
 
 void RendererVulkan::LoadFBToScreenInfo(const Pica::FramebufferConfig& framebuffer,
@@ -1418,6 +1426,13 @@ void RendererVulkan::DrawCursor(const Layout::FramebufferLayout& layout) {
 
 void RendererVulkan::SwapBuffers() {
     system.perf_stats->StartSwap();
+    if (fast_forward_enabled && fast_forward_present_divisor > 1 &&
+        (++fast_forward_present_counter % fast_forward_present_divisor) != 0) {
+        system.perf_stats->EndSwap();
+        rasterizer.TickFrame();
+        EndFrame();
+        return;
+    }
     screenRendered = false;
 #ifndef ANDROID
     if (Settings::values.layout_option.GetValue() == Settings::LayoutOption::SeparateWindows) {
