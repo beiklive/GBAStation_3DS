@@ -35,6 +35,12 @@ enum class Action {
     LoadStateSlot8,
     LoadStateSlot9,
     LoadStateSlot10,
+    DisplaySettingsChanged,
+    CustomLayoutChanged,
+    CustomLayoutCommitted,
+    FastForwardMultiplierChanged,
+    OverlaySettingsChanged,
+    OverlaySettingsCommitted,
 };
 
 enum class ToastCorner {
@@ -54,9 +60,12 @@ Action Render(int display_w, int display_h);
 void SetGameTitle(std::string title);
 void ShowToast(std::string message, ToastCorner corner = ToastCorner::BottomRight);
 bool HasTransientContent();
+std::string GetToast();
 
 using SlotOccupiedFn = std::function<bool(int slot)>;
 void SetSlotOccupiedCallback(SlotOccupiedFn callback);
+bool IsSlotOccupied(int slot);
+std::string GetGameTitle();
 
 struct NavInput {
     bool up;

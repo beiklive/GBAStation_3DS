@@ -9,7 +9,9 @@
 #include <cmath>
 #include <utility>
 
+#include "common/settings.h"
 #include "core/3ds.h"
+#include "core/frontend/framebuffer_layout.h"
 
 namespace SwitchFrontend {
 namespace {
@@ -22,6 +24,163 @@ constexpr float CursorDeadzone = 0.24f;
 constexpr float CursorDefaultFrameTime = 1.0f / 60.0f;
 constexpr float CursorMaxFrameTime = 1.0f / 30.0f;
 constexpr float StickScale = 1.0f / 32767.0f;
+
+struct Region {
+    float x;
+    float y;
+    float width;
+    float height;
+};
+
+float FitScale(const Region& region, float native_width, float native_height,
+               bool integer_scale) {
+    float scale = std::max(0.01f, std::min(region.width / native_width,
+                                           region.height / native_height));
+    if (integer_scale && scale >= 1.0f) {
+        scale = std::floor(scale);
+    }
+    return std::max(0.01f, scale);
+}
+
+Common::Rectangle<u32> PlaceScreen(const Region& region, float native_width, float native_height,
+                                   bool integer_scale, float scale_multiplier = 1.0f,
+                                   float offset_x = 0.0f, float offset_y = 0.0f) {
+    float scale = FitScale(region, native_width, native_height, integer_scale);
+    scale *= std::max(0.01f, scale_multiplier);
+    float screen_width = std::min(native_width * scale, region.width);
+    float screen_height = std::min(native_height * scale, region.height);
+    float left = region.x + (region.width - screen_width) * 0.5f + offset_x;
+    float top = region.y + (region.height - screen_height) * 0.5f + offset_y;
+    left = std::clamp(left, region.x, region.x + std::max(0.0f, region.width - screen_width));
+    top = std::clamp(top, region.y, region.y + std::max(0.0f, region.height - screen_height));
+    const u32 x = static_cast<u32>(std::max(0.0f, std::round(left)));
+    const u32 y = static_cast<u32>(std::max(0.0f, std::round(top)));
+    const u32 right = static_cast<u32>(std::max<float>(x + 1, std::round(left + screen_width)));
+    const u32 bottom = static_cast<u32>(std::max<float>(y + 1, std::round(top + screen_height)));
+    return {x, y, right, bottom};
+}
+
+Common::Rectangle<u32> PlaceCustomScreen(float framebuffer_width, float framebuffer_height,
+                                         float native_width, float native_height, float scale,
+                                         float center_x, float center_y, float offset_x,
+                                         float offset_y) {
+    const float maximum_scale = std::min(framebuffer_width / native_width,
+                                         framebuffer_height / native_height);
+    scale = std::clamp(scale, 0.01f, maximum_scale);
+    const float screen_width = native_width * scale;
+    const float screen_height = native_height * scale;
+    float left = center_x - screen_width * 0.5f + offset_x;
+    float top = center_y - screen_height * 0.5f + offset_y;
+    left = std::clamp(left, 0.0f, std::max(0.0f, framebuffer_width - screen_width));
+    top = std::clamp(top, 0.0f, std::max(0.0f, framebuffer_height - screen_height));
+    const u32 x = static_cast<u32>(std::round(left));
+    const u32 y = static_cast<u32>(std::round(top));
+    const u32 right = static_cast<u32>(std::round(left + screen_width));
+    const u32 bottom = static_cast<u32>(std::round(top + screen_height));
+    return {x, y, std::max(x + 1, right), std::max(y + 1, bottom)};
+}
+
+Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
+                                               const GBAStationDisplaySettings& settings) {
+    const float w = static_cast<float>(width);
+    const float h = static_cast<float>(height);
+    const float gap = static_cast<float>(std::clamp(settings.screen_gap, -256, 256));
+    const float positive_gap = std::max(0.0f, gap);
+    const Region full{0.0f, 0.0f, w, h};
+    Layout::FramebufferLayout layout{width, height, true, true, {}, {}, true};
+
+    if (settings.screen_layout == "vertical") {
+        const float row_height = std::max(1.0f, (h - gap) * 0.5f);
+        const Region top{0.0f, 0.0f, w, row_height};
+        const Region bottom{0.0f, row_height + gap, w, row_height};
+        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
+                                           Core::kScreenBottomHeight, settings.integer_scale);
+    } else if (settings.screen_layout == "horizontal") {
+        const float available = std::max(2.0f, w - gap);
+        const float top_width = available * 5.0f / 9.0f;
+        const Region top{0.0f, 0.0f, top_width, h};
+        const Region bottom{top_width + gap, 0.0f, available - top_width, h};
+        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
+                                           Core::kScreenBottomHeight, settings.integer_scale);
+    } else if (settings.screen_layout == "priority_bottom") {
+        const float small_width = std::max(1.0f, (w - positive_gap) / 3.0f);
+        const Region bottom{0.0f, 0.0f, w - small_width - positive_gap, h};
+        const Region top{w - small_width, 0.0f, small_width, h};
+        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
+                                           Core::kScreenBottomHeight, settings.integer_scale);
+        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+    } else if (settings.screen_layout == "hybrid") {
+        const float right_width = std::max(1.0f, (w - positive_gap) / 3.0f);
+        const float right_x = w - right_width;
+        const float row_height = std::max(1.0f, (h - positive_gap) * 0.5f);
+        layout.top_screen = PlaceScreen({0.0f, 0.0f, right_x - positive_gap, h},
+                                        Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+        layout.additional_screen_enabled = true;
+        layout.additional_screen_is_bottom = false;
+        layout.additional_screen = PlaceScreen({right_x, 0.0f, right_width, row_height},
+                                               Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                               settings.integer_scale);
+        layout.bottom_screen = PlaceScreen(
+            {right_x, row_height + positive_gap, right_width, row_height},
+            Core::kScreenBottomWidth, Core::kScreenBottomHeight, settings.integer_scale);
+    } else if (settings.screen_layout == "top") {
+        layout.top_screen = PlaceScreen(full, Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+        layout.bottom_screen = PlaceScreen(full, Core::kScreenBottomWidth,
+                                           Core::kScreenBottomHeight, settings.integer_scale);
+        layout.bottom_screen_enabled = false;
+    } else if (settings.screen_layout == "bottom") {
+        layout.top_screen = PlaceScreen(full, Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+        layout.bottom_screen = PlaceScreen(full, Core::kScreenBottomWidth,
+                                           Core::kScreenBottomHeight, settings.integer_scale);
+        layout.top_screen_enabled = false;
+    } else if (settings.screen_layout == "custom") {
+        const float top_center_y = h * 0.25f - gap * 0.5f;
+        const float bottom_center_y = h * 0.75f + gap * 0.5f;
+        layout.top_screen = PlaceCustomScreen(
+            w, h, Core::kScreenTopWidth, Core::kScreenTopHeight, settings.top_scale, w * 0.5f,
+            top_center_y, settings.top_offset_x, settings.top_offset_y);
+        layout.bottom_screen = PlaceCustomScreen(
+            w, h, Core::kScreenBottomWidth, Core::kScreenBottomHeight, settings.bottom_scale,
+            w * 0.5f, bottom_center_y, settings.bottom_offset_x, settings.bottom_offset_y);
+    } else {
+        const float small_width = std::max(1.0f, (w - positive_gap) / 3.0f);
+        const Region top{0.0f, 0.0f, w - small_width - positive_gap, h};
+        const Region bottom{w - small_width, 0.0f, small_width, h};
+        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
+                                        settings.integer_scale);
+        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
+                                           Core::kScreenBottomHeight, settings.integer_scale);
+    }
+    layout.render_3d_mode = Settings::values.render_3d.GetValue();
+    return layout;
+}
+
+Layout::FramebufferLayout BuildDisplayLayout(u32 width, u32 height,
+                                             const GBAStationDisplaySettings& settings) {
+    const int orientation = settings.screen_orientation;
+    if (orientation == 90 || orientation == 270) {
+        auto layout = BuildLandscapeLayout(height, width, settings);
+        layout.is_rotated = false;
+        layout = Layout::reverseLayout(layout);
+        if (orientation == 270) {
+            layout = Layout::rotate180Layout(layout);
+        }
+        return layout;
+    }
+    auto layout = BuildLandscapeLayout(width, height, settings);
+    if (orientation == 180) {
+        layout = Layout::rotate180Layout(layout);
+    }
+    return layout;
+}
 
 std::pair<float, float> ApplyCursorResponse(float x_axis, float y_axis) {
     const float magnitude = std::min(std::sqrt(x_axis * x_axis + y_axis * y_axis), 1.0f);
@@ -68,6 +227,11 @@ void EmuWindowSwitch::SetInputSuppressed(bool suppressed) {
     input_suppressed = suppressed;
 }
 
+void EmuWindowSwitch::SetDisplaySettings(const GBAStationDisplaySettings& settings) {
+    display_settings = settings;
+    RefreshDimensions();
+}
+
 void EmuWindowSwitch::RefreshDimensions() {
     u32 width = DefaultWidth;
     u32 height = DefaultHeight;
@@ -78,7 +242,7 @@ void EmuWindowSwitch::RefreshDimensions() {
             height = DefaultHeight;
         }
     }
-    UpdateCurrentFramebufferLayout(width, height, false);
+    NotifyFramebufferLayoutChanged(BuildDisplayLayout(width, height, display_settings));
 }
 
 unsigned EmuWindowSwitch::ScaleTouchX(u32 touch_x) const {

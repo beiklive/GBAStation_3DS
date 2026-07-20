@@ -46,6 +46,8 @@ u64 TokenMask(std::string_view token) {
     if (token == "PAD_RT") return HidNpadButton_ZR;
     if (token == "PAD_START") return HidNpadButton_Plus;
     if (token == "PAD_BACK") return HidNpadButton_Minus;
+    if (token == "PAD_LSB") return HidNpadButton_StickL;
+    if (token == "PAD_RSB") return HidNpadButton_StickR;
     return 0;
 }
 
@@ -90,9 +92,7 @@ void Reload() {
                 continue;
             }
             const std::string key = Trim(text.substr(0, equal));
-            if (key.rfind("3ds.", 0) == 0) {
-                values[key] = DecodeValue(text.substr(equal + 1));
-            }
+            values[key] = DecodeValue(text.substr(equal + 1));
         }
         std::fclose(file);
         break;
@@ -108,6 +108,23 @@ u64 MenuHotkeyMask() {
     const auto it = values.find("3ds.hotkey.menu.pad");
     return it == values.end() ? (HidNpadButton_ZL | HidNpadButton_ZR)
                               : ParseMask(it->second, HidNpadButton_ZL | HidNpadButton_ZR);
+}
+
+u64 FastForwardHotkeyMask() {
+    const auto it = values.find("3ds.handle.fastforward");
+    return it == values.end() ? HidNpadButton_StickL
+                              : ParseMask(it->second, HidNpadButton_StickL);
+}
+
+bool FastForwardToggleMode() {
+    const auto it = values.find("fastforward.mode");
+    return it != values.end() && it->second == "toggle";
+}
+
+bool FastForwardEnabled() {
+    const auto it = values.find("fastforward.enabled");
+    return it == values.end() || (it->second != "0" && it->second != "false" &&
+                                  it->second != "off");
 }
 
 } // namespace SwitchFrontend::InputMapping

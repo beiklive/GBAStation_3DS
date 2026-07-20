@@ -18,6 +18,14 @@
 
 namespace AudioCore {
 
+enum class LibnxUiSound {
+    Focus,
+    Click,
+    Back,
+    Error,
+    Slider,
+};
+
 class LibnxSink final : public Sink {
 public:
     explicit LibnxSink(std::string_view device_id);
@@ -39,6 +47,7 @@ private:
 };
 
 std::vector<std::string> ListLibnxSinkDevices();
+void PlayLibnxUiSound(LibnxUiSound sound);
 
 } // namespace AudioCore
 

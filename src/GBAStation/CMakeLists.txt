@@ -1,6 +1,9 @@
 add_executable(gbastation
     emu_window_switch.cpp
     emu_window_switch.h
+    display_settings.h
+    game_db.cpp
+    game_db.h
     main.cpp
     switch_keyboard.cpp
     switch_keyboard.h
@@ -14,11 +17,12 @@ add_executable(gbastation
     overlay/gbastation_config.h
     overlay/vulkan_overlay.cpp
     overlay/vulkan_overlay.h
-    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui.cpp
-    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui_draw.cpp
-    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui_tables.cpp
-    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/imgui_widgets.cpp
-    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/backends/imgui_impl_vulkan.cpp
+    overlay/vulkan_menu_renderer.cpp
+    overlay/vulkan_menu_renderer.h
+    shaders/menu.vert
+    shaders/menu.frag
+    shaders/menu_vert_spv.h
+    shaders/menu_frag_spv.h
 )
 
 create_target_directory_groups(gbastation)
@@ -26,8 +30,6 @@ set_target_properties(gbastation PROPERTIES OUTPUT_NAME "azahar-switch.elf")
 target_compile_definitions(gbastation PRIVATE
     __SWITCH__
     VK_NO_PROTOTYPES
-    IMGUI_DISABLE_DEMO_WINDOWS
-    IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
 )
 option(GBASTATION_SWITCH_DIAGNOSTIC_LOGS "Enable first-boot Switch filesystem logs" OFF)
 if(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
@@ -37,7 +39,7 @@ endif()
 target_include_directories(gbastation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${PROJECT_SOURCE_DIR}/externals/imgui/imgui
-    ${PROJECT_SOURCE_DIR}/externals/imgui/imgui/backends
+    ${PROJECT_SOURCE_DIR}/externals/stb
 )
 
 if(NOT DEVKITPRO)

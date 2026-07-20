@@ -352,6 +352,13 @@ void RendererVulkan::TryPresent([[maybe_unused]] int timeout_ms, bool is_seconda
     scheduler.DispatchWork();
 }
 
+void RendererVulkan::PresentLastFrame() {
+    const Layout::FramebufferLayout& layout = render_window.GetFramebufferLayout();
+    isSecondaryWindow = false;
+    RenderToWindow(main_present_window, layout, false, true);
+    scheduler.DispatchWork();
+}
+
 void RendererVulkan::LoadFBToScreenInfo(const Pica::FramebufferConfig& framebuffer,
                                         ScreenInfo& screen_info, bool right_eye) {
 

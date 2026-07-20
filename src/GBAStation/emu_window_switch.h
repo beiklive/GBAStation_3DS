@@ -7,6 +7,7 @@
 #include <chrono>
 #include <utility>
 
+#include "GBAStation/display_settings.h"
 #include "GBAStation/switch_libnx.h"
 #include "core/frontend/emu_window.h"
 
@@ -19,6 +20,7 @@ public:
     void PollEvents() override;
     CursorInfo GetCursorInfo() const override;
     void SetInputSuppressed(bool suppressed);
+    void SetDisplaySettings(const GBAStationDisplaySettings& settings);
 
 private:
     void RefreshDimensions();
@@ -37,6 +39,7 @@ private:
     float cursor_x{};
     float cursor_y{};
     std::chrono::steady_clock::time_point last_cursor_update{};
+    GBAStationDisplaySettings display_settings{};
 };
 
 } // namespace SwitchFrontend

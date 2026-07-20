@@ -26,6 +26,7 @@
 #include "audio_core/input_details.h"
 #include "audio_core/sink_details.h"
 #include "GBAStation/emu_window_switch.h"
+#include "GBAStation/game_db.h"
 #include "GBAStation/input_mapping.h"
 #include "GBAStation/overlay/overlay_ui.h"
 #include "GBAStation/overlay/gbastation_config.h"
@@ -83,6 +84,7 @@ constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
 struct LaunchOptions {
     std::string rom_path;
     std::string title;
+    SwitchFrontend::GBAStationDisplaySettings display_settings;
     std::string return_nro_path{LauncherPath};
     bool return_to_nro{true};
 };
@@ -613,6 +615,13 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
         StartupLog("ParseLaunchOptions: no ROM argument, using fallback %s", FallbackRomPath);
     }
     options.title = TitleFromPath(options.rom_path);
+    const auto game_record = SwitchFrontend::GameDatabase::LoadGameRecord(options.rom_path);
+    if (game_record.found) {
+        if (!game_record.title.empty()) {
+            options.title = game_record.title;
+        }
+        options.display_settings = game_record.display;
+    }
     StartupLog("ParseLaunchOptions: rom=%s title=%s return=%s target=%s",
                options.rom_path.c_str(), options.title.c_str(),
                options.return_to_nro ? "nro" : "home", options.return_nro_path.c_str());
@@ -868,7 +877,7 @@ int Run(int argc, char** argv) {
     }
 
     StartupLog("Run: parsing ROM path");
-    const LaunchOptions launch_options = ParseLaunchOptions(argc, argv);
+    LaunchOptions launch_options = ParseLaunchOptions(argc, argv);
     const std::string& rom_path = launch_options.rom_path;
     if (rom_path.empty()) {
         DebugLog("no ROM path supplied");
@@ -900,6 +909,16 @@ int Run(int argc, char** argv) {
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
     SwitchFrontend::GBAStationConfig::ApplyConfig();
+    {
+        const std::string multiplier =
+            SwitchFrontend::GBAStationConfig::GetConfigValue("fastforward.multiplier", "4.0");
+        char* end = nullptr;
+        const float parsed = std::strtof(multiplier.c_str(), &end);
+        if (end != multiplier.c_str()) {
+            launch_options.display_settings.fast_forward_multiplier =
+                std::clamp(parsed, 0.1f, 5.0f);
+        }
+    }
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
@@ -932,6 +951,7 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: creating NWindow frontend");
     SwitchFrontend::EmuWindowSwitch window{nwindowGetDefault()};
+    window.SetDisplaySettings(launch_options.display_settings);
     DebugLog("loading ROM: %s", rom_path.c_str());
     const Core::System::ResultStatus load_result = system.Load(window, rom_path);
     if (load_result != Core::System::ResultStatus::Success) {
@@ -980,8 +1000,9 @@ int Run(int argc, char** argv) {
                    (*slot_state_cache)[slot].load(std::memory_order_acquire);
         });
 
-    auto& vulkan_renderer = static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer());
-    bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(vulkan_renderer);
+    SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);
+    bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(
+        static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer()));
     DebugLog("GBAStation menu init=%d hotkey=ZL+ZR return=%s target=%s",
              menu_initialized ? 1 : 0, launch_options.return_to_nro ? "nro" : "home",
              launch_options.return_nro_path.c_str());
@@ -998,12 +1019,20 @@ int Run(int argc, char** argv) {
     bool applet_loop_active = true;
     const s32 initial_renderer_frame = system.GPU().Renderer().GetCurrentFrame();
     bool saw_guest_frame = initial_renderer_frame > 0;
+    bool pause_frame_ready = initial_renderer_frame > 0;
+    s32 pause_frame_baseline = initial_renderer_frame;
+    bool pending_overlay_reinit = false;
     s32 last_logged_frame = initial_renderer_frame;
     auto last_heartbeat = Clock::now();
     u64 last_heartbeat_loop_count = loop_count;
     s32 last_heartbeat_frame = last_logged_frame;
     bool menu_was_visible = false;
     bool block_game_input_until_release = false;
+    bool menu_audio_muted = false;
+    float menu_restore_volume = Settings::values.volume.GetValue();
+    bool fast_forward_toggle = false;
+    bool previous_fast_forward_combo = false;
+    bool last_fast_forward_active = false;
     const char* exit_reason = "loop condition ended";
     while (true) {
         const auto now = Clock::now();
@@ -1040,8 +1069,40 @@ int Run(int argc, char** argv) {
         }
         const bool menu_visible =
             menu_initialized && SwitchFrontend::VulkanOverlay::IsVisible();
+        const u64 fast_forward_mask = SwitchFrontend::InputMapping::FastForwardHotkeyMask();
+        const u64 held_buttons = padGetButtons(&pad);
+        const bool fast_forward_combo =
+            fast_forward_mask != 0 && (held_buttons & fast_forward_mask) == fast_forward_mask;
+        if (SwitchFrontend::InputMapping::FastForwardToggleMode() && fast_forward_combo &&
+            !previous_fast_forward_combo && !menu_visible) {
+            fast_forward_toggle = !fast_forward_toggle;
+        }
+        previous_fast_forward_combo = fast_forward_combo;
+        const bool fast_forward_active =
+            !menu_visible && SwitchFrontend::InputMapping::FastForwardEnabled() &&
+            (SwitchFrontend::InputMapping::FastForwardToggleMode() ? fast_forward_toggle
+                                                                   : fast_forward_combo);
+        const float fast_forward_multiplier =
+            SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
+        Settings::is_temporary_frame_limit = fast_forward_active;
+        Settings::temporary_frame_limit =
+            fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
+        if (fast_forward_active != last_fast_forward_active) {
+            DebugLog("fast forward %s multiplier=%.2f limit=%.1f",
+                     fast_forward_active ? "on" : "off", fast_forward_multiplier,
+                     Settings::temporary_frame_limit);
+            last_fast_forward_active = fast_forward_active;
+        }
         if (menu_visible != menu_was_visible) {
             block_game_input_until_release = true;
+            if (menu_visible) {
+                menu_restore_volume = Settings::values.volume.GetValue();
+                Settings::values.volume.SetValue(0.0f);
+                menu_audio_muted = true;
+            } else if (menu_audio_muted) {
+                Settings::values.volume.SetValue(menu_restore_volume);
+                menu_audio_muted = false;
+            }
             DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
             menu_was_visible = menu_visible;
         }
@@ -1066,6 +1127,9 @@ int Run(int argc, char** argv) {
             if (accepted) {
                 if (saving) {
                     (*slot_state_cache)[slot].store(true, std::memory_order_release);
+                } else {
+                    pause_frame_ready = false;
+                    pause_frame_baseline = renderer.GetCurrentFrame();
                 }
                 char message[64]{};
                 std::snprintf(message, sizeof(message), saving ? "正在保存到存档位 %d"
@@ -1079,9 +1143,56 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::Reset) {
             if (system.SendSignal(Core::System::Signal::Reset)) {
+                if (menu_initialized) {
+                    SwitchFrontend::VulkanOverlay::Shutdown();
+                    menu_initialized = false;
+                }
+                pending_overlay_reinit = true;
+                pause_frame_ready = false;
+                saw_guest_frame = false;
                 SwitchFrontend::OverlayUI::ShowToast("正在重置游戏");
                 DebugLog("menu requested game reset");
             }
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::DisplaySettingsChanged) {
+            const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            window.SetDisplaySettings(display);
+            const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
+                launch_options.rom_path, launch_options.title, display);
+            SwitchFrontend::OverlayUI::ShowToast(saved ? "画面设置已保存" : "画面设置保存失败");
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutChanged) {
+            window.SetDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutCommitted) {
+            const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            window.SetDisplaySettings(display);
+            const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
+                launch_options.rom_path, launch_options.title, display);
+            SwitchFrontend::OverlayUI::ShowToast(saved ? "自定义布局已保存"
+                                                        : "自定义布局保存失败");
+            block_game_input_until_release = true;
+        } else if (menu_action ==
+                   SwitchFrontend::OverlayUI::Action::FastForwardMultiplierChanged) {
+            const float multiplier =
+                SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
+            char value[24]{};
+            std::snprintf(value, sizeof(value), "%.2f", multiplier);
+            SwitchFrontend::GBAStationConfig::SetConfigValue("fastforward.multiplier", value);
+            const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
+            char message[64]{};
+            std::snprintf(message, sizeof(message), saved ? "快进倍率已设为 %.2fx"
+                                                         : "快进倍率保存失败",
+                          multiplier);
+            SwitchFrontend::OverlayUI::ShowToast(message);
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::OverlaySettingsChanged ||
+                   menu_action == SwitchFrontend::OverlayUI::Action::OverlaySettingsCommitted) {
+            const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
+                launch_options.rom_path, launch_options.title, display);
+            SwitchFrontend::OverlayUI::ShowToast(saved ? "遮罩设置已保存"
+                                                        : "遮罩设置保存失败");
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::Exit) {
             exit_reason = "GBAStation menu requested exit";
@@ -1099,10 +1210,39 @@ int Run(int argc, char** argv) {
             break;
         }
 
+        const bool pause_for_menu = menu_visible && pause_frame_ready;
+        if (pause_for_menu) {
+            static_cast<Vulkan::RendererVulkan&>(renderer).PresentLastFrame();
+            ++loop_count;
+            svcSleepThread(16666667);
+            continue;
+        }
+
         const Core::System::ResultStatus run_result = system.RunLoop();
         loop_count++;
+        if (pending_overlay_reinit && run_result == Core::System::ResultStatus::Success &&
+            system.IsPoweredOn()) {
+            auto& reset_renderer = system.GPU().Renderer();
+            SwitchFrontend::VulkanOverlay::SetDisplaySettings(
+                SwitchFrontend::VulkanOverlay::GetDisplaySettings());
+            menu_initialized = SwitchFrontend::VulkanOverlay::Init(
+                static_cast<Vulkan::RendererVulkan&>(reset_renderer));
+            pending_overlay_reinit = false;
+            pause_frame_baseline = reset_renderer.GetCurrentFrame();
+            last_logged_frame = pause_frame_baseline;
+            last_heartbeat_frame = pause_frame_baseline;
+            DebugLog("GBAStation menu reinit after reset=%d frame=%d",
+                     menu_initialized ? 1 : 0, pause_frame_baseline);
+        }
         const s32 renderer_frame =
             system.IsPoweredOn() ? system.GPU().Renderer().GetCurrentFrame() : last_logged_frame;
+        if (!pause_frame_ready &&
+            system.GetSaveStateStatus() == Core::System::SaveStateStatus::NONE &&
+            renderer_frame > pause_frame_baseline) {
+            pause_frame_ready = true;
+            DebugLog("pause frame ready after state/reset baseline=%d frame=%d",
+                     pause_frame_baseline, renderer_frame);
+        }
         if (!saw_guest_frame && renderer_frame > 0) {
             saw_guest_frame = true;
             DebugLog("first guest frame reached: renderer_frame=%d keepalives=%llu", renderer_frame,
@@ -1156,12 +1296,17 @@ int Run(int argc, char** argv) {
     DebugLog("shutting down: reason=%s powered=%d applet=%d iterations=%llu", exit_reason,
              system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
              static_cast<unsigned long long>(loop_count));
+    Settings::ResetTemporaryFrameLimit();
     const auto shutdown_started = Clock::now();
     if (menu_initialized) {
         DebugLog("shutdown step: VulkanOverlay::Shutdown begin");
         SwitchFrontend::VulkanOverlay::Shutdown();
         menu_initialized = false;
         DebugLog("shutdown step: VulkanOverlay::Shutdown done");
+    }
+    if (menu_audio_muted) {
+        Settings::values.volume.SetValue(menu_restore_volume);
+        menu_audio_muted = false;
     }
     window.SetInputSuppressed(false);
     InputCommon::SwitchHID::SetInputSuppressed(false);

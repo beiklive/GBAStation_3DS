@@ -25,14 +25,16 @@ namespace {
 
 using OptionMap = std::map<std::string, std::string, std::less<>>;
 
-constexpr std::array<const char*, 4> kConfigPaths = {{
+constexpr const char* kDefaultWritableConfigPath =
+    "sdmc:/GBAStation/3ds/config/cores/azahar.jsonc";
+
+constexpr std::array<const char*, 5> kConfigPaths = {{
+    kDefaultWritableConfigPath,
     "sdmc:/GBAStation/3ds/cores/azahar.jsonc",
     "sdmc:/GBAStation/3ds/cores/azahar.json",
     "romfs:/config/azahar.jsonc",
     "sdmc:/GBAStation/3ds/config.jsonc",
 }};
-
-constexpr const char* kDefaultWritableConfigPath = "sdmc:/GBAStation/3ds/config/cores/azahar.jsonc";
 
 void EnsureWritableConfigDirectory() {
     mkdir("sdmc:/GBAStation", 0777);

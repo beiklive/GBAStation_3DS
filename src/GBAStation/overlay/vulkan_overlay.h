@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "GBAStation/display_settings.h"
 #include "GBAStation/switch_libnx.h"
 
 namespace Vulkan {
@@ -23,6 +24,9 @@ bool ShouldExit();
 
 // Returns and clears the last queued OverlayUI::Action (0 when none).
 int ConsumeAction();
+
+void SetDisplaySettings(const GBAStationDisplaySettings& settings);
+GBAStationDisplaySettings GetDisplaySettings();
 
 void Shutdown();
 

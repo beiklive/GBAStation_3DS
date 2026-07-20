@@ -83,6 +83,10 @@ public:
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override;
 
+    // Re-renders the most recently uploaded 3DS screen textures without advancing the core.
+    // The Switch menu uses this to keep navigation responsive while emulation is paused.
+    void PresentLastFrame();
+
     [[nodiscard]] const Instance& GetVulkanInstance() const noexcept {
         return instance;
     }
