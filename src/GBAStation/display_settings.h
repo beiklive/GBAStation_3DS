@@ -20,6 +20,7 @@ struct GBAStationDisplaySettings {
     float bottom_scale{1.0f};
     float bottom_offset_x{};
     float bottom_offset_y{};
+    float bottom_opacity{1.0f};
     bool overlay_enabled{};
     std::string overlay_path;
 };

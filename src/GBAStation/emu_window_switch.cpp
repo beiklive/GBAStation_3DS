@@ -120,14 +120,6 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
                                         settings.integer_scale);
         layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
                                            Core::kScreenBottomHeight, settings.integer_scale);
-    } else if (settings.screen_layout == "priority_bottom") {
-        const float small_width = std::max(1.0f, (w - positive_gap) / 3.0f);
-        const Region bottom{0.0f, 0.0f, w - small_width - positive_gap, h};
-        const Region top{w - small_width, 0.0f, small_width, h};
-        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
-                                           Core::kScreenBottomHeight, settings.integer_scale);
-        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
     } else if (settings.screen_layout == "hybrid") {
         const float right_width = std::max(1.0f, (w - positive_gap) / 3.0f);
         const float right_x = w - right_width;
@@ -182,6 +174,7 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
                                            Core::kScreenBottomHeight, settings.integer_scale);
     }
     layout.render_3d_mode = Settings::values.render_3d.GetValue();
+    layout.bottom_opacity = std::clamp(settings.bottom_opacity, 0.0f, 1.0f);
     return layout;
 }
 

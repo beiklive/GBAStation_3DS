@@ -36,9 +36,8 @@ std::string NormalizePath(std::string path) {
 }
 
 bool IsKnownLayout(const std::string& layout) {
-    constexpr std::array<const char*, 8> Layouts{{
-        "vertical", "horizontal", "priority_top", "priority_bottom",
-        "hybrid", "top", "bottom", "custom",
+    constexpr std::array<const char*, 7> Layouts{{
+        "vertical", "horizontal", "priority_top", "hybrid", "top", "bottom", "custom",
     }};
     return std::find(Layouts.begin(), Layouts.end(), layout) != Layouts.end();
 }
@@ -69,6 +68,7 @@ GBAStationDisplaySettings ReadDisplaySettings(const nlohmann::json& item) {
         std::clamp(item.value("ndsBottomOffsetX", 0.0f), -1024.0f, 1024.0f);
     settings.bottom_offset_y =
         std::clamp(item.value("ndsBottomOffsetY", 0.0f), -1024.0f, 1024.0f);
+    settings.bottom_opacity = std::clamp(item.value("ndsBottomOpacity", 1.0f), 0.0f, 1.0f);
     settings.overlay_enabled = item.value("overlayEnabled", false);
     settings.overlay_path = item.value("overlayPath", "");
     return settings;
@@ -87,6 +87,7 @@ void WriteDisplaySettings(nlohmann::json& item, const GBAStationDisplaySettings&
     item["ndsBottomScale"] = std::clamp(settings.bottom_scale, 1.0f, 10.0f);
     item["ndsBottomOffsetX"] = std::clamp(settings.bottom_offset_x, -1024.0f, 1024.0f);
     item["ndsBottomOffsetY"] = std::clamp(settings.bottom_offset_y, -1024.0f, 1024.0f);
+    item["ndsBottomOpacity"] = std::clamp(settings.bottom_opacity, 0.0f, 1.0f);
 }
 
 void WriteOverlaySettings(nlohmann::json& item, const GBAStationDisplaySettings& settings) {
@@ -107,6 +108,7 @@ void WriteAllDisplaySettings(nlohmann::json& item, const GBAStationDisplaySettin
     item["ndsBottomScale"] = std::clamp(settings.bottom_scale, 1.0f, 10.0f);
     item["ndsBottomOffsetX"] = std::clamp(settings.bottom_offset_x, -1024.0f, 1024.0f);
     item["ndsBottomOffsetY"] = std::clamp(settings.bottom_offset_y, -1024.0f, 1024.0f);
+    item["ndsBottomOpacity"] = std::clamp(settings.bottom_opacity, 0.0f, 1.0f);
     WriteOverlaySettings(item, settings);
 }
 

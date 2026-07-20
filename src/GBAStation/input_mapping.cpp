@@ -204,11 +204,6 @@ u64 PointerClickHotkeyMask() {
     return it == values.end() ? 0 : ParseMask(it->second, 0);
 }
 
-u64 SwapScreensHotkeyMask() {
-    const auto it = values.find("3ds.hotkey.swap_screens.pad");
-    return it == values.end() ? 0 : ParseMask(it->second, 0);
-}
-
 u64 MicInputHotkeyMask() {
     if (const auto it = values.find("3ds.hotkey.mic_input.pad"); it != values.end()) {
         return ParseMask(it->second, 0);
@@ -242,10 +237,6 @@ bool PointerModeHotkeyPressed(const PadState& pad) {
 
 bool PointerClickHotkeyPressed(const PadState& pad) {
     return BindingPressed("3ds.hotkey.pointer_click.pad", 0, pad);
-}
-
-bool SwapScreensHotkeyPressed(const PadState& pad) {
-    return BindingPressed("3ds.hotkey.swap_screens.pad", 0, pad);
 }
 
 bool MicInputHotkeyPressed(const PadState& pad) {

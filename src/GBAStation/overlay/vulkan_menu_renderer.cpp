@@ -238,7 +238,7 @@ bool BuildFontAtlas() {
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
         "同步遮罩同步画面设置执行已同步到个游戏失败"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
-        "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
+        "竖向横向上屏优先混合仅上屏仅下屏自定义透明度开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
         "GBAStation 3DS Resume Save Load Cheats Display Reset Exit Slot Empty Occupied A B X";
     std::set<int> unique;
@@ -1108,7 +1108,6 @@ void DrawFastForwardIndicator(const State& state) {
 const char* DisplayLayoutLabel(std::string_view layout) {
     if (layout == "vertical") return "竖向";
     if (layout == "horizontal") return "横向";
-    if (layout == "priority_bottom") return "下屏优先";
     if (layout == "hybrid") return "混合";
     if (layout == "top") return "仅上屏";
     if (layout == "bottom") return "仅下屏";
@@ -1160,6 +1159,11 @@ void DrawCustomLayoutSidebar(const State& state) {
         std::snprintf(text, sizeof(text), "%.0f px", value);
         return std::string{text};
     };
+    auto opacityValue = [](float value) {
+        char text[24]{};
+        std::snprintf(text, sizeof(text), "%.0f%%", std::clamp(value, 0.0f, 1.0f) * 100.0f);
+        return std::string{text};
+    };
 
     section(116, "上屏布局");
     row(0, 150, "缩放", scaleValue(state.display.top_scale));
@@ -1169,6 +1173,7 @@ void DrawCustomLayoutSidebar(const State& state) {
     row(3, 384, "缩放", scaleValue(state.display.bottom_scale));
     row(4, 444, "X 偏移", offsetValue(state.display.bottom_offset_x));
     row(5, 504, "Y 偏移", offsetValue(state.display.bottom_offset_y));
+    row(6, 564, "透明度", opacityValue(state.display.bottom_opacity));
 }
 
 void DrawOverlaySidebar(const State& state) {

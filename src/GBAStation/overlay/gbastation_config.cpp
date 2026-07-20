@@ -621,14 +621,6 @@ public:
         } else if (const auto legacy = GetOptional("display_mode"); legacy) {
             ApplyDisplaySize(*legacy);
         }
-        if (const auto v = GetFirstOptional({"swap_screens", "swap_screen", "citra_swap_screen"});
-            v) {
-            if (const auto b = ParseBool(*v)) {
-                Settings::values.swap_screen.SetValue(*b);
-            } else {
-                Settings::values.swap_screen.SetValue(*v == "Bottom");
-            }
-        }
         if (const auto v = GetFirstOptional({"large_screen_proportion",
                                              "citra_large_screen_proportion"});
             v) {

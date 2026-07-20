@@ -32,16 +32,15 @@ namespace {
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
 constexpr int DisplayControlCount = 10;
-constexpr int CustomLayoutControlCount = 6;
+constexpr int CustomLayoutControlCount = 7;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
 constexpr const char* OverlayRoot = "sdmc:/GBAStation/overlays";
 constexpr std::array<float, 10> FastForwardValues{{
     0.1f, 0.5f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 3.0f, 4.0f, 5.0f,
 }};
-constexpr std::array<const char*, 8> LayoutIds{{
-    "vertical", "horizontal", "priority_top", "priority_bottom",
-    "hybrid", "top", "bottom", "custom",
+constexpr std::array<const char*, 7> LayoutIds{{
+    "vertical", "horizontal", "priority_top", "hybrid", "top", "bottom", "custom",
 }};
 
 std::atomic_bool initialized{};
@@ -66,6 +65,7 @@ std::atomic<float> display_top_offset_y{};
 std::atomic<float> display_bottom_scale{1.0f};
 std::atomic<float> display_bottom_offset_x{};
 std::atomic<float> display_bottom_offset_y{};
+std::atomic<float> display_bottom_opacity{1.0f};
 std::atomic_bool display_overlay_enabled{};
 std::atomic_bool overlay_sidebar{};
 std::atomic_int overlay_focus{};
@@ -117,7 +117,7 @@ float StepFloat(std::atomic<float>& value, int direction, float step, float mini
 }
 
 bool CustomLayoutEnabled() {
-    return display_layout.load(std::memory_order_acquire) == 7;
+    return display_layout.load(std::memory_order_acquire) == 6;
 }
 
 int NextDisplayFocus(int focus, int direction) {
@@ -415,6 +415,9 @@ void HandleCustomLayoutAdjustment(int row, int direction) {
     case 5:
         StepFloat(display_bottom_offset_y, direction, 1.0f, -1024.0f, 1024.0f);
         break;
+    case 6:
+        StepFloat(display_bottom_opacity, direction, 0.05f, 0.0f, 1.0f);
+        break;
     default:
         return;
     }
@@ -430,6 +433,7 @@ void ResetCustomLayoutValue(int row) {
     case 3: display_bottom_scale.store(1.0f, std::memory_order_release); break;
     case 4: display_bottom_offset_x.store(0.0f, std::memory_order_release); break;
     case 5: display_bottom_offset_y.store(0.0f, std::memory_order_release); break;
+    case 6: display_bottom_opacity.store(1.0f, std::memory_order_release); break;
     default: return;
     }
     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
@@ -842,6 +846,8 @@ void SetDisplaySettings(const GBAStationDisplaySettings& settings) {
         std::clamp(settings.bottom_offset_x, -1024.0f, 1024.0f), std::memory_order_release);
     display_bottom_offset_y.store(
         std::clamp(settings.bottom_offset_y, -1024.0f, 1024.0f), std::memory_order_release);
+    display_bottom_opacity.store(std::clamp(settings.bottom_opacity, 0.0f, 1.0f),
+                                 std::memory_order_release);
     display_overlay_enabled.store(settings.overlay_enabled, std::memory_order_release);
     {
         std::lock_guard lock{display_data_mutex};
@@ -868,6 +874,7 @@ GBAStationDisplaySettings GetDisplaySettings() {
     settings.bottom_scale = display_bottom_scale.load(std::memory_order_acquire);
     settings.bottom_offset_x = display_bottom_offset_x.load(std::memory_order_acquire);
     settings.bottom_offset_y = display_bottom_offset_y.load(std::memory_order_acquire);
+    settings.bottom_opacity = display_bottom_opacity.load(std::memory_order_acquire);
     settings.overlay_enabled = display_overlay_enabled.load(std::memory_order_acquire);
     {
         std::lock_guard lock{display_data_mutex};

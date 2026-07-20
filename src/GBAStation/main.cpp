@@ -895,6 +895,9 @@ void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& s
         if (TryParseFloat(GetConfigValue("ndsBottomOffsetY"), parsed_float)) {
             settings.bottom_offset_y = std::clamp(parsed_float, -1024.0f, 1024.0f);
         }
+        if (TryParseFloat(GetConfigValue("ndsBottomOpacity"), parsed_float)) {
+            settings.bottom_opacity = std::clamp(parsed_float, 0.0f, 1.0f);
+        }
     }
 
     if (include_overlay) {
@@ -947,6 +950,8 @@ bool SaveGlobalScreenDefaults(const SwitchFrontend::GBAStationDisplaySettings& d
                                                      FormatFloat(display.bottom_offset_x));
     SwitchFrontend::GBAStationConfig::SetConfigValue("ndsBottomOffsetY",
                                                      FormatFloat(display.bottom_offset_y));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsBottomOpacity",
+                                                     FormatFloat(display.bottom_opacity));
     return SwitchFrontend::GBAStationConfig::SaveConfig();
 }
 
@@ -1062,6 +1067,7 @@ int Run(int argc, char** argv) {
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
     SwitchFrontend::GBAStationConfig::ApplyConfig();
+    Settings::values.swap_screen.SetValue(false);
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
@@ -1178,7 +1184,6 @@ int Run(int argc, char** argv) {
     float menu_restore_volume = Settings::values.volume.GetValue();
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
-    bool previous_swap_screens_combo = false;
     bool previous_mic_input_combo = false;
     bool mic_input_simulated = false;
     AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
@@ -1277,19 +1282,6 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = false;
         }
         bool suppress_game_input = menu_visible || block_game_input_until_release;
-        const bool swap_screens_combo =
-            SwitchFrontend::InputMapping::SwapScreensHotkeyPressed(pad);
-        if (!suppress_game_input && swap_screens_combo && !previous_swap_screens_combo) {
-            const bool swapped = !Settings::values.swap_screen.GetValue();
-            Settings::values.swap_screen.SetValue(swapped);
-            window.SetDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
-            SwitchFrontend::OverlayUI::ShowToast(swapped ? "已交换上下屏" : "已恢复上下屏");
-            DebugLog("hotkey swap screens=%d", swapped ? 1 : 0);
-            block_game_input_until_release = true;
-            suppress_game_input = true;
-        }
-        previous_swap_screens_combo = swap_screens_combo;
-
         const bool mic_input_combo = SwitchFrontend::InputMapping::MicInputHotkeyPressed(pad);
         if (!suppress_game_input && mic_input_combo && !previous_mic_input_combo) {
             if (!mic_input_simulated) {
