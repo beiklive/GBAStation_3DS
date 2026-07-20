@@ -1037,6 +1037,10 @@ int Run(int argc, char** argv) {
     float menu_restore_volume = Settings::values.volume.GetValue();
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
+    bool previous_swap_screens_combo = false;
+    bool previous_mic_input_combo = false;
+    bool mic_input_simulated = false;
+    AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
     bool last_fast_forward_active = false;
     bool fast_forward_compile_throttled = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
@@ -1133,7 +1137,43 @@ int Run(int argc, char** argv) {
         if (!menu_visible && block_game_input_until_release && padGetButtons(&pad) == 0) {
             block_game_input_until_release = false;
         }
-        const bool suppress_game_input = menu_visible || block_game_input_until_release;
+        bool suppress_game_input = menu_visible || block_game_input_until_release;
+        const u64 swap_screens_mask = SwitchFrontend::InputMapping::SwapScreensHotkeyMask();
+        const bool swap_screens_combo =
+            swap_screens_mask != 0 && (held_buttons & swap_screens_mask) == swap_screens_mask;
+        if (!suppress_game_input && swap_screens_combo && !previous_swap_screens_combo) {
+            const bool swapped = !Settings::values.swap_screen.GetValue();
+            Settings::values.swap_screen.SetValue(swapped);
+            window.SetDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
+            SwitchFrontend::OverlayUI::ShowToast(swapped ? "已交换上下屏" : "已恢复上下屏");
+            DebugLog("hotkey swap screens=%d", swapped ? 1 : 0);
+            block_game_input_until_release = true;
+            suppress_game_input = true;
+        }
+        previous_swap_screens_combo = swap_screens_combo;
+
+        const u64 mic_input_mask = SwitchFrontend::InputMapping::MicInputHotkeyMask();
+        const bool mic_input_combo =
+            mic_input_mask != 0 && (held_buttons & mic_input_mask) == mic_input_mask;
+        if (!suppress_game_input && mic_input_combo && !previous_mic_input_combo) {
+            if (!mic_input_simulated) {
+                mic_restore_input_type = Settings::values.input_type.GetValue();
+                Settings::values.input_type.SetValue(AudioCore::InputType::Static);
+                mic_input_simulated = true;
+                SwitchFrontend::OverlayUI::ShowToast("已开始模拟麦克风输入");
+                DebugLog("hotkey microphone simulation on");
+            } else {
+                Settings::values.input_type.SetValue(mic_restore_input_type);
+                mic_input_simulated = false;
+                SwitchFrontend::OverlayUI::ShowToast("已停止模拟麦克风输入");
+                DebugLog("hotkey microphone simulation off");
+            }
+            system.ApplySettings();
+            block_game_input_until_release = true;
+            suppress_game_input = true;
+        }
+        previous_mic_input_combo = mic_input_combo;
+
         window.SetInputSuppressed(suppress_game_input);
         InputCommon::SwitchHID::SetInputSuppressed(suppress_game_input);
         window.PollEvents();
@@ -1343,6 +1383,10 @@ int Run(int argc, char** argv) {
             static_cast<int>(remaining_play_time));
     }
     Settings::values.use_vsync.SetValue(normal_vsync);
+    if (mic_input_simulated) {
+        Settings::values.input_type.SetValue(mic_restore_input_type);
+        mic_input_simulated = false;
+    }
     SwitchFrontend::VulkanOverlay::SetFastForwardActive(false);
     Settings::ResetTemporaryFrameLimit();
     const auto shutdown_started = Clock::now();

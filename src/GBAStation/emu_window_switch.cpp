@@ -9,6 +9,7 @@
 #include <cmath>
 #include <utility>
 
+#include "GBAStation/input_mapping.h"
 #include "common/settings.h"
 #include "core/3ds.h"
 #include "core/frontend/framebuffer_layout.h"
@@ -325,7 +326,6 @@ bool EmuWindowSwitch::PollTouch() {
 void EmuWindowSwitch::PollControllerCursor() {
     padUpdate(&cursor_pad);
     const u64 buttons = padGetButtons(&cursor_pad);
-    const u64 buttons_down = padGetButtonsDown(&cursor_pad);
     const auto now = std::chrono::steady_clock::now();
     float delta_time = CursorDefaultFrameTime;
     if (last_cursor_update.time_since_epoch().count() != 0) {
@@ -334,7 +334,11 @@ void EmuWindowSwitch::PollControllerCursor() {
     }
     last_cursor_update = now;
 
-    const bool toggle_cursor = (buttons_down & HidNpadButton_StickR) != 0;
+    const u64 pointer_mode_mask = InputMapping::PointerModeHotkeyMask();
+    const bool pointer_mode_down =
+        pointer_mode_mask != 0 && (buttons & pointer_mode_mask) == pointer_mode_mask;
+    const bool toggle_cursor = pointer_mode_down && !pointer_mode_combo_down;
+    pointer_mode_combo_down = pointer_mode_down;
 
     if (toggle_cursor) {
         cursor_visible = !cursor_visible;
@@ -360,7 +364,10 @@ void EmuWindowSwitch::PollControllerCursor() {
                           static_cast<float>(Core::kScreenBottomHeight - 1));
 
     const auto [framebuffer_x, framebuffer_y] = CursorFramebufferPosition();
-    if (buttons & HidNpadButton_ZR) {
+    const u64 pointer_click_mask = InputMapping::PointerClickHotkeyMask();
+    const bool pointer_click =
+        pointer_click_mask != 0 && (buttons & pointer_click_mask) == pointer_click_mask;
+    if (pointer_click) {
         if (cursor_touch_pressed) {
             TouchMoved(framebuffer_x, framebuffer_y);
         } else {

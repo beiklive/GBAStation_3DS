@@ -35,6 +35,7 @@ private:
     bool physical_touch_pressed{};
     bool cursor_visible{};
     bool cursor_touch_pressed{};
+    bool pointer_mode_combo_down{};
     bool input_suppressed{};
     float cursor_x{};
     float cursor_y{};

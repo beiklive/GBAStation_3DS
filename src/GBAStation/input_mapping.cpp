@@ -116,6 +116,29 @@ u64 FastForwardHotkeyMask() {
                               : ParseMask(it->second, HidNpadButton_StickL);
 }
 
+u64 PointerModeHotkeyMask() {
+    const auto it = values.find("3ds.hotkey.pointer_mode.pad");
+    return it == values.end() ? 0 : ParseMask(it->second, 0);
+}
+
+u64 PointerClickHotkeyMask() {
+    const auto it = values.find("3ds.hotkey.pointer_click.pad");
+    return it == values.end() ? 0 : ParseMask(it->second, 0);
+}
+
+u64 SwapScreensHotkeyMask() {
+    const auto it = values.find("3ds.hotkey.swap_screens.pad");
+    return it == values.end() ? 0 : ParseMask(it->second, 0);
+}
+
+u64 MicInputHotkeyMask() {
+    if (const auto it = values.find("3ds.hotkey.mic_input.pad"); it != values.end()) {
+        return ParseMask(it->second, 0);
+    }
+    const auto legacy = values.find("3ds.hotkey.mic_blow.pad");
+    return legacy == values.end() ? 0 : ParseMask(legacy->second, 0);
+}
+
 bool FastForwardToggleMode() {
     const auto it = values.find("fastforward.mode");
     return it != values.end() && it->second == "toggle";
