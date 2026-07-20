@@ -908,7 +908,6 @@ int Run(int argc, char** argv) {
     StartupLog("Run: ConfigureSettings");
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
-    SwitchFrontend::GBAStationConfig::ApplyConfig();
     {
         const std::string multiplier =
             SwitchFrontend::GBAStationConfig::GetConfigValue("fastforward.multiplier", "4.0");
@@ -921,6 +920,7 @@ int Run(int argc, char** argv) {
     }
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
+    SwitchFrontend::GBAStationConfig::ApplyConfig();
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even

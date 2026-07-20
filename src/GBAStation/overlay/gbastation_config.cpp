@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
@@ -34,6 +35,11 @@ constexpr std::array<const char*, 5> kConfigPaths = {{
     "sdmc:/GBAStation/3ds/cores/azahar.json",
     "romfs:/config/azahar.jsonc",
     "sdmc:/GBAStation/3ds/config.jsonc",
+}};
+
+constexpr std::array<const char*, 2> kBeikliveConfigPaths = {{
+    "sdmc:/GBAStation/config/config.cfg",
+    "/GBAStation/config/config.cfg",
 }};
 
 void EnsureWritableConfigDirectory() {
@@ -134,6 +140,89 @@ std::string JsonScalarToString(const nlohmann::json& value) {
     return {};
 }
 
+std::string Trim(std::string_view text) {
+    std::size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    if (begin == text.size()) {
+        return {};
+    }
+    std::size_t end = text.size() - 1;
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end]))) {
+        --end;
+    }
+    return std::string(text.substr(begin, end - begin + 1));
+}
+
+std::string UnescapeFlatConfig(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool escaped = false;
+    for (const char c : text) {
+        if (escaped) {
+            out.push_back(c);
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        out.push_back(c);
+    }
+    if (escaped) {
+        out.push_back('\\');
+    }
+    return out;
+}
+
+std::string DecodeFlatConfigValue(std::string_view encoded) {
+    const std::size_t sep = encoded.find('|');
+    if (sep == std::string_view::npos) {
+        return std::string(encoded);
+    }
+    const std::string_view type = encoded.substr(0, sep);
+    const std::string_view payload = encoded.substr(sep + 1);
+    if (type == "s") {
+        return UnescapeFlatConfig(payload);
+    }
+    return std::string(payload);
+}
+
+std::size_t ImportBeikliveFlatConfig(const char* path, OptionMap& options) {
+    std::string content;
+    if (!ReadWholeFile(path, content)) {
+        return 0;
+    }
+
+    std::size_t imported = 0;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+        const std::size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+
+        const std::string key = Trim(std::string_view(trimmed).substr(0, eq));
+        const std::string raw_value = Trim(std::string_view(trimmed).substr(eq + 1));
+        if (key.rfind("core.azahar.", 0) == 0) {
+            options[key.substr(std::string_view("core.azahar.").size())] =
+                DecodeFlatConfigValue(raw_value);
+            ++imported;
+        } else if (key == "fastforward.multiplier") {
+            options[key] = DecodeFlatConfigValue(raw_value);
+            ++imported;
+        }
+    }
+    return imported;
+}
+
 std::string LowerCopy(std::string_view value) {
     std::string out(value);
     std::transform(out.begin(), out.end(), out.begin(),
@@ -221,6 +310,18 @@ AudioCore::InputType ParseInputType(std::string_view value) {
     return AudioCore::InputType::Auto;
 }
 
+Settings::AudioEmulation ParseAudioEmulation(std::string_view value) {
+    const std::string lower = LowerCopy(value);
+    if (lower == "lle") {
+        return Settings::AudioEmulation::LLE;
+    }
+    if (lower == "lle_multithreaded" || lower == "lle-multithreaded" ||
+        lower == "lle_threaded") {
+        return Settings::AudioEmulation::LLEMultithreaded;
+    }
+    return Settings::AudioEmulation::HLE;
+}
+
 Settings::TextureFilter ParseTextureFilter(std::string_view value) {
     const std::string lower = LowerCopy(value);
     if (lower == "anime4k ultrafast" || lower == "anime4k") {
@@ -257,6 +358,7 @@ public:
     void ReloadConfig() {
         options.clear();
         loaded_path.clear();
+        bool loaded_any = false;
 
         for (const char* path : kConfigPaths) {
             std::string content;
@@ -277,9 +379,24 @@ public:
             }
             loaded_path = path;
             LOG_INFO(Frontend, "GBAStation config loaded from {} ({} options)", path, options.size());
-            return;
+            loaded_any = true;
+            break;
         }
-        LOG_INFO(Frontend, "no GBAStation config found; using defaults");
+
+        for (const char* path : kBeikliveConfigPaths) {
+            const std::size_t imported = ImportBeikliveFlatConfig(path, options);
+            if (imported == 0) {
+                continue;
+            }
+            loaded_path = loaded_path.empty() ? path : loaded_path + " + " + path;
+            loaded_any = true;
+            LOG_INFO(Frontend, "GBAStation config imported {} options from {}", imported, path);
+            break;
+        }
+
+        if (!loaded_any) {
+            LOG_INFO(Frontend, "no GBAStation config found; using defaults");
+        }
     }
 
     std::string GetConfigValue(std::string_view key, std::string_view default_value) const {
@@ -331,6 +448,12 @@ public:
         // Map the subset of GBAStation options that translate cleanly onto azahar's
         // Settings. Unknown keys are ignored so the same config file can carry
         // options this core doesn't understand.
+        if (const auto v = GetFirstOptional({"use_cpu_jit", "cpu_jit", "citra_use_cpu_jit"});
+            v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.use_cpu_jit.SetValue(*b);
+            }
+        }
         if (const auto v = GetFirstOptional({"upscale", "resolution_factor",
                                              "citra_resolution_factor"});
             v) {
@@ -393,9 +516,35 @@ public:
                 Settings::values.async_shader_compilation.SetValue(*b);
             }
         }
+        if (const auto v = GetFirstOptional({"async_presentation", "citra_async_presentation"});
+            v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.async_presentation.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional({"spirv_shader_gen", "citra_spirv_shader_gen"}); v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.spirv_shader_gen.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional({"disable_spirv_optimizer",
+                                             "citra_disable_spirv_optimizer"});
+            v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.disable_spirv_optimizer.SetValue(*b);
+            }
+        }
         if (const auto v = GetFirstOptional({"vsync", "use_vsync"}); v) {
             if (const auto b = ParseBool(*v)) {
                 Settings::values.use_vsync.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional({"frame_limit", "speed_limit",
+                                             "citra_frame_limit"});
+            v) {
+            if (const auto f = ParseFloat(*v)) {
+                Settings::values.frame_limit.SetValue(std::clamp(static_cast<double>(*f),
+                                                                 0.0, 1000.0));
             }
         }
         if (const auto v = GetFirstOptional({"simulate_3ds_gpu_timings",
@@ -403,6 +552,18 @@ public:
             v) {
             if (const auto b = ParseBool(*v)) {
                 Settings::values.simulate_3ds_gpu_timings.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional({"renderer_debug", "citra_renderer_debug"}); v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.renderer_debug.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional({"dump_command_buffers",
+                                             "citra_dump_command_buffers"});
+            v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.dump_command_buffers.SetValue(*b);
             }
         }
         if (const auto v = GetFirstOptional({"right_eye", "render_right_eye"}); v) {
@@ -473,6 +634,23 @@ public:
             v) {
             if (const auto f = ParseFloat(*v)) {
                 Settings::values.large_screen_proportion.SetValue(std::clamp(*f, 1.0f, 16.0f));
+            }
+        }
+        if (const auto v = GetFirstOptional({"audio_emulation", "citra_audio_emulation"}); v) {
+            Settings::values.audio_emulation.SetValue(ParseAudioEmulation(*v));
+        }
+        if (const auto v = GetFirstOptional({"audio_stretching", "enable_audio_stretching",
+                                             "citra_enable_audio_stretching"});
+            v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.enable_audio_stretching.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional({"realtime_audio", "enable_realtime_audio",
+                                             "citra_enable_realtime_audio"});
+            v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.enable_realtime_audio.SetValue(*b);
             }
         }
     }
