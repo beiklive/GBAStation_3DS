@@ -1428,6 +1428,10 @@ void RendererVulkan::SwapBuffers() {
     system.perf_stats->StartSwap();
     if (fast_forward_enabled && fast_forward_present_divisor > 1 &&
         (++fast_forward_present_counter % fast_forward_present_divisor) != 0) {
+        // Presentation can be skipped, but rasterizer commands still need to be submitted.
+        // Otherwise several fast-forward frames accumulate in one command buffer and complex
+        // scene transitions can exhaust host memory or overwhelm the driver when finally flushed.
+        scheduler.Flush();
         system.perf_stats->EndSwap();
         rasterizer.TickFrame();
         EndFrame();

@@ -39,14 +39,8 @@ constexpr u64 TEXTURE_BUFFER_SIZE = 2_MiB;
 constexpr vk::BufferUsageFlags BUFFER_USAGE =
     vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer;
 
-bool ShouldWaitForPipelineBuild(bool async_shaders, [[maybe_unused]] u32 num_vertices) {
-#ifdef __SWITCH__
-    // On Switch, transitions and UI effects often use tiny draws. Waiting for those pipelines
-    // defeats async shader compilation and stalls the emulation thread.
-    return !async_shaders;
-#else
+bool ShouldWaitForPipelineBuild(bool async_shaders, u32 num_vertices) {
     return !async_shaders || num_vertices <= 6;
-#endif
 }
 
 struct DrawParams {

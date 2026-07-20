@@ -161,6 +161,12 @@ public:
         return threads.size();
     }
 
+    [[nodiscard]] std::size_t PendingRequests() const noexcept {
+        const std::size_t scheduled = work_scheduled.load(std::memory_order_acquire);
+        const std::size_t done = work_done.load(std::memory_order_acquire);
+        return scheduled > done ? scheduled - done : 0;
+    }
+
 private:
     std::queue<Task> requests;
     std::mutex queue_mutex;

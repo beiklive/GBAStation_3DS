@@ -101,6 +101,10 @@ public:
         profile.enable_accurate_mul = _accurate_mul;
     }
 
+    [[nodiscard]] std::size_t PendingCompilationCount() const noexcept {
+        return shader_workers.PendingRequests() + pipeline_workers.PendingRequests();
+    }
+
 private:
     friend ShaderDiskCache;
 

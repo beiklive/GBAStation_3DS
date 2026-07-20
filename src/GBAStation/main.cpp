@@ -1038,6 +1038,7 @@ int Run(int argc, char** argv) {
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
     bool last_fast_forward_active = false;
+    bool fast_forward_compile_throttled = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
     const char* exit_reason = "loop condition ended";
     while (true) {
@@ -1084,10 +1085,24 @@ int Run(int argc, char** argv) {
             fast_forward_toggle = !fast_forward_toggle;
         }
         previous_fast_forward_combo = fast_forward_combo;
-        const bool fast_forward_active =
+        const bool fast_forward_requested =
             !menu_visible && SwitchFrontend::InputMapping::FastForwardEnabled() &&
             (SwitchFrontend::InputMapping::FastForwardToggleMode() ? fast_forward_toggle
                                                                    : fast_forward_combo);
+        auto& vulkan_renderer = static_cast<Vulkan::RendererVulkan&>(renderer);
+        const std::size_t pending_compilations = vulkan_renderer.PendingCompilationCount();
+        if (!fast_forward_requested) {
+            fast_forward_compile_throttled = false;
+        } else if (!fast_forward_compile_throttled && pending_compilations >= 4) {
+            fast_forward_compile_throttled = true;
+            DebugLog("fast forward throttled: pending shader/pipeline work=%zu",
+                     pending_compilations);
+        } else if (fast_forward_compile_throttled && pending_compilations == 0) {
+            fast_forward_compile_throttled = false;
+            DebugLog("fast forward resumed: shader/pipeline queue drained");
+        }
+        const bool fast_forward_active =
+            fast_forward_requested && !fast_forward_compile_throttled;
         const float fast_forward_multiplier =
             SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
         Settings::is_temporary_frame_limit = fast_forward_active;
@@ -1096,8 +1111,7 @@ int Run(int argc, char** argv) {
         if (fast_forward_active != last_fast_forward_active) {
             Settings::values.use_vsync.SetValue(fast_forward_active ? false : normal_vsync);
             SwitchFrontend::VulkanOverlay::SetFastForwardActive(fast_forward_active);
-            static_cast<Vulkan::RendererVulkan&>(renderer).SetFastForward(
-                fast_forward_active, fast_forward_multiplier);
+            vulkan_renderer.SetFastForward(fast_forward_active, fast_forward_multiplier);
             DebugLog("fast forward %s multiplier=%.2f limit=%.1f",
                      fast_forward_active ? "on" : "off", fast_forward_multiplier,
                      Settings::temporary_frame_limit);

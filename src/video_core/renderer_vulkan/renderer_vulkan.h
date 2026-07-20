@@ -90,6 +90,10 @@ public:
     // Reduces presentation work while the frontend runs the core above real time.
     void SetFastForward(bool enabled, float multiplier);
 
+    [[nodiscard]] std::size_t PendingCompilationCount() const noexcept {
+        return rasterizer.PendingCompilationCount();
+    }
+
     [[nodiscard]] const Instance& GetVulkanInstance() const noexcept {
         return instance;
     }

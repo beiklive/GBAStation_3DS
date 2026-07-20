@@ -64,6 +64,10 @@ public:
     /// Switches the disk resources to the specified title
     void SwitchDiskResources(u64 title_id) override;
 
+    [[nodiscard]] std::size_t PendingCompilationCount() const noexcept {
+        return pipeline_cache.PendingCompilationCount();
+    }
+
 private:
     /// Syncs pipeline state from PICA registers
     void SyncDrawState();
