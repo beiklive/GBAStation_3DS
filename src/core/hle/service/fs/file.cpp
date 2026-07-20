@@ -96,8 +96,10 @@ void File::Read(Kernel::HLERequestContext& ctx) {
         }
         rb.PushMappedBuffer(buffer);
 
-        std::chrono::nanoseconds read_timeout_ns{backend->GetReadDelayNs(length)};
-        ctx.SleepClientThread("file::read", read_timeout_ns, nullptr);
+        const std::chrono::nanoseconds read_timeout_ns{backend->GetReadDelayNs(length)};
+        if (read_timeout_ns.count() > 0) {
+            ctx.SleepClientThread("file::read", read_timeout_ns, nullptr);
+        }
         return;
     }
 

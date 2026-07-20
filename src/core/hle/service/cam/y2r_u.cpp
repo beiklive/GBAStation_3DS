@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <array>
+#include <chrono>
 #include <cstring>
 #include "common/archives.h"
 #include "common/common_funcs.h"
@@ -518,8 +519,16 @@ void Y2R_U::StartConversion(Kernel::HLERequestContext& ctx) {
     // dst_image_size would seem to be perfect for this, but it doesn't include the gap :(
     u32 total_output_size =
         conversion.input_lines * (conversion.dst.transfer_unit + conversion.dst.gap);
+    const bool invalidate_only = conversion.dst.gap == 0;
+    const Memory::FlushMode flush_mode =
+        invalidate_only ? Memory::FlushMode::Invalidate : Memory::FlushMode::FlushAndInvalidate;
+    const auto flush_start = std::chrono::steady_clock::now();
     system.Memory().RasterizerFlushVirtualRegion(conversion.dst.address, total_output_size,
-                                                 Memory::FlushMode::FlushAndInvalidate);
+                                                 flush_mode);
+    HW::Y2R::RecordPreConversionFlush(
+        invalidate_only, total_output_size,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - flush_start)
+            .count());
 
     HW::Y2R::PerformConversion(system.Memory(), conversion);
 

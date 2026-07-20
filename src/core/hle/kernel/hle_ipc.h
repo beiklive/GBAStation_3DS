@@ -311,7 +311,8 @@ public:
                     kernel, result_function,
                     std::move(std::async(std::launch::async, [this, async_section] {
                         s64 sleep_for = async_section(*this);
-                        this->thread->WakeAfterDelay(sleep_for, true);
+                        this->thread->WakeAfterDelay(sleep_for, true,
+                                                     ThreadWakeupSource::HleRunAsync);
                     }))));
 
         } else {
@@ -351,7 +352,8 @@ public:
             // We use packaged_task so we can retrieve a std::future to pass to AsyncWakeUpCallback
             auto task = std::make_shared<std::packaged_task<void()>>([this, async_section] {
                 s64 sleep_for = async_section(*this);
-                this->thread->WakeAfterDelay(sleep_for, true);
+                this->thread->WakeAfterDelay(sleep_for, true,
+                                             ThreadWakeupSource::HleRunOnThread);
             });
 
             auto future = task->get_future();

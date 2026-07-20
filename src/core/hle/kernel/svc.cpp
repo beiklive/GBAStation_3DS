@@ -813,7 +813,7 @@ Result SVC::WaitSynchronization1(Handle handle, s64 nano_seconds) {
         thread->status = ThreadStatus::WaitSynchAny;
 
         // Create an event to wake the thread up after the specified nanosecond delay has passed
-        thread->WakeAfterDelay(nano_seconds);
+        thread->WakeAfterDelay(nano_seconds, false, ThreadWakeupSource::WaitSynchronization1);
 
         thread->wakeup_callback = std::make_shared<SVC_SyncCallback>(false);
 
@@ -883,7 +883,7 @@ Result SVC::WaitSynchronizationN(s32* out, VAddr handles_address, s32 handle_cou
         thread->wait_objects = std::move(objects);
 
         // Create an event to wake the thread up after the specified nanosecond delay has passed
-        thread->WakeAfterDelay(nano_seconds);
+        thread->WakeAfterDelay(nano_seconds, false, ThreadWakeupSource::WaitSynchronizationNAll);
 
         thread->wakeup_callback = std::make_shared<SVC_SyncCallback>(false);
 
@@ -929,7 +929,7 @@ Result SVC::WaitSynchronizationN(s32* out, VAddr handles_address, s32 handle_cou
         // consistent with hardware behavior.
 
         // Create an event to wake the thread up after the specified nanosecond delay has passed
-        thread->WakeAfterDelay(nano_seconds);
+        thread->WakeAfterDelay(nano_seconds, false, ThreadWakeupSource::WaitSynchronizationNAny);
 
         thread->wakeup_callback = std::make_shared<SVC_SyncCallback>(true);
 
@@ -1650,7 +1650,8 @@ void SVC::SleepThread(s64 nanoseconds) {
     thread_manager.WaitCurrentThread_Sleep();
 
     // Create an event to wake the thread up after the specified nanosecond delay has passed
-    thread_manager.GetCurrentThread()->WakeAfterDelay(nanoseconds);
+    thread_manager.GetCurrentThread()->WakeAfterDelay(nanoseconds, false,
+                                                      ThreadWakeupSource::SvcSleepThread);
 
     system.PrepareReschedule();
 }

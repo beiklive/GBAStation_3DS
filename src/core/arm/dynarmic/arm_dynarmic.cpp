@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstring>
 #include <thread>
+#include <atomic>
 #include <dynarmic/interface/A32/a32.h>
 #include <dynarmic/interface/optimization_flags.h>
 #include "common/assert.h"
@@ -31,6 +32,46 @@ constexpr u32 SIGTRAP = 5;
 
 namespace Core {
 
+namespace {
+
+std::atomic<u64> dynarmic_jit_instances_created{};
+std::atomic<u64> dynarmic_instruction_cache_clears{};
+std::atomic<u64> dynarmic_cache_range_invalidations{};
+std::atomic<u64> dynarmic_cache_range_invalidation_bytes{};
+std::atomic<u64> dynarmic_last_code_cache_size{};
+std::atomic<u32> dynarmic_last_optimization_flags{};
+std::atomic<u32> dynarmic_last_hook_hint_instructions{};
+std::atomic<u32> dynarmic_last_always_little_endian{};
+std::atomic<u64> dynarmic_memory_read_callbacks{};
+std::atomic<u64> dynarmic_memory_write_callbacks{};
+std::atomic<u64> dynarmic_memory_exclusive_callbacks{};
+std::atomic<u64> dynarmic_memory_code_callbacks{};
+std::atomic<u32> dynarmic_last_read_callback_addr{};
+std::atomic<u32> dynarmic_last_write_callback_addr{};
+
+constexpr std::size_t SwitchCodeCacheSize = 64 * 1024 * 1024;
+
+} // namespace
+
+DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
+    return {
+        .jit_instances_created = dynarmic_jit_instances_created.exchange(0),
+        .instruction_cache_clears = dynarmic_instruction_cache_clears.exchange(0),
+        .cache_range_invalidations = dynarmic_cache_range_invalidations.exchange(0),
+        .cache_range_invalidation_bytes = dynarmic_cache_range_invalidation_bytes.exchange(0),
+        .last_code_cache_size = dynarmic_last_code_cache_size.load(),
+        .last_optimization_flags = dynarmic_last_optimization_flags.load(),
+        .last_hook_hint_instructions = dynarmic_last_hook_hint_instructions.load(),
+        .last_always_little_endian = dynarmic_last_always_little_endian.load(),
+        .memory_read_callbacks = dynarmic_memory_read_callbacks.exchange(0),
+        .memory_write_callbacks = dynarmic_memory_write_callbacks.exchange(0),
+        .memory_exclusive_callbacks = dynarmic_memory_exclusive_callbacks.exchange(0),
+        .memory_code_callbacks = dynarmic_memory_code_callbacks.exchange(0),
+        .last_read_callback_addr = dynarmic_last_read_callback_addr.load(),
+        .last_write_callback_addr = dynarmic_last_write_callback_addr.load(),
+    };
+}
+
 class DynarmicUserCallbacks final : public Dynarmic::A32::UserCallbacks {
 public:
     explicit DynarmicUserCallbacks(ARM_Dynarmic& parent)
@@ -38,45 +79,92 @@ public:
     ~DynarmicUserCallbacks() = default;
 
     std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) override {
+#ifdef __SWITCH__
+        dynarmic_memory_code_callbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
         return memory.Read32OrNullopt(vaddr);
     }
 
     std::uint8_t MemoryRead8(VAddr vaddr) override {
+#ifdef __SWITCH__
+        dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         return memory.Read8(vaddr);
     }
     std::uint16_t MemoryRead16(VAddr vaddr) override {
+#ifdef __SWITCH__
+        dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         return memory.Read16(vaddr);
     }
     std::uint32_t MemoryRead32(VAddr vaddr) override {
+#ifdef __SWITCH__
+        dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         return memory.Read32(vaddr);
     }
     std::uint64_t MemoryRead64(VAddr vaddr) override {
+#ifdef __SWITCH__
+        dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         return memory.Read64(vaddr);
     }
 
     void MemoryWrite8(VAddr vaddr, std::uint8_t value) override {
+#ifdef __SWITCH__
+        dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         memory.Write8(vaddr, value);
     }
     void MemoryWrite16(VAddr vaddr, std::uint16_t value) override {
+#ifdef __SWITCH__
+        dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         memory.Write16(vaddr, value);
     }
     void MemoryWrite32(VAddr vaddr, std::uint32_t value) override {
+#ifdef __SWITCH__
+        dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         memory.Write32(vaddr, value);
     }
     void MemoryWrite64(VAddr vaddr, std::uint64_t value) override {
+#ifdef __SWITCH__
+        dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
+        dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
+#endif
         memory.Write64(vaddr, value);
     }
 
     bool MemoryWriteExclusive8(u32 vaddr, u8 value, u8 expected) override {
+#ifdef __SWITCH__
+        dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
         return memory.WriteExclusive8(vaddr, value, expected);
     }
     bool MemoryWriteExclusive16(u32 vaddr, u16 value, u16 expected) override {
+#ifdef __SWITCH__
+        dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
         return memory.WriteExclusive16(vaddr, value, expected);
     }
     bool MemoryWriteExclusive32(u32 vaddr, u32 value, u32 expected) override {
+#ifdef __SWITCH__
+        dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
         return memory.WriteExclusive32(vaddr, value, expected);
     }
     bool MemoryWriteExclusive64(u32 vaddr, u64 value, u64 expected) override {
+#ifdef __SWITCH__
+        dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
         return memory.WriteExclusive64(vaddr, value, expected);
     }
 
@@ -310,12 +398,19 @@ void ARM_Dynarmic::PrepareReschedule() {
 }
 
 void ARM_Dynarmic::ClearInstructionCache() {
+#ifdef __SWITCH__
+    dynarmic_instruction_cache_clears.fetch_add(1);
+#endif
     for (const auto& j : jits) {
         j.second->ClearCache();
     }
 }
 
 void ARM_Dynarmic::InvalidateCacheRange(u32 start_address, std::size_t length) {
+#ifdef __SWITCH__
+    dynarmic_cache_range_invalidations.fetch_add(1);
+    dynarmic_cache_range_invalidation_bytes.fetch_add(static_cast<u64>(length));
+#endif
     jit->InvalidateCacheRange(start_address, length);
 }
 
@@ -363,11 +458,23 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
     config.define_unpredictable_behaviour = true;
 
 #ifdef __SWITCH__
-    config.hook_hint_instructions = true;
-    config.code_cache_size = 16 * 1024 * 1024;
+    config.optimizations = Dynarmic::all_safe_optimizations;
+    config.always_little_endian = true;
+    // Video codecs often use PLD/PLI prefetch hints in their inner loops. Hooking every hint
+    // instruction forces a callback out of generated code, so keep hints as JIT-side NOPs on
+    // Switch and rely on SVC sleep/wait paths for real guest blocking.
+    config.hook_hint_instructions = false;
+    config.code_cache_size = SwitchCodeCacheSize;
+    dynarmic_jit_instances_created.fetch_add(1);
+    dynarmic_last_code_cache_size.store(static_cast<u64>(config.code_cache_size));
+    dynarmic_last_optimization_flags.store(static_cast<u32>(config.optimizations));
+    dynarmic_last_hook_hint_instructions.store(config.hook_hint_instructions ? 1u : 0u);
+    dynarmic_last_always_little_endian.store(config.always_little_endian ? 1u : 0u);
     LOG_INFO(Core_ARM11,
-             "Switch Dynarmic config: core={} optimizations=0x{:x} code_cache={}",
-             GetID(), static_cast<unsigned>(config.optimizations), config.code_cache_size);
+             "Switch Dynarmic config: core={} optimizations=0x{:x} hook_hints={} little_endian={} code_cache={}",
+             GetID(), static_cast<unsigned>(config.optimizations),
+             config.hook_hint_instructions ? 1 : 0, config.always_little_endian ? 1 : 0,
+             config.code_cache_size);
 #endif
 
     // Multi-process state

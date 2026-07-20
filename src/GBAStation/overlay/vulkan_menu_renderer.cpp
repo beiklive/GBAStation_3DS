@@ -1105,6 +1105,15 @@ void DrawFastForwardIndicator(const State& state) {
     Text(54, 41, 18, {0.94f, 0.97f, 1.0f, 0.94f}, value);
 }
 
+void DrawFpsIndicator(const State& state) {
+    if (!state.show_fps || state.current_fps <= 0.0f) {
+        return;
+    }
+    char value[24]{};
+    std::snprintf(value, sizeof(value), "FPS: %.1f", state.current_fps);
+    Text(12, 30, 18, {0.20f, 1.0f, 0.24f, 0.96f}, value);
+}
+
 const char* DisplayLayoutLabel(std::string_view layout) {
     if (layout == "vertical") return "竖向";
     if (layout == "horizontal") return "横向";
@@ -1578,6 +1587,7 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     } else {
         DrawToast(state);
     }
+    DrawFpsIndicator(state);
     DrawFastForwardIndicator(state);
     TransformVertices(extent);
     const vk::Framebuffer framebuffer = GetFramebuffer(image, extent);

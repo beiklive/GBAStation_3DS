@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdarg>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <cmath>
 #include <filesystem>
@@ -48,6 +50,8 @@ std::atomic_bool visible{};
 std::atomic_bool exit_requested{};
 std::atomic_bool content_focused{};
 std::atomic_bool fast_forward_active{};
+std::atomic_bool fps_overlay_visible{};
+std::atomic<float> fps_overlay_value{};
 std::atomic_int pending_action{};
 std::atomic_int selected_item{};
 std::atomic_int content_focus{};
@@ -81,6 +85,21 @@ std::string file_preview_path;
 
 bool previous_combo{};
 vk::Device device;
+
+void ExitDiagnosticsLog(const char* fmt, ...) {
+    FILE* file = std::fopen("sdmc:/GBAStation/3ds/debug/exit.txt", "a");
+    if (!file) {
+        return;
+    }
+    std::fprintf(file, "[overlay-shutdown] ");
+    std::va_list args;
+    va_start(args, fmt);
+    std::vfprintf(file, fmt, args);
+    va_end(args);
+    std::fprintf(file, "\n");
+    std::fflush(file);
+    std::fclose(file);
+}
 
 struct PreviousNavigation {
     bool up{};
@@ -302,6 +321,8 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     VulkanMenuRenderer::State state{};
     state.menu_visible = visible.load(std::memory_order_acquire);
     state.fast_forward_active = fast_forward_active.load(std::memory_order_acquire);
+    state.show_fps = fps_overlay_visible.load(std::memory_order_acquire);
+    state.current_fps = fps_overlay_value.load(std::memory_order_acquire);
     state.item = static_cast<VulkanMenuRenderer::Item>(std::clamp(
         selected_item.load(std::memory_order_relaxed), 0, MenuItemCount - 1));
     state.content_focused = content_focused.load(std::memory_order_relaxed);
@@ -324,7 +345,7 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
         state.occupied[slot] = OverlayUI::IsSlotOccupied(slot + 1);
     }
     state.display = GetDisplaySettings();
-    if (!state.menu_visible && !state.fast_forward_active &&
+    if (!state.menu_visible && !state.fast_forward_active && !state.show_fps &&
         !state.display.overlay_enabled && state.toast.empty()) {
         return;
     }
@@ -462,6 +483,8 @@ bool Init(Vulkan::RendererVulkan& renderer) {
     visible.store(false);
     exit_requested.store(false);
     content_focused.store(false);
+    fps_overlay_visible.store(false);
+    fps_overlay_value.store(0.0f);
     pending_action.store(0);
     selected_item.store(0);
     content_focus.store(0);
@@ -887,6 +910,11 @@ void SetFastForwardActive(bool active) {
     fast_forward_active.store(active, std::memory_order_release);
 }
 
+void SetFpsOverlay(bool visible, float fps) {
+    fps_overlay_visible.store(visible, std::memory_order_release);
+    fps_overlay_value.store(fps, std::memory_order_release);
+}
+
 void PrepareForShutdown() {
     visible.store(false, std::memory_order_release);
     exit_requested.store(true, std::memory_order_release);
@@ -896,6 +924,8 @@ void PrepareForShutdown() {
     file_picker.store(false, std::memory_order_release);
     file_preview.store(false, std::memory_order_release);
     fast_forward_active.store(false, std::memory_order_release);
+    fps_overlay_visible.store(false, std::memory_order_release);
+    fps_overlay_value.store(0.0f, std::memory_order_release);
     pending_action.store(0, std::memory_order_release);
     previous_navigation = {};
     selector_repeat_direction = 0;
@@ -907,18 +937,30 @@ void PrepareForShutdown() {
 }
 
 void Shutdown() {
+    ExitDiagnosticsLog("Shutdown entry initialized=%d device=%p",
+                       initialized.load(std::memory_order_acquire) ? 1 : 0,
+                       static_cast<VkDevice>(device));
     if (!initialized.exchange(false, std::memory_order_acq_rel)) {
+        ExitDiagnosticsLog("Shutdown skipped: not initialized");
         return;
     }
+    ExitDiagnosticsLog("Shutdown callbacks clear begin");
     Vulkan::SetOverlayDrawCallback(nullptr);
     Vulkan::SetOverlayResetCallback(nullptr);
+    ExitDiagnosticsLog("Shutdown callbacks clear done");
     if (device) {
+        ExitDiagnosticsLog("Shutdown device.waitIdle begin");
         device.waitIdle();
+        ExitDiagnosticsLog("Shutdown device.waitIdle done");
     }
+    ExitDiagnosticsLog("Shutdown VulkanMenuRenderer::Shutdown begin");
     VulkanMenuRenderer::Shutdown();
+    ExitDiagnosticsLog("Shutdown VulkanMenuRenderer::Shutdown done");
     device = VK_NULL_HANDLE;
     visible.store(false);
     fast_forward_active.store(false);
+    fps_overlay_visible.store(false);
+    fps_overlay_value.store(0.0f);
     exit_requested.store(false);
     content_focused.store(false);
     custom_layout_sidebar.store(false);
@@ -930,6 +972,7 @@ void Shutdown() {
     pending_action.store(0);
     selected_item.store(0);
     content_focus.store(0);
+    ExitDiagnosticsLog("Shutdown complete");
     LOG_INFO(Render_Vulkan, "{} shutdown complete", Tag);
 }
 

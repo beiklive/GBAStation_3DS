@@ -120,7 +120,7 @@ std::shared_ptr<Event> HLERequestContext::SleepClientThread(
     event->AddWaitingThread(thread);
 
     if (timeout.count() > 0)
-        thread->WakeAfterDelay(timeout.count());
+        thread->WakeAfterDelay(timeout.count(), false, ThreadWakeupSource::HleSleepClientThread);
 
     return event;
 }

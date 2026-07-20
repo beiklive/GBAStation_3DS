@@ -109,11 +109,8 @@ Result ServerSession::HandleSyncRequest(std::shared_ptr<Thread> thread) {
     }
 
     if (thread->status == ThreadStatus::Running) {
-        // Put the thread to sleep until the server replies, it will be awoken in
-        // svcReplyAndReceive for LLE servers.
-        thread->status = ThreadStatus::WaitIPC;
-
         if (hle_handler != nullptr) {
+#if !defined(__SWITCH__)
             // For HLE services, we put the request threads to sleep for a short duration to
             // simulate IPC overhead, but only if the HLE handler didn't put the thread to sleep for
             // other reasons like an async callback. The IPC overhead is needed to prevent
@@ -125,10 +122,13 @@ Result ServerSession::HandleSyncRequest(std::shared_ptr<Thread> thread) {
             // request to the GSP:GPU service in a n3DS with firmware 11.6. The measured values have
             // a high variance and vary between models.
             static constexpr u64 IPCDelayNanoseconds = 39000;
-            thread->WakeAfterDelay(IPCDelayNanoseconds);
+            thread->status = ThreadStatus::WaitIPC;
+            thread->WakeAfterDelay(IPCDelayNanoseconds, false, ThreadWakeupSource::IpcDelay);
+#endif
         } else {
-            // Add the thread to the list of threads that have issued a sync request with this
-            // server.
+            // Put the thread to sleep until the server replies, it will be awoken in
+            // svcReplyAndReceive for LLE servers.
+            thread->status = ThreadStatus::WaitIPC;
             pending_requesting_threads.push_back(std::move(thread));
         }
     }

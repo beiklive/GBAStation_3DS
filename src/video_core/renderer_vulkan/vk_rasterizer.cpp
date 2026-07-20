@@ -40,7 +40,13 @@ constexpr vk::BufferUsageFlags BUFFER_USAGE =
     vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer;
 
 bool ShouldWaitForPipelineBuild(bool async_shaders, u32 num_vertices) {
+#ifdef __SWITCH__
+    // On Switch, small draws are common during video/UI transitions. Blocking these defeats
+    // async shader compilation and shows up as multi-hundred millisecond frame stalls.
+    return !async_shaders;
+#else
     return !async_shaders || num_vertices <= 6;
+#endif
 }
 
 struct DrawParams {

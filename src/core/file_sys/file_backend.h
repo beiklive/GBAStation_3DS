@@ -45,6 +45,9 @@ public:
      * @return Nanoseconds for the delay
      */
     u64 GetReadDelayNs(std::size_t length) {
+#if defined(__SWITCH__)
+        return 0;
+#endif
         if (delay_generator != nullptr) {
             return delay_generator->GetReadDelayNs(length);
         }
@@ -54,6 +57,9 @@ public:
     }
 
     u64 GetOpenDelayNs() {
+#if defined(__SWITCH__)
+        return 0;
+#endif
         if (delay_generator != nullptr) {
             return delay_generator->GetOpenDelayNs();
         }

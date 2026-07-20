@@ -3,6 +3,8 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 
 #include <boost/serialization/array.hpp>
 #include <boost/serialization/base_object.hpp>
@@ -47,6 +49,53 @@ SERIALIZE_IMPL(DspHle)
 //
 // This value has been verified against a rough hardware test with hardware and LLE
 static constexpr u64 audio_frame_ticks = samples_per_frame * 4096 * 2ull; ///< Units: ARM11 cycles
+
+namespace {
+
+using DspClock = std::chrono::steady_clock;
+
+std::atomic<u64> dsp_ticks{};
+std::atomic<u64> dsp_active_source_sum{};
+std::atomic<u64> dsp_active_source_max{};
+std::atomic<u64> dsp_interrupts{};
+std::atomic<u64> dsp_tick_ns{};
+std::atomic<u64> dsp_generate_ns{};
+std::atomic<u64> dsp_output_ns{};
+
+void UpdateMax(std::atomic<u64>& target, u64 value) {
+    u64 current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+void RecordDspTick(u64 active_sources, u64 tick_ns, u64 generate_ns, u64 output_ns) {
+    dsp_ticks.fetch_add(1, std::memory_order_relaxed);
+    dsp_active_source_sum.fetch_add(active_sources, std::memory_order_relaxed);
+    UpdateMax(dsp_active_source_max, active_sources);
+    dsp_tick_ns.fetch_add(tick_ns, std::memory_order_relaxed);
+    dsp_generate_ns.fetch_add(generate_ns, std::memory_order_relaxed);
+    dsp_output_ns.fetch_add(output_ns, std::memory_order_relaxed);
+}
+
+} // namespace
+
+DspHleDiagnostics GetAndResetDspHleDiagnostics() {
+    return {
+        .ticks = dsp_ticks.exchange(0, std::memory_order_relaxed),
+        .active_source_sum = dsp_active_source_sum.exchange(0, std::memory_order_relaxed),
+        .active_source_max = dsp_active_source_max.exchange(0, std::memory_order_relaxed),
+        .interrupts = dsp_interrupts.exchange(0, std::memory_order_relaxed),
+        .tick_ms = static_cast<double>(dsp_tick_ns.exchange(0, std::memory_order_relaxed)) /
+                   1000000.0,
+        .generate_ms =
+            static_cast<double>(dsp_generate_ns.exchange(0, std::memory_order_relaxed)) /
+            1000000.0,
+        .output_ms =
+            static_cast<double>(dsp_output_ns.exchange(0, std::memory_order_relaxed)) /
+            1000000.0,
+    };
+}
 
 struct DspHle::Impl final {
 public:
@@ -102,6 +151,7 @@ private:
     DspHle& parent;
     Core::Timing& core_timing;
     Core::TimingEventType* tick_event{};
+    u64 last_active_sources{};
 
     std::unique_ptr<HLE::DecoderBase> aac_decoder{};
 
@@ -416,15 +466,21 @@ StereoFrame16 DspHle::Impl::GenerateCurrentFrame() {
     HLE::SharedMemory& write = WriteRegion();
 
     std::array<QuadFrame32, 3> intermediate_mixes = {};
+    u64 active_sources = 0;
 
     // Generate intermediate mixes
     for (std::size_t i = 0; i < HLE::num_sources; i++) {
-        write.source_statuses.status[i] =
+        const auto status =
             sources[i].Tick(read.source_configurations.config[i], read.adpcm_coefficients.coeff[i]);
+        write.source_statuses.status[i] = status;
+        if (status.is_enabled != 0) {
+            active_sources++;
+        }
         for (std::size_t mix = 0; mix < 3; mix++) {
             sources[i].MixInto(intermediate_mixes[mix], mix);
         }
     }
+    last_active_sources = active_sources;
 
     // Generate final mix
     write.dsp_status = mixers.Tick(read.dsp_configuration, read.intermediate_mix_samples,
@@ -444,16 +500,35 @@ StereoFrame16 DspHle::Impl::GenerateCurrentFrame() {
 
 bool DspHle::Impl::Tick() {
     bool is_on = GetDspState() == DspState::On;
+    const auto tick_start = DspClock::now();
+    u64 generate_ns = 0;
+    u64 output_ns = 0;
+    last_active_sources = 0;
 
     if (is_on) {
         StereoFrame16 current_frame = {};
 
         // TODO: Check dsp::DSP semaphore (which indicates emulated application has finished writing
         // to shared memory region)
+        const auto generate_start = DspClock::now();
         current_frame = GenerateCurrentFrame();
+        const auto generate_end = DspClock::now();
 
+        const auto output_start = DspClock::now();
         parent.OutputFrame(std::move(current_frame));
+        const auto output_end = DspClock::now();
+        generate_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(generate_end - generate_start)
+                .count();
+        output_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(output_end - output_start).count();
     }
+
+    const auto tick_end = DspClock::now();
+    RecordDspTick(last_active_sources,
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(tick_end - tick_start)
+                      .count(),
+                  generate_ns, output_ns);
 
     return is_on;
 }
@@ -462,6 +537,7 @@ void DspHle::Impl::AudioTickCallback(s64 cycles_late) {
     if (Tick()) {
         // TODO(merry): Signal all the other interrupts as appropriate.
         interrupt_handler(InterruptType::Pipe, DspPipe::Audio);
+        dsp_interrupts.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Reschedule recurrent event

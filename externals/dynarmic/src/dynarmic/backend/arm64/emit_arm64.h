@@ -27,6 +27,10 @@ namespace Dynarmic::FP {
 class FPCR;
 }  // namespace Dynarmic::FP
 
+namespace Dynarmic {
+class ExclusiveMonitor;
+}  // namespace Dynarmic
+
 namespace Dynarmic::IR {
 class Block;
 class Inst;
@@ -121,6 +125,8 @@ struct EmitConfig {
 
     // Memory
     bool check_halt_on_memory_access;
+    size_t processor_id;
+    ExclusiveMonitor* global_monitor;
 
     // Page table
     u64 page_table_pointer;

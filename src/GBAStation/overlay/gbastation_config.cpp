@@ -215,7 +215,7 @@ std::size_t ImportBeikliveFlatConfig(const char* path, OptionMap& options) {
             options[key.substr(std::string_view("core.azahar.").size())] =
                 DecodeFlatConfigValue(raw_value);
             ++imported;
-        } else if (key == "fastforward.multiplier") {
+        } else if (key == "fastforward.multiplier" || key == "display.showFps") {
             options[key] = DecodeFlatConfigValue(raw_value);
             ++imported;
         }

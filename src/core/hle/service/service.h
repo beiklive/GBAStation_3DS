@@ -200,6 +200,16 @@ struct ServiceModuleInfo {
 
 extern const std::array<ServiceModuleInfo, 41> service_module_map;
 
+struct Diagnostics {
+    u64 ipc_calls{};
+    u64 unimplemented_calls{};
+    u64 mvd_calls{};
+    u64 mvd_unimplemented_calls{};
+    u32 last_unimplemented_command{};
+};
+
+Diagnostics GetAndResetDiagnostics();
+
 } // namespace Service
 
 #define SERVICE_SERIALIZATION(T, MFIELD, TMODULE)                                                  \

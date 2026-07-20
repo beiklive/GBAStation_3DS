@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include "audio_core/input_details.h"
+#include "audio_core/hle/hle.h"
 #include "audio_core/sink_details.h"
 #include "GBAStation/emu_window_switch.h"
 #include "GBAStation/game_db.h"
@@ -38,12 +39,15 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+#include "core/arm/dynarmic/arm_dynarmic_diagnostics.h"
 #include "core/core.h"
 #include "core/loader/loader.h"
 #include "core/movie.h"
 #include "core/savestate.h"
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/image_interface.h"
+#include "core/hle/kernel/thread.h"
+#include "core/hw/y2r.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/service.h"
 #include "input_common/main.h"
@@ -75,6 +79,8 @@ constexpr const char* DebugDir = "sdmc:/GBAStation/3ds/debug";
 constexpr const char* BootMarkerPath = "sdmc:/GBAStation/3ds/azahar_boot.txt";
 constexpr const char* StartupLogPath = "sdmc:/GBAStation/3ds/debug/startup.txt";
 constexpr const char* DebugLogPath = "sdmc:/GBAStation/3ds/debug/azahar_switch.txt";
+constexpr const char* HeartbeatLogPath = "sdmc:/GBAStation/3ds/debug/heartbeat.txt";
+constexpr const char* ExitLogPath = "sdmc:/GBAStation/3ds/debug/exit.txt";
 constexpr const char* StdoutLogPath = "sdmc:/GBAStation/3ds/debug/stdout.txt";
 constexpr const char* StderrLogPath = "sdmc:/GBAStation/3ds/debug/stderr.txt";
 constexpr const char* FallbackRomPath = "sdmc:/GBAStation/3ds/games/3Dlandchs.cci";
@@ -99,10 +105,15 @@ constexpr bool EnableStartupLogFile = DiagnosticLogsEnabled;
 constexpr bool EnableStdStreamLogs = DiagnosticLogsEnabled;
 constexpr bool EnableMemMapLogFile = false;
 constexpr bool EnableSwitchDebugLogFile = DiagnosticLogsEnabled;
+constexpr bool EnableHeartbeatLogFile = true;
+constexpr bool EnableExitLogFile = true;
 constexpr bool EnableCommonLogFile = DiagnosticLogsEnabled;
 constexpr bool EnableBootMarkerFile = DiagnosticLogsEnabled;
 FILE* startup_log{};
 FILE* debug_log{};
+FILE* heartbeat_log{};
+FILE* exit_log{};
+auto exit_log_started = std::chrono::steady_clock::now();
 bool raw_marker_enabled = true;
 PadState pad{};
 
@@ -238,13 +249,87 @@ void DebugOpen() {
     }
 }
 
+void HeartbeatOpen() {
+    if (!EnableHeartbeatLogFile || heartbeat_log) {
+        return;
+    }
+
+    EnsureDebugDirs();
+    heartbeat_log = std::fopen(HeartbeatLogPath, "w");
+    if (heartbeat_log) {
+        std::setvbuf(heartbeat_log, nullptr, _IONBF, 0);
+        std::fprintf(heartbeat_log, "=== Azahar Switch heartbeat start ===\n");
+    }
+}
+
+void HeartbeatClose() {
+    if (heartbeat_log) {
+        std::fprintf(heartbeat_log, "=== Azahar Switch heartbeat end ===\n");
+        std::fclose(heartbeat_log);
+        heartbeat_log = nullptr;
+    }
+}
+
+void HeartbeatLog(const char* fmt, ...) {
+    std::va_list args;
+    va_start(args, fmt);
+    WriteLogLine(heartbeat_log, "[heartbeat] ", fmt, args);
+    va_end(args);
+}
+
+void ExitLogOpen(const char* mode = "w") {
+    if (!EnableExitLogFile || exit_log) {
+        return;
+    }
+
+    EnsureDebugDirs();
+    exit_log = std::fopen(ExitLogPath, mode);
+    exit_log_started = std::chrono::steady_clock::now();
+    if (exit_log) {
+        std::setvbuf(exit_log, nullptr, _IONBF, 0);
+        std::fprintf(exit_log, "=== Azahar Switch exit diagnostics start ===\n");
+    }
+}
+
+void ExitLogClose() {
+    if (exit_log) {
+        std::fprintf(exit_log, "=== Azahar Switch exit diagnostics end ===\n");
+        std::fflush(exit_log);
+        std::fclose(exit_log);
+        exit_log = nullptr;
+    }
+}
+
+void ExitLog(const char* fmt, ...) {
+    if (!exit_log) {
+        ExitLogOpen("a");
+    }
+    if (!exit_log) {
+        return;
+    }
+
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - exit_log_started)
+                                .count();
+    std::fprintf(exit_log, "[exit +%lld ms] ", static_cast<long long>(elapsed_ms));
+    std::va_list args;
+    va_start(args, fmt);
+    std::vfprintf(exit_log, fmt, args);
+    va_end(args);
+    std::fprintf(exit_log, "\n");
+    std::fflush(exit_log);
+}
+
 void DebugClose() {
     StartupLog("DebugClose");
+    ExitLog("DebugClose begin");
+    HeartbeatClose();
     if (debug_log) {
         std::fprintf(debug_log, "=== Azahar Switch standalone end ===\n");
         std::fclose(debug_log);
         debug_log = nullptr;
     }
+    ExitLog("DebugClose done");
 }
 
 void DebugLog(const char* fmt, ...) {
@@ -272,12 +357,16 @@ void DebugLog(const char* fmt, ...) {
 }
 
 bool QueueLauncherReturn(const LaunchOptions& options) {
+    ExitLog("QueueLauncherReturn begin return_to_nro=%d target=%s",
+            options.return_to_nro ? 1 : 0, options.return_nro_path.c_str());
     if (!options.return_to_nro) {
         StartupLog("QueueLauncherReturn: --exit-to-home requested");
+        ExitLog("QueueLauncherReturn skipped: exit-to-home");
         return true;
     }
     if (!envHasNextLoad()) {
         StartupLog("QueueLauncherReturn: loader does not support envSetNextLoad");
+        ExitLog("QueueLauncherReturn failed: envHasNextLoad=0");
         return false;
     }
 
@@ -290,6 +379,7 @@ bool QueueLauncherReturn(const LaunchOptions& options) {
     if (!target) {
         StartupLog("QueueLauncherReturn: no launcher found at %s",
                    options.return_nro_path.c_str());
+        ExitLog("QueueLauncherReturn failed: target missing at %s", options.return_nro_path.c_str());
         return false;
     }
 
@@ -298,6 +388,7 @@ bool QueueLauncherReturn(const LaunchOptions& options) {
     const LibnxResult rc = envSetNextLoad(target, args);
     StartupLog("QueueLauncherReturn: envSetNextLoad target=%s args=%s rc=0x%x", target, args,
                rc);
+    ExitLog("QueueLauncherReturn envSetNextLoad target=%s rc=0x%x", target, rc);
     return rc == 0;
 }
 
@@ -439,6 +530,44 @@ void DumpMemoryMap(const char* phase) {
     WriteRawBootMarker(summary);
 }
 
+void ExitLogMemorySummary(const char* phase) {
+    u64 region_count = 0;
+    u64 suspect_count = 0;
+    u64 suspect_bytes = 0;
+    MemoryInfo info{};
+    u32 page_info = 0;
+    u64 addr = 0;
+    for (;;) {
+        if (R_FAILED(svcQueryMemory(&info, &page_info, addr))) {
+            break;
+        }
+        const u32 mem_type = info.type & 0xFF;
+        if (mem_type != MemType_Unmapped && mem_type != MemType_Reserved) {
+            region_count++;
+            const bool suspect =
+                info.attr != 0 || info.ipc_refcount != 0 || info.device_refcount != 0 ||
+                mem_type == MemType_MappedMemory || mem_type == MemType_WeirdMappedMem ||
+                mem_type == MemType_TransferMem || mem_type == MemType_TransferMemIsolated ||
+                mem_type == MemType_IpcBuffer0 || mem_type == MemType_IpcBuffer1 ||
+                mem_type == MemType_IpcBuffer3 || mem_type == MemType_CodeReadOnly ||
+                mem_type == MemType_CodeWritable;
+            if (suspect) {
+                suspect_count++;
+                suspect_bytes += info.size;
+            }
+        }
+        const u64 next = info.addr + info.size;
+        if (next <= addr) {
+            break;
+        }
+        addr = next;
+    }
+    ExitLog("memsummary[%s]: regions=%llu suspects=%llu suspect_bytes=0x%llx", phase,
+            static_cast<unsigned long long>(region_count),
+            static_cast<unsigned long long>(suspect_count),
+            static_cast<unsigned long long>(suspect_bytes));
+}
+
 void PinCurrentThreadToCore(s32 core, const char* tag) {
     if (core < 0) {
         core = 0;
@@ -491,11 +620,18 @@ public:
                      "affinity=0x%llx fallback_rc=0x%x",
                      tag, app_core_rc, original_preferred_core,
                      static_cast<unsigned long long>(original_affinity_mask), fallback_rc);
+            ExitLog("thread affinity restore %s: app_core_rc=0x%x fallback preferred=%d "
+                    "affinity=0x%llx fallback_rc=0x%x restored=%d",
+                    tag, app_core_rc, original_preferred_core,
+                    static_cast<unsigned long long>(original_affinity_mask), fallback_rc,
+                    restored ? 1 : 0);
             return;
         }
 
         DebugLog("thread affinity restore %s: preferred=0 affinity=0x7 rc=0x%x", tag,
                  app_core_rc);
+        ExitLog("thread affinity restore %s: preferred=0 affinity=0x7 rc=0x%x", tag,
+                app_core_rc);
     }
 
 private:
@@ -510,12 +646,14 @@ void InstallFatalHandlers() {
     std::set_terminate([] {
         DebugLog("std::terminate called");
         StartupLog("std::terminate called");
+        ExitLog("std::terminate called");
         std::abort();
     });
 
     auto signal_handler = [](int sig) {
         DebugLog("fatal signal %d", sig);
         StartupLog("fatal signal %d", sig);
+        ExitLog("fatal signal %d", sig);
         _Exit(128 + sig);
     };
     std::signal(SIGABRT, signal_handler);
@@ -1021,6 +1159,8 @@ int Run(int argc, char** argv) {
     const LibnxResult lock_exit_rc = appletLockExit();
     StartupLog("Run: appletLockExit rc=0x%x", lock_exit_rc);
     DebugOpen();
+    ExitLogOpen("w");
+    ExitLog("Run entry argc=%d appletLockExit=0x%x", argc, lock_exit_rc);
     InstallFatalHandlers();
     ThreadCoreMaskGuard thread_core_guard;
 
@@ -1028,16 +1168,20 @@ int Run(int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         DebugLog("argv[%d]=%s", i, argv[i] ? argv[i] : "(null)");
     }
+    HeartbeatOpen();
 
     StartupLog("Run: parsing ROM path");
     LaunchOptions launch_options = ParseLaunchOptions(argc, argv);
     const std::string& rom_path = launch_options.rom_path;
     if (rom_path.empty()) {
         DebugLog("no ROM path supplied");
+        ExitLog("early exit: no ROM path");
         thread_core_guard.Restore("no-rom");
         DebugClose();
         const bool queued_launcher_return = QueueLauncherReturn(launch_options);
+        ExitLog("early exit no-rom: queued_launcher_return=%d", queued_launcher_return ? 1 : 0);
         appletUnlockExit();
+        ExitLog("early exit no-rom: appletUnlockExit done");
         return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
@@ -1106,6 +1250,8 @@ int Run(int argc, char** argv) {
     if (load_result != Core::System::ResultStatus::Success) {
         DebugLog("load failed: %s (%u)", ResultStatusName(load_result),
                  static_cast<unsigned>(load_result));
+        ExitLog("early exit: load failed status=%s (%u)", ResultStatusName(load_result),
+                static_cast<unsigned>(load_result));
         if (common_log_started) {
             Common::Log::Stop();
             common_log_started = false;
@@ -1116,7 +1262,10 @@ int Run(int argc, char** argv) {
         thread_core_guard.Restore("load-failed");
         DebugClose();
         const bool queued_launcher_return = QueueLauncherReturn(launch_options);
+        ExitLog("early exit load-failed: queued_launcher_return=%d",
+                queued_launcher_return ? 1 : 0);
         appletUnlockExit();
+        ExitLog("early exit load-failed: appletUnlockExit done");
         return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     ApplyConfiguredSystemLanguage(system);
@@ -1154,6 +1303,9 @@ int Run(int argc, char** argv) {
     SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);
     bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(
         static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer()));
+    bool show_fps_overlay = ParseConfigBool(
+        SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
+    SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
     DebugLog("GBAStation menu init=%d hotkey=ZL+ZR return=%s target=%s",
              menu_initialized ? 1 : 0, launch_options.return_to_nro ? "nro" : "home",
              launch_options.return_nro_path.c_str());
@@ -1191,6 +1343,9 @@ int Run(int argc, char** argv) {
     bool fast_forward_compile_throttled = false;
     bool force_input_suppressed_during_shutdown = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
+    u64 diagnostic_runloop_count = 0;
+    double diagnostic_runloop_ms_total = 0.0;
+    double diagnostic_runloop_ms_max = 0.0;
     const char* exit_reason = "loop condition ended";
     while (true) {
         const auto now = Clock::now();
@@ -1199,12 +1354,16 @@ int Run(int argc, char** argv) {
             exit_reason = "applet message requested exit";
             DebugLog("main loop exit: applet message requested exit after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            ExitLog("main loop exit: applet message requested exit iterations=%llu",
+                    static_cast<unsigned long long>(loop_count));
             break;
         }
         if (!system.IsPoweredOn()) {
             exit_reason = "system powered off before RunLoop";
             DebugLog("main loop exit: system powered off before RunLoop after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            ExitLog("main loop exit: system not powered iterations=%llu",
+                    static_cast<unsigned long long>(loop_count));
             break;
         }
 
@@ -1429,13 +1588,20 @@ int Run(int argc, char** argv) {
             exit_reason = "GBAStation menu requested exit";
             DebugLog("menu requested exit after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            ExitLog("menu exit action consumed: iterations=%llu renderer_frame=%d menu_visible=%d",
+                    static_cast<unsigned long long>(loop_count), renderer.GetCurrentFrame(),
+                    menu_visible ? 1 : 0);
             force_input_suppressed_during_shutdown = true;
             if (menu_initialized) {
+                ExitLog("menu exit: VulkanOverlay::PrepareForShutdown begin");
                 SwitchFrontend::VulkanOverlay::PrepareForShutdown();
+                ExitLog("menu exit: VulkanOverlay::PrepareForShutdown done");
             }
             window.SetInputSuppressed(true);
             InputCommon::SwitchHID::SetInputSuppressed(true);
+            ExitLog("menu exit: input suppressed; RequestFastShutdown begin");
             Common::RequestFastShutdown();
+            ExitLog("menu exit: RequestFastShutdown done");
             break;
         }
 
@@ -1443,10 +1609,14 @@ int Run(int argc, char** argv) {
             exit_reason = "ZL+ZR fallback exit";
             DebugLog("menu unavailable; fallback exit combo after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            ExitLog("fallback exit combo: iterations=%llu renderer_frame=%d",
+                    static_cast<unsigned long long>(loop_count), renderer.GetCurrentFrame());
             force_input_suppressed_during_shutdown = true;
             window.SetInputSuppressed(true);
             InputCommon::SwitchHID::SetInputSuppressed(true);
+            ExitLog("fallback exit: input suppressed; RequestFastShutdown begin");
             Common::RequestFastShutdown();
+            ExitLog("fallback exit: RequestFastShutdown done");
             break;
         }
 
@@ -1458,7 +1628,13 @@ int Run(int argc, char** argv) {
             continue;
         }
 
+        const auto runloop_started = Clock::now();
         const Core::System::ResultStatus run_result = system.RunLoop();
+        const double runloop_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - runloop_started).count();
+        diagnostic_runloop_ms_total += runloop_ms;
+        diagnostic_runloop_ms_max = std::max(diagnostic_runloop_ms_max, runloop_ms);
+        diagnostic_runloop_count++;
         loop_count++;
         if (pending_overlay_reinit && run_result == Core::System::ResultStatus::Success &&
             system.IsPoweredOn()) {
@@ -1467,6 +1643,7 @@ int Run(int argc, char** argv) {
                 SwitchFrontend::VulkanOverlay::GetDisplaySettings());
             menu_initialized = SwitchFrontend::VulkanOverlay::Init(
                 static_cast<Vulkan::RendererVulkan&>(reset_renderer));
+            SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
             pending_overlay_reinit = false;
             pause_frame_baseline = reset_renderer.GetCurrentFrame();
             last_logged_frame = pause_frame_baseline;
@@ -1491,22 +1668,223 @@ int Run(int argc, char** argv) {
         if (renderer_frame != last_logged_frame) {
             last_logged_frame = renderer_frame;
         }
-        if (now - last_heartbeat >= std::chrono::seconds(1)) {
-            const auto heartbeat_elapsed = std::chrono::duration<double>(now - last_heartbeat).count();
+        const auto heartbeat_now = Clock::now();
+        if (heartbeat_now - last_heartbeat >= std::chrono::seconds(1)) {
+            const auto heartbeat_elapsed =
+                std::chrono::duration<double>(heartbeat_now - last_heartbeat).count();
             const u64 loop_delta = loop_count - last_heartbeat_loop_count;
             const s32 frame_delta = renderer_frame - last_heartbeat_frame;
+            const double frontend_fps =
+                heartbeat_elapsed > 0.0 ? static_cast<double>(frame_delta) / heartbeat_elapsed
+                                        : 0.0;
+            show_fps_overlay = ParseConfigBool(
+                SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
+            SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay,
+                                                         static_cast<float>(frontend_fps));
+            const double loops_per_sec =
+                heartbeat_elapsed > 0.0 ? static_cast<double>(loop_delta) / heartbeat_elapsed
+                                        : 0.0;
+            const double runloop_avg_ms =
+                diagnostic_runloop_count > 0
+                    ? diagnostic_runloop_ms_total / static_cast<double>(diagnostic_runloop_count)
+                    : 0.0;
+            const double runloop_max_ms = diagnostic_runloop_ms_max;
+            const auto timing_stats = system.CoreTiming().GetAndResetDiagnostics();
+            const auto transfer_stats = VideoCore::GetAndResetTransferDiagnostics();
+            const auto y2r_stats = HW::Y2R::GetAndResetDiagnostics();
+            const auto service_stats = Service::GetAndResetDiagnostics();
+            const auto dynarmic_stats = Core::GetAndResetDynarmicDiagnostics();
+            const auto dsp_stats = AudioCore::GetAndResetDspHleDiagnostics();
+            const auto thread_wakeup_stats = Kernel::GetAndResetThreadWakeupDiagnostics();
+            const double timing_slice_avg =
+                timing_stats.slice_count > 0
+                    ? static_cast<double>(timing_stats.slice_total) /
+                          static_cast<double>(timing_stats.slice_count)
+                    : 0.0;
+            const double short_slice_pct =
+                timing_stats.slice_count > 0
+                    ? static_cast<double>(timing_stats.short_slices) * 100.0 /
+                          static_cast<double>(timing_stats.slice_count)
+                    : 0.0;
+            const double idle_pct =
+                timing_stats.slice_total > 0
+                    ? static_cast<double>(timing_stats.idle_ticks) * 100.0 /
+                          static_cast<double>(timing_stats.slice_total)
+                    : 0.0;
+            const double thread_wakeup_avg_us =
+                thread_wakeup_stats.scheduled > 0
+                    ? static_cast<double>(thread_wakeup_stats.total_ns) /
+                          static_cast<double>(thread_wakeup_stats.scheduled) / 1000.0
+                    : 0.0;
+            const double dsp_active_avg =
+                dsp_stats.ticks > 0 ? static_cast<double>(dsp_stats.active_source_sum) /
+                                          static_cast<double>(dsp_stats.ticks)
+                                    : 0.0;
+            const auto thread_wakeup_status_count = [&](Kernel::ThreadStatus status) {
+                const auto index = static_cast<std::size_t>(status);
+                return index < thread_wakeup_stats.status_counts.size()
+                           ? thread_wakeup_stats.status_counts[index]
+                           : 0;
+            };
+            const auto thread_wakeup_source_count = [&](Kernel::ThreadWakeupSource source) {
+                const auto index = static_cast<std::size_t>(source);
+                return index < thread_wakeup_stats.source_counts.size()
+                           ? thread_wakeup_stats.source_counts[index]
+                           : 0;
+            };
             const auto stats = system.GetAndResetPerfStats();
-            DebugLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f powered=%d applet=%d keepalives=%llu",
-                     static_cast<unsigned long long>(loop_count),
-                     heartbeat_elapsed > 0.0 ? static_cast<double>(loop_delta) / heartbeat_elapsed : 0.0,
-                     renderer_frame, frame_delta,
-                     heartbeat_elapsed > 0.0 ? static_cast<double>(frame_delta) / heartbeat_elapsed : 0.0,
-                     stats.system_fps, stats.game_fps, stats.emulation_speed,
-                     system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
-                     static_cast<unsigned long long>(keepalive_count));
-            last_heartbeat = now;
+            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f svc_ipc=%llu svc_unimpl=%llu svc_last_unimpl=0x%04x mvd_calls=%llu mvd_unimpl=%llu runloop_avg_ms=%.2f runloop_max_ms=%.2f pending_compilations=%zu jit_new=%llu jit_icache_clear=%llu jit_inv=%llu jit_inv_kb=%.1f jit_cache_mb=%.1f jit_opt=0x%08x jit_hook_hints=%u jit_little=%u jit_mem_r=%llu jit_mem_w=%llu jit_mem_x=%llu jit_mem_code=%llu jit_mem_last_r=0x%08x jit_mem_last_w=0x%08x dsp_ticks=%llu dsp_irq=%llu dsp_active_avg=%.1f dsp_active_max=%llu dsp_ms=%.2f dsp_gen_ms=%.2f dsp_out_ms=%.2f timing_advances=%llu timing_events=%llu timing_top=%s timing_top_count=%llu tw_sched=%llu tw_fire=%llu tw_forever=%llu tw_top_id=0x%08x tw_top_core=%u tw_top_name=%s tw_top_status=%s tw_top_count=%llu tw_avg_us=%.1f tw_min_us=%.1f tw_max_us=%.1f tw_le100us=%llu tw_le500us=%llu tw_le1ms=%llu tw_le2ms=%llu tw_le5ms=%llu tw_le16ms=%llu tw_gt16ms=%llu tw_st_sleep=%llu tw_st_any=%llu tw_st_all=%llu tw_st_hle=%llu tw_st_arb=%llu tw_src_generic=%llu tw_src_sleep=%llu tw_src_wait1=%llu tw_src_waitn_all=%llu tw_src_waitn_any=%llu tw_src_hle_sleep=%llu tw_src_hle_async=%llu tw_src_hle_thread=%llu tw_src_arb=%llu tw_src_appmain=%llu tw_src_ipc=%llu timing_slice_avg=%.1f timing_slice_min=%lld timing_slice_max=%lld timing_short_pct=%.1f timing_idle_pct=%.1f gpu_display=%llu gpu_display_sw=%llu gpu_display_mb=%.2f gpu_texcopy=%llu gpu_texcopy_sw=%llu gpu_texcopy_mb=%.2f y2r=%llu y2r_direct=%llu y2r_fallback=%llu y2r_pixels=%llu y2r_direct_pixels=%llu y2r_ms=%.2f y2r_direct_ms=%.2f y2r_fallback_ms=%.2f y2r_flush=%llu y2r_flush_inv=%llu y2r_flush_mb=%.2f y2r_flush_ms=%.2f y2r_dir_fmt=%u/%u y2r_dir_rot=%u y2r_dir_block=%u y2r_dir_size=%ux%u y2r_dir_dst=%u+%u y2r_fb_fmt=%u/%u y2r_fb_rot=%u y2r_fb_block=%u y2r_fb_size=%ux%u y2r_fb_dma=y%u+%u,u%u+%u,v%u+%u,yuyv%u+%u,dst%u+%u powered=%d applet=%d keepalives=%llu",
+                         static_cast<unsigned long long>(loop_count), loops_per_sec,
+                         renderer_frame, frame_delta, frontend_fps, stats.system_fps,
+                         stats.game_fps, stats.emulation_speed, stats.time_hle_svc * 1000.0,
+                         stats.time_hle_ipc * 1000.0, stats.time_gpu * 1000.0,
+                         stats.time_swap * 1000.0, stats.time_remaining * 1000.0,
+                         static_cast<unsigned long long>(service_stats.ipc_calls),
+                         static_cast<unsigned long long>(service_stats.unimplemented_calls),
+                         service_stats.last_unimplemented_command,
+                         static_cast<unsigned long long>(service_stats.mvd_calls),
+                         static_cast<unsigned long long>(service_stats.mvd_unimplemented_calls),
+                         runloop_avg_ms, runloop_max_ms,
+                         pending_compilations,
+                         static_cast<unsigned long long>(dynarmic_stats.jit_instances_created),
+                         static_cast<unsigned long long>(
+                             dynarmic_stats.instruction_cache_clears),
+                         static_cast<unsigned long long>(
+                             dynarmic_stats.cache_range_invalidations),
+                         static_cast<double>(dynarmic_stats.cache_range_invalidation_bytes) /
+                             1024.0,
+                         static_cast<double>(dynarmic_stats.last_code_cache_size) /
+                             (1024.0 * 1024.0),
+                         dynarmic_stats.last_optimization_flags,
+                         dynarmic_stats.last_hook_hint_instructions,
+                         dynarmic_stats.last_always_little_endian,
+                         static_cast<unsigned long long>(dynarmic_stats.memory_read_callbacks),
+                         static_cast<unsigned long long>(dynarmic_stats.memory_write_callbacks),
+                         static_cast<unsigned long long>(
+                             dynarmic_stats.memory_exclusive_callbacks),
+                         static_cast<unsigned long long>(dynarmic_stats.memory_code_callbacks),
+                         dynarmic_stats.last_read_callback_addr,
+                         dynarmic_stats.last_write_callback_addr,
+                         static_cast<unsigned long long>(dsp_stats.ticks),
+                         static_cast<unsigned long long>(dsp_stats.interrupts), dsp_active_avg,
+                         static_cast<unsigned long long>(dsp_stats.active_source_max),
+                         dsp_stats.tick_ms, dsp_stats.generate_ms, dsp_stats.output_ms,
+                         static_cast<unsigned long long>(timing_stats.advance_calls),
+                         static_cast<unsigned long long>(timing_stats.events_processed),
+                         timing_stats.busiest_event_name.empty()
+                             ? "-"
+                             : timing_stats.busiest_event_name.c_str(),
+                         static_cast<unsigned long long>(timing_stats.busiest_event_count),
+                         static_cast<unsigned long long>(thread_wakeup_stats.scheduled),
+                         static_cast<unsigned long long>(thread_wakeup_stats.fired),
+                         static_cast<unsigned long long>(thread_wakeup_stats.forever),
+                         thread_wakeup_stats.busiest_thread_id,
+                         static_cast<unsigned>(thread_wakeup_stats.busiest_thread_core),
+                         thread_wakeup_stats.busiest_thread_name.empty()
+                             ? "-"
+                             : thread_wakeup_stats.busiest_thread_name.c_str(),
+                         thread_wakeup_stats.busiest_thread_status_name.empty()
+                             ? "-"
+                             : thread_wakeup_stats.busiest_thread_status_name.c_str(),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_stats.busiest_thread_count),
+                         thread_wakeup_avg_us,
+                         static_cast<double>(thread_wakeup_stats.min_ns) / 1000.0,
+                         static_cast<double>(thread_wakeup_stats.max_ns) / 1000.0,
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[0]),
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[1]),
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[2]),
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[3]),
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[4]),
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[5]),
+                         static_cast<unsigned long long>(thread_wakeup_stats.delay_buckets[6]),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_status_count(Kernel::ThreadStatus::WaitSleep)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_status_count(Kernel::ThreadStatus::WaitSynchAny)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_status_count(Kernel::ThreadStatus::WaitSynchAll)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_status_count(Kernel::ThreadStatus::WaitHleEvent)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_status_count(Kernel::ThreadStatus::WaitArb)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_source_count(Kernel::ThreadWakeupSource::Generic)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::SvcSleepThread)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::WaitSynchronization1)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::WaitSynchronizationNAll)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::WaitSynchronizationNAny)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::HleSleepClientThread)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::HleRunAsync)),
+                         static_cast<unsigned long long>(thread_wakeup_source_count(
+                             Kernel::ThreadWakeupSource::HleRunOnThread)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_source_count(Kernel::ThreadWakeupSource::AddressArbiter)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_source_count(Kernel::ThreadWakeupSource::AppMainDelay)),
+                         static_cast<unsigned long long>(
+                             thread_wakeup_source_count(Kernel::ThreadWakeupSource::IpcDelay)),
+                         timing_slice_avg, static_cast<long long>(timing_stats.min_slice),
+                         static_cast<long long>(timing_stats.max_slice), short_slice_pct, idle_pct,
+                         static_cast<unsigned long long>(transfer_stats.display_transfer_count),
+                         static_cast<unsigned long long>(
+                             transfer_stats.software_display_transfer_count),
+                         static_cast<double>(transfer_stats.display_transfer_bytes) /
+                             (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(transfer_stats.texture_copy_count),
+                         static_cast<unsigned long long>(
+                             transfer_stats.software_texture_copy_count),
+                         static_cast<double>(transfer_stats.texture_copy_bytes) /
+                             (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(y2r_stats.conversions),
+                         static_cast<unsigned long long>(y2r_stats.direct_conversions),
+                         static_cast<unsigned long long>(y2r_stats.fallback_conversions),
+                         static_cast<unsigned long long>(y2r_stats.pixels),
+                         static_cast<unsigned long long>(y2r_stats.direct_pixels),
+                         y2r_stats.total_ms, y2r_stats.direct_ms, y2r_stats.fallback_ms,
+                         static_cast<unsigned long long>(y2r_stats.pre_flushes),
+                         static_cast<unsigned long long>(y2r_stats.pre_flush_invalidate_only),
+                         static_cast<double>(y2r_stats.pre_flush_bytes) / (1024.0 * 1024.0),
+                         y2r_stats.pre_flush_ms,
+                         static_cast<unsigned>(y2r_stats.last_direct_input_format),
+                         static_cast<unsigned>(y2r_stats.last_direct_output_format),
+                         static_cast<unsigned>(y2r_stats.last_direct_rotation),
+                         static_cast<unsigned>(y2r_stats.last_direct_block_alignment),
+                         static_cast<unsigned>(y2r_stats.last_direct_width),
+                         static_cast<unsigned>(y2r_stats.last_direct_lines),
+                         static_cast<unsigned>(y2r_stats.last_direct_dst_unit),
+                         static_cast<unsigned>(y2r_stats.last_direct_dst_gap),
+                         static_cast<unsigned>(y2r_stats.last_fallback_input_format),
+                         static_cast<unsigned>(y2r_stats.last_fallback_output_format),
+                         static_cast<unsigned>(y2r_stats.last_fallback_rotation),
+                         static_cast<unsigned>(y2r_stats.last_fallback_block_alignment),
+                         static_cast<unsigned>(y2r_stats.last_fallback_width),
+                         static_cast<unsigned>(y2r_stats.last_fallback_lines),
+                         static_cast<unsigned>(y2r_stats.last_fallback_y_unit),
+                         static_cast<unsigned>(y2r_stats.last_fallback_y_gap),
+                         static_cast<unsigned>(y2r_stats.last_fallback_u_unit),
+                         static_cast<unsigned>(y2r_stats.last_fallback_u_gap),
+                         static_cast<unsigned>(y2r_stats.last_fallback_v_unit),
+                         static_cast<unsigned>(y2r_stats.last_fallback_v_gap),
+                         static_cast<unsigned>(y2r_stats.last_fallback_yuyv_unit),
+                         static_cast<unsigned>(y2r_stats.last_fallback_yuyv_gap),
+                         static_cast<unsigned>(y2r_stats.last_fallback_dst_unit),
+                         static_cast<unsigned>(y2r_stats.last_fallback_dst_gap),
+                         system.IsPoweredOn() ? 1 : 0,
+                         applet_loop_active ? 1 : 0,
+                         static_cast<unsigned long long>(keepalive_count));
+            last_heartbeat = heartbeat_now;
             last_heartbeat_loop_count = loop_count;
             last_heartbeat_frame = renderer_frame;
+            diagnostic_runloop_count = 0;
+            diagnostic_runloop_ms_total = 0.0;
+            diagnostic_runloop_ms_max = 0.0;
         }
         const auto unflushed_play_time =
             std::chrono::duration_cast<std::chrono::seconds>(now - play_stats_checkpoint).count();
@@ -1520,6 +1898,8 @@ int Run(int argc, char** argv) {
             exit_reason = "RunLoop returned ShutdownRequested";
             DebugLog("core requested shutdown after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            ExitLog("main loop exit: RunLoop ShutdownRequested iterations=%llu",
+                    static_cast<unsigned long long>(loop_count));
             break;
         }
         if (run_result == Core::System::ResultStatus::ErrorSavestate) {
@@ -1537,6 +1917,9 @@ int Run(int argc, char** argv) {
             DebugLog("run loop failed after %llu iterations: %s (%u)",
                      static_cast<unsigned long long>(loop_count), ResultStatusName(run_result),
                      static_cast<unsigned>(run_result));
+            ExitLog("main loop exit: RunLoop error iterations=%llu status=%s (%u)",
+                    static_cast<unsigned long long>(loop_count), ResultStatusName(run_result),
+                    static_cast<unsigned>(run_result));
             break;
         }
     }
@@ -1544,14 +1927,22 @@ int Run(int argc, char** argv) {
     DebugLog("shutting down: reason=%s powered=%d applet=%d iterations=%llu", exit_reason,
              system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
              static_cast<unsigned long long>(loop_count));
+    ExitLog("shutdown begin: reason=%s powered=%d applet=%d iterations=%llu", exit_reason,
+            system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
+            static_cast<unsigned long long>(loop_count));
+    ExitLogMemorySummary("shutdown-begin");
     const auto remaining_play_time = std::chrono::duration_cast<std::chrono::seconds>(
                                          Clock::now() - play_stats_checkpoint)
                                          .count();
     if (remaining_play_time > 0) {
+        ExitLog("shutdown step: UpdatePlayStats begin seconds=%lld",
+                static_cast<long long>(remaining_play_time));
         SwitchFrontend::GameDatabase::UpdatePlayStats(
             launch_options.rom_path, launch_options.title, false,
             static_cast<int>(remaining_play_time));
+        ExitLog("shutdown step: UpdatePlayStats done");
     }
+    ExitLog("shutdown step: restore temporary settings begin");
     Settings::values.use_vsync.SetValue(normal_vsync);
     if (mic_input_simulated) {
         Settings::values.input_type.SetValue(mic_restore_input_type);
@@ -1559,9 +1950,12 @@ int Run(int argc, char** argv) {
     }
     SwitchFrontend::VulkanOverlay::SetFastForwardActive(false);
     Settings::ResetTemporaryFrameLimit();
+    ExitLog("shutdown step: restore temporary settings done");
     const auto shutdown_started = Clock::now();
     if (menu_initialized) {
+        ExitLog("shutdown step: VulkanOverlay::PrepareForShutdown begin");
         SwitchFrontend::VulkanOverlay::PrepareForShutdown();
+        ExitLog("shutdown step: VulkanOverlay::PrepareForShutdown done");
     }
     if (menu_audio_muted) {
         Settings::values.volume.SetValue(menu_restore_volume);
@@ -1571,49 +1965,81 @@ int Run(int argc, char** argv) {
         window.SetInputSuppressed(true);
         InputCommon::SwitchHID::SetInputSuppressed(true);
     }
-    if (system.IsPoweredOn()) {
-        DebugLog("shutdown step: system.Shutdown begin");
-        const auto step_started = Clock::now();
-        system.Shutdown();
-        DebugLog("shutdown step: system.Shutdown done (%lld ms)",
-                 static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            Clock::now() - step_started)
-                                            .count()));
-    }
     if (menu_initialized) {
         DebugLog("shutdown step: VulkanOverlay::Shutdown begin");
+        ExitLog("shutdown step: VulkanOverlay::Shutdown begin");
+        const auto step_started = Clock::now();
         SwitchFrontend::VulkanOverlay::Shutdown();
         menu_initialized = false;
         DebugLog("shutdown step: VulkanOverlay::Shutdown done");
+        ExitLog("shutdown step: VulkanOverlay::Shutdown done (%lld ms)",
+                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           Clock::now() - step_started)
+                                           .count()));
+        ExitLogMemorySummary("after-overlay-shutdown");
     }
+    if (system.IsPoweredOn()) {
+        DebugLog("shutdown step: system.Shutdown begin");
+        ExitLog("shutdown step: system.Shutdown begin");
+        const auto step_started = Clock::now();
+        system.Shutdown();
+        const auto step_ms = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - step_started)
+                .count());
+        DebugLog("shutdown step: system.Shutdown done (%lld ms)", step_ms);
+        ExitLog("shutdown step: system.Shutdown done (%lld ms)", step_ms);
+        ExitLogMemorySummary("after-system-shutdown");
+    }
+    ExitLog("shutdown step: clear input suppression begin");
     window.SetInputSuppressed(false);
     InputCommon::SwitchHID::SetInputSuppressed(false);
+    ExitLog("shutdown step: clear input suppression done");
     DebugLog("shutdown step: InputCommon::Shutdown begin");
+    ExitLog("shutdown step: InputCommon::Shutdown begin");
     InputCommon::Shutdown();
     DebugLog("shutdown step: InputCommon::Shutdown done");
+    ExitLog("shutdown step: InputCommon::Shutdown done");
     DebugLog("shutdown step: Common::Log::Stop begin");
+    ExitLog("shutdown step: Common::Log::Stop begin active=%d", common_log_started ? 1 : 0);
     if (common_log_started) {
         Common::Log::Stop();
         common_log_started = false;
     }
     DebugLog("shutdown step: Common::Log::Stop done");
+    ExitLog("shutdown step: Common::Log::Stop done");
     if (romfs_initialized) {
         DebugLog("shutdown step: romfsExit begin");
+        ExitLog("shutdown step: romfsExit begin");
         romfsExit();
         DebugLog("shutdown step: romfsExit done");
+        ExitLog("shutdown step: romfsExit done");
     }
+    ExitLog("shutdown step: thread_core_guard.Restore begin");
     thread_core_guard.Restore("normal-shutdown");
+    ExitLog("shutdown step: thread_core_guard.Restore done");
+    ExitLogMemorySummary("before-launcher-return");
     DebugLog("shutdown total before launcher: %lld ms",
              static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                         Clock::now() - shutdown_started)
                                         .count()));
+    ExitLog("shutdown total before launcher: %lld ms",
+            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       Clock::now() - shutdown_started)
+                                       .count()));
     DebugLog("shutdown step: DebugClose begin");
+    ExitLog("shutdown step: DebugClose begin");
     DebugClose();
     const bool queued_launcher_return = QueueLauncherReturn(launch_options);
+    ExitLog("shutdown step: QueueLauncherReturn done queued=%d",
+            queued_launcher_return ? 1 : 0);
     DumpMemoryMap("after-shutdown");
+    ExitLogMemorySummary("after-shutdown");
     StartupLog("Run: appletUnlockExit begin");
+    ExitLog("shutdown step: appletUnlockExit begin");
     const LibnxResult unlock_exit_rc = appletUnlockExit();
     StartupLog("Run: appletUnlockExit rc=0x%x", unlock_exit_rc);
+    ExitLog("shutdown step: appletUnlockExit done rc=0x%x", unlock_exit_rc);
+    ExitLog("Run returning result=%d", queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE);
     return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
@@ -1637,16 +2063,21 @@ extern "C" void userAppInit() {
 
 extern "C" void userAppExit() {
     WriteRawBootMarker("userAppExit: entry");
+    ExitLog("userAppExit entry");
+    ExitLogMemorySummary("userAppExit-entry");
     // Runs after C++ static destructors — the closest observable state to what hbl
     // inherits. Anything still flagged SUSPECT here is what kills hbl with 0xD401.
     DumpMemoryMap("static-dtors-done");
     StartupLog("userAppExit");
     CloseStartupLog();
+    ExitLog("userAppExit closing logs");
+    ExitLogClose();
 }
 
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     WriteRawBootMarker("__libnx_exception_handler: entry");
     OpenStartupLogIfNeeded("a");
+    ExitLog("__libnx_exception_handler entry");
     StartupLog("module anchor: exception_handler=%p",
                reinterpret_cast<void*>(&__libnx_exception_handler));
     if (ctx) {
@@ -1656,18 +2087,35 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
                    static_cast<unsigned long long>(ctx->lr.x),
                    static_cast<unsigned long long>(ctx->sp.x),
                    static_cast<unsigned long long>(ctx->far.x), static_cast<unsigned>(ctx->esr));
+        ExitLog("libnx exception: desc=0x%08x pc=0x%016llx lr=0x%016llx sp=0x%016llx far=0x%016llx esr=0x%08x",
+                static_cast<unsigned>(ctx->error_desc),
+                static_cast<unsigned long long>(ctx->pc.x),
+                static_cast<unsigned long long>(ctx->lr.x),
+                static_cast<unsigned long long>(ctx->sp.x),
+                static_cast<unsigned long long>(ctx->far.x), static_cast<unsigned>(ctx->esr));
         StartupLog("libnx exception: x0=0x%016llx x1=0x%016llx x2=0x%016llx x3=0x%016llx",
                    static_cast<unsigned long long>(ctx->cpu_gprs[0].x),
                    static_cast<unsigned long long>(ctx->cpu_gprs[1].x),
                    static_cast<unsigned long long>(ctx->cpu_gprs[2].x),
                    static_cast<unsigned long long>(ctx->cpu_gprs[3].x));
+        ExitLog("libnx exception: x0=0x%016llx x1=0x%016llx x2=0x%016llx x3=0x%016llx",
+                static_cast<unsigned long long>(ctx->cpu_gprs[0].x),
+                static_cast<unsigned long long>(ctx->cpu_gprs[1].x),
+                static_cast<unsigned long long>(ctx->cpu_gprs[2].x),
+                static_cast<unsigned long long>(ctx->cpu_gprs[3].x));
         StartupLog("libnx exception: x4=0x%016llx x5=0x%016llx x6=0x%016llx x7=0x%016llx",
                    static_cast<unsigned long long>(ctx->cpu_gprs[4].x),
                    static_cast<unsigned long long>(ctx->cpu_gprs[5].x),
                    static_cast<unsigned long long>(ctx->cpu_gprs[6].x),
                    static_cast<unsigned long long>(ctx->cpu_gprs[7].x));
+        ExitLog("libnx exception: x4=0x%016llx x5=0x%016llx x6=0x%016llx x7=0x%016llx",
+                static_cast<unsigned long long>(ctx->cpu_gprs[4].x),
+                static_cast<unsigned long long>(ctx->cpu_gprs[5].x),
+                static_cast<unsigned long long>(ctx->cpu_gprs[6].x),
+                static_cast<unsigned long long>(ctx->cpu_gprs[7].x));
     } else {
         StartupLog("libnx exception: null context");
+        ExitLog("libnx exception: null context");
     }
 }
 
@@ -1675,7 +2123,10 @@ int main(int argc, char** argv) {
     WriteRawBootMarker("main: entry");
     OpenStartupLogIfNeeded("a");
     StartupLog("main: entry argc=%d", argc);
+    ExitLogOpen("w");
+    ExitLog("main entry argc=%d", argc);
     const int result = Run(argc, argv);
     StartupLog("main: exit result=%d", result);
+    ExitLog("main exit result=%d", result);
     return result;
 }

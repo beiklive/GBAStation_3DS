@@ -80,7 +80,9 @@ void FS_USER::OpenFile(Kernel::HLERequestContext& ctx) {
             LOG_DEBUG(Service_FS, "failed to get a handle for file {}", file_path.DebugStr());
         }
 
-        ctx.SleepClientThread("fs_user::open", open_timeout_ns, nullptr);
+        if (open_timeout_ns.count() > 0) {
+            ctx.SleepClientThread("fs_user::open", open_timeout_ns, nullptr);
+        }
         return;
     }
 
@@ -179,7 +181,9 @@ void FS_USER::OpenFileDirectly(Kernel::HLERequestContext& ctx) {
                       file_path.DebugStr(), mode.hex, attributes);
         }
 
-        ctx.SleepClientThread("fs_user::open_directly", open_timeout_ns, nullptr);
+        if (open_timeout_ns.count() > 0) {
+            ctx.SleepClientThread("fs_user::open_directly", open_timeout_ns, nullptr);
+        }
         return;
     }
 

@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <atomic>
 #include <fmt/format.h>
 #include "common/assert.h"
 #include "common/hacks/hack_manager.h"
@@ -58,6 +59,14 @@
 #include "core/loader/loader.h"
 
 namespace Service {
+
+namespace {
+std::atomic<u64> diagnostic_ipc_calls{};
+std::atomic<u64> diagnostic_unimplemented_calls{};
+std::atomic<u64> diagnostic_mvd_calls{};
+std::atomic<u64> diagnostic_mvd_unimplemented_calls{};
+std::atomic<u32> diagnostic_last_unimplemented_command{};
+} // namespace
 
 const std::array<ServiceModuleInfo, 41> service_module_map{
     {{"FS", 0x00040130'00001102, FS::InstallInterfaces, false},
@@ -176,9 +185,21 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(u32* cmd_buf, const Funct
 }
 
 void ServiceFrameworkBase::HandleSyncRequest(Kernel::HLERequestContext& context) {
+    diagnostic_ipc_calls.fetch_add(1, std::memory_order_relaxed);
+    const bool is_mvd_service = service_name == "mvd:std";
+    if (is_mvd_service) {
+        diagnostic_mvd_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+
     auto itr = handlers.find(context.CommandHeader().command_id.Value());
     const FunctionInfoBase* info = itr == handlers.end() ? nullptr : &itr->second;
     if (info == nullptr || !info->implemented) {
+        diagnostic_unimplemented_calls.fetch_add(1, std::memory_order_relaxed);
+        diagnostic_last_unimplemented_command.store(context.CommandHeader().command_id.Value(),
+                                                    std::memory_order_relaxed);
+        if (is_mvd_service) {
+            diagnostic_mvd_unimplemented_calls.fetch_add(1, std::memory_order_relaxed);
+        }
         context.ReportUnimplemented();
         return ReportUnimplementedFunction(context.CommandBuffer(), info);
     }
@@ -195,6 +216,19 @@ std::string ServiceFrameworkBase::GetFunctionName(IPC::Header header) const {
     }
 
     return itr->second.name;
+}
+
+Diagnostics GetAndResetDiagnostics() {
+    Diagnostics result;
+    result.ipc_calls = diagnostic_ipc_calls.exchange(0, std::memory_order_relaxed);
+    result.unimplemented_calls =
+        diagnostic_unimplemented_calls.exchange(0, std::memory_order_relaxed);
+    result.mvd_calls = diagnostic_mvd_calls.exchange(0, std::memory_order_relaxed);
+    result.mvd_unimplemented_calls =
+        diagnostic_mvd_unimplemented_calls.exchange(0, std::memory_order_relaxed);
+    result.last_unimplemented_command =
+        diagnostic_last_unimplemented_command.exchange(0, std::memory_order_relaxed);
+    return result;
 }
 
 static bool AttemptLLE(const ServiceModuleInfo& service_module, u64 loading_titleid) {

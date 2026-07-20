@@ -9,6 +9,7 @@
 #include <dynarmic/interface/A32/a32.h>
 #include "common/common_types.h"
 #include "core/arm/arm_interface.h"
+#include "core/arm/dynarmic/arm_dynarmic_diagnostics.h"
 #include "core/arm/dynarmic/arm_dynarmic_cp15.h"
 
 namespace Memory {

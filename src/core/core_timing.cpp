@@ -161,6 +161,35 @@ std::shared_ptr<Timing::Timer> Timing::GetTimer(std::size_t cpu_id) {
     return timers[cpu_id];
 }
 
+Timing::Diagnostics Timing::GetAndResetDiagnostics() {
+    Diagnostics total{};
+    for (auto& timer : timers) {
+        const Diagnostics timer_stats = timer->GetAndResetDiagnostics();
+        total.advance_calls += timer_stats.advance_calls;
+        total.events_processed += timer_stats.events_processed;
+        total.slice_count += timer_stats.slice_count;
+        total.short_slices += timer_stats.short_slices;
+        total.slice_total += timer_stats.slice_total;
+        total.min_slice = std::min(total.min_slice, timer_stats.min_slice);
+        total.max_slice = std::max(total.max_slice, timer_stats.max_slice);
+        total.idle_ticks += timer_stats.idle_ticks;
+        for (const auto& [event_type, count] : timer_stats.event_counts) {
+            total.event_counts[event_type] += count;
+        }
+    }
+    if (total.min_slice == std::numeric_limits<s64>::max()) {
+        total.min_slice = 0;
+    }
+    for (const auto& [event_type, count] : total.event_counts) {
+        if (count > total.busiest_event_count) {
+            total.busiest_event_name =
+                event_type && event_type->name ? *event_type->name : "<unknown>";
+            total.busiest_event_count = count;
+        }
+    }
+    return total;
+}
+
 Timing::Timer::Timer(s64 base_ticks) : executed_ticks(base_ticks) {}
 
 Timing::Timer::~Timer() {
@@ -181,6 +210,12 @@ void Timing::Timer::AddTicks(u64 ticks) {
 
 u64 Timing::Timer::GetIdleTicks() const {
     return static_cast<u64>(idled_cycles);
+}
+
+Timing::Diagnostics Timing::Timer::GetAndResetDiagnostics() {
+    Diagnostics result = diagnostics;
+    diagnostics = {};
+    return result;
 }
 
 void Timing::Timer::ForceExceptionCheck(s64 cycles) {
@@ -211,6 +246,7 @@ s64 Timing::Timer::GetMaxSliceLength() const {
 void Timing::Timer::Advance() {
     MoveEvents();
 
+    diagnostics.advance_calls++;
     s64 cycles_executed = slice_length - downcount;
     idled_cycles = 0;
     executed_ticks += cycles_executed;
@@ -223,6 +259,8 @@ void Timing::Timer::Advance() {
         Event evt = std::move(event_queue.front());
         std::pop_heap(event_queue.begin(), event_queue.end(), std::greater<>());
         event_queue.pop_back();
+        diagnostics.events_processed++;
+        diagnostics.event_counts[evt.type]++;
         if (evt.type->callback != nullptr) {
             evt.type->callback(evt.user_data, static_cast<int>(executed_ticks - evt.time));
         } else {
@@ -242,11 +280,20 @@ void Timing::Timer::SetNextSlice(s64 max_slice_length) {
             std::min<s64>(event_queue.front().time - executed_ticks, max_slice_length));
     }
 
+    diagnostics.slice_count++;
+    diagnostics.slice_total += static_cast<u64>(std::max<s64>(0, slice_length));
+    diagnostics.min_slice = std::min(diagnostics.min_slice, slice_length);
+    diagnostics.max_slice = std::max(diagnostics.max_slice, slice_length);
+    if (slice_length <= usToCycles(150)) {
+        diagnostics.short_slices++;
+    }
+
     downcount = slice_length;
 }
 
 void Timing::Timer::Idle() {
     idled_cycles += downcount;
+    diagnostics.idle_ticks += downcount;
     downcount = 0;
 }
 

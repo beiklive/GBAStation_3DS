@@ -24,6 +24,18 @@ class MemorySystem;
 
 namespace AudioCore {
 
+struct DspHleDiagnostics {
+    u64 ticks{};
+    u64 active_source_sum{};
+    u64 active_source_max{};
+    u64 interrupts{};
+    double tick_ms{};
+    double generate_ms{};
+    double output_ms{};
+};
+
+DspHleDiagnostics GetAndResetDspHleDiagnostics();
+
 class DspHle final : public DspInterface {
 public:
     explicit DspHle(Core::System& system);

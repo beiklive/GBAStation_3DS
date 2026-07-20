@@ -142,6 +142,20 @@ struct TimingEventType {
 class Timing {
 
 public:
+    struct Diagnostics {
+        u64 advance_calls{};
+        u64 events_processed{};
+        u64 slice_count{};
+        u64 short_slices{};
+        u64 slice_total{};
+        s64 min_slice{std::numeric_limits<s64>::max()};
+        s64 max_slice{};
+        u64 idle_ticks{};
+        std::unordered_map<const TimingEventType*, u64> event_counts;
+        std::string busiest_event_name;
+        u64 busiest_event_count{};
+    };
+
     struct Event {
         s64 time;
         u64 fifo_order;
@@ -203,6 +217,8 @@ public:
 
         s64 GetDowncount() const;
 
+        Diagnostics GetAndResetDiagnostics();
+
         void ForceExceptionCheck(s64 cycles);
 
         void MoveEvents();
@@ -231,6 +247,7 @@ public:
         s64 downcount = MAX_SLICE_LENGTH;
         s64 executed_ticks = 0;
         u64 idled_cycles = 0;
+        Diagnostics diagnostics{};
 
         // Stores a scaling for the internal clockspeed. Changing this number results in
         // under/overclocking the guest cpu
@@ -284,6 +301,8 @@ public:
     std::chrono::microseconds GetGlobalTimeUs() const;
 
     std::shared_ptr<Timer> GetTimer(std::size_t cpu_id);
+
+    Diagnostics GetAndResetDiagnostics();
 
     // Used after deserializing to unprotect the event queue.
     void UnlockEventQueue() {

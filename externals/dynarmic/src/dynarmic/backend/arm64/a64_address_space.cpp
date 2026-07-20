@@ -555,6 +555,8 @@ EmitConfig A64AddressSpace::GetEmitConfig() {
         .tpidr_el0 = conf.tpidr_el0,
 
         .check_halt_on_memory_access = conf.check_halt_on_memory_access,
+        .processor_id = conf.processor_id,
+        .global_monitor = conf.global_monitor,
 
         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
         .page_table_address_space_bits = conf.page_table_address_space_bits,

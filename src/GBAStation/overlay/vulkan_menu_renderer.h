@@ -39,6 +39,8 @@ enum class Item {
 struct State {
     bool menu_visible{true};
     bool fast_forward_active{};
+    bool show_fps{};
+    float current_fps{};
     Item item{Item::Resume};
     bool content_focused{};
     int content_focus{};

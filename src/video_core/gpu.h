@@ -39,6 +39,17 @@ class GraphicsDebugger;
 class RendererBase;
 class RightEyeDisabler;
 
+struct TransferDiagnostics {
+    u64 display_transfer_count{};
+    u64 texture_copy_count{};
+    u64 software_display_transfer_count{};
+    u64 software_texture_copy_count{};
+    u64 display_transfer_bytes{};
+    u64 texture_copy_bytes{};
+};
+
+TransferDiagnostics GetAndResetTransferDiagnostics();
+
 /**
  * The GPU class is the high level interface to the video_core for core services.
  */

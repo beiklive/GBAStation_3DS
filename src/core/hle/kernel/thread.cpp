@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <climits>
+#include <mutex>
+#include <unordered_map>
 #include <boost/serialization/string.hpp>
 #include <boost/serialization/unordered_map.hpp>
 #include <boost/serialization/vector.hpp>
@@ -33,6 +35,132 @@ SERIALIZE_EXPORT_IMPL(Kernel::Thread)
 SERIALIZE_EXPORT_IMPL(Kernel::WakeupCallback)
 
 namespace Kernel {
+
+namespace {
+
+constexpr std::size_t ThreadStatusIndex(ThreadStatus status) {
+    return static_cast<std::size_t>(status);
+}
+
+constexpr const char* ThreadStatusName(ThreadStatus status) {
+    switch (status) {
+    case ThreadStatus::Running:
+        return "Running";
+    case ThreadStatus::Ready:
+        return "Ready";
+    case ThreadStatus::WaitArb:
+        return "WaitArb";
+    case ThreadStatus::WaitSleep:
+        return "WaitSleep";
+    case ThreadStatus::WaitIPC:
+        return "WaitIPC";
+    case ThreadStatus::WaitSynchAny:
+        return "WaitSynchAny";
+    case ThreadStatus::WaitSynchAll:
+        return "WaitSynchAll";
+    case ThreadStatus::WaitHleEvent:
+        return "WaitHleEvent";
+    case ThreadStatus::Dormant:
+        return "Dormant";
+    case ThreadStatus::Dead:
+        return "Dead";
+    }
+    return "Unknown";
+}
+
+std::string SanitizeThreadName(std::string name) {
+    if (name.empty()) {
+        return "-";
+    }
+    for (char& c : name) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            c = '_';
+        }
+    }
+    return name;
+}
+
+std::size_t DelayBucket(s64 nanoseconds) {
+    if (nanoseconds <= 100'000) {
+        return 0;
+    }
+    if (nanoseconds <= 500'000) {
+        return 1;
+    }
+    if (nanoseconds <= 1'000'000) {
+        return 2;
+    }
+    if (nanoseconds <= 2'000'000) {
+        return 3;
+    }
+    if (nanoseconds <= 5'000'000) {
+        return 4;
+    }
+    if (nanoseconds <= 16'700'000) {
+        return 5;
+    }
+    return 6;
+}
+
+std::mutex thread_wakeup_diagnostics_mutex;
+ThreadWakeupDiagnostics thread_wakeup_diagnostics;
+std::unordered_map<u32, u64> thread_wakeup_counts;
+
+void RecordThreadWakeupScheduled(u32 thread_id, u32 core_id, ThreadStatus status,
+                                 const std::string& name, s64 nanoseconds,
+                                 ThreadWakeupSource source) {
+    std::scoped_lock lock(thread_wakeup_diagnostics_mutex);
+
+    auto& diag = thread_wakeup_diagnostics;
+    const auto source_index = static_cast<std::size_t>(source);
+    if (source_index < diag.source_counts.size()) {
+        diag.source_counts[source_index]++;
+    }
+
+    if (nanoseconds == -1) {
+        diag.forever++;
+        return;
+    }
+
+    diag.scheduled++;
+    diag.total_ns += static_cast<u64>(std::max<s64>(0, nanoseconds));
+    diag.min_ns = std::min(diag.min_ns, nanoseconds);
+    diag.max_ns = std::max(diag.max_ns, nanoseconds);
+    diag.delay_buckets[DelayBucket(nanoseconds)]++;
+
+    const std::size_t status_index = ThreadStatusIndex(status);
+    if (status_index < diag.status_counts.size()) {
+        diag.status_counts[status_index]++;
+    }
+
+    const u64 count = ++thread_wakeup_counts[thread_id];
+    if (count > diag.busiest_thread_count) {
+        diag.busiest_thread_id = thread_id;
+        diag.busiest_thread_core = core_id;
+        diag.busiest_thread_count = count;
+        diag.busiest_thread_status = status;
+        diag.busiest_thread_name = SanitizeThreadName(name);
+        diag.busiest_thread_status_name = ThreadStatusName(status);
+    }
+}
+
+void RecordThreadWakeupFired() {
+    std::scoped_lock lock(thread_wakeup_diagnostics_mutex);
+    thread_wakeup_diagnostics.fired++;
+}
+
+} // namespace
+
+ThreadWakeupDiagnostics GetAndResetThreadWakeupDiagnostics() {
+    std::scoped_lock lock(thread_wakeup_diagnostics_mutex);
+    ThreadWakeupDiagnostics result = thread_wakeup_diagnostics;
+    if (result.min_ns == std::numeric_limits<s64>::max()) {
+        result.min_ns = 0;
+    }
+    thread_wakeup_diagnostics = {};
+    thread_wakeup_counts.clear();
+    return result;
+}
 
 template <class Archive>
 void ThreadManager::serialize(Archive& ar, const unsigned int) {
@@ -276,6 +404,8 @@ void ThreadManager::TerminateProcessThreads(std::shared_ptr<Process> process) {
 }
 
 void ThreadManager::ThreadWakeupCallback(u64 thread_id, s64 cycles_late) {
+    RecordThreadWakeupFired();
+
     std::shared_ptr<Thread> thread = SharedFrom(wakeup_callback_table.at(thread_id));
     if (thread == nullptr) {
         LOG_CRITICAL(Kernel, "Callback fired for invalid thread {:08X}", thread_id);
@@ -299,7 +429,9 @@ void ThreadManager::ThreadWakeupCallback(u64 thread_id, s64 cycles_late) {
     thread->ResumeFromWait();
 }
 
-void Thread::WakeAfterDelay(s64 nanoseconds, bool thread_safe_mode) {
+void Thread::WakeAfterDelay(s64 nanoseconds, bool thread_safe_mode, ThreadWakeupSource source) {
+    RecordThreadWakeupScheduled(thread_id, core_id, status, name, nanoseconds, source);
+
     // Don't schedule a wakeup if the thread wants to wait forever
     if (nanoseconds == -1)
         return;
@@ -495,7 +627,7 @@ std::shared_ptr<Thread> SetupMainThread(KernelSystem& kernel, u32 entry_point, u
 
     if (sleep_time_ns != 0) {
         thread->status = ThreadStatus::WaitSleep;
-        thread->WakeAfterDelay(sleep_time_ns);
+        thread->WakeAfterDelay(sleep_time_ns, false, ThreadWakeupSource::AppMainDelay);
     }
 
     // Note: The newly created thread will be run when the scheduler fires.
@@ -602,6 +734,15 @@ void CpuLimiterMulti::UpdateAppCpuLimit() {
     app_cpu_time = static_cast<u32>(kernel.ResourceLimit()
                                         .GetForCategory(Kernel::ResourceLimitCategory::Application)
                                         ->GetCurrentValue(Kernel::ResourceLimitType::CpuTime));
+#if defined(__SWITCH__)
+    // The 3DS kernel time-slices application and sysmodule work on Core1 using a very short
+    // preemption timer. On Switch this timer fragments ARM11 execution heavily during video
+    // playback, while HLE service work is already executed synchronously on the host.
+    active = false;
+    kernel.timing.UnscheduleEvent(tick_event, 0);
+    WakeupSleepingThreads();
+    return;
+#endif
     if (app_cpu_time == Core1CpuTime::PREEMPTION_DISABLED) {
         // No preemption, disable event
         active = false;

@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <array>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -65,7 +67,42 @@ enum class ThreadWakeupReason {
     Timeout // The thread was woken up due to a wait timeout.
 };
 
+enum class ThreadWakeupSource {
+    Generic,
+    SvcSleepThread,
+    WaitSynchronization1,
+    WaitSynchronizationNAll,
+    WaitSynchronizationNAny,
+    HleSleepClientThread,
+    HleRunAsync,
+    HleRunOnThread,
+    AddressArbiter,
+    AppMainDelay,
+    IpcDelay,
+    Count
+};
+
 class Thread;
+
+struct ThreadWakeupDiagnostics {
+    u64 scheduled{};
+    u64 fired{};
+    u64 forever{};
+    u64 total_ns{};
+    s64 min_ns{std::numeric_limits<s64>::max()};
+    s64 max_ns{};
+    std::array<u64, 7> delay_buckets{};
+    std::array<u64, 10> status_counts{};
+    std::array<u64, static_cast<std::size_t>(ThreadWakeupSource::Count)> source_counts{};
+    u32 busiest_thread_id{};
+    u32 busiest_thread_core{};
+    u64 busiest_thread_count{};
+    ThreadStatus busiest_thread_status{ThreadStatus::Dead};
+    std::string busiest_thread_name;
+    std::string busiest_thread_status_name;
+};
+
+ThreadWakeupDiagnostics GetAndResetThreadWakeupDiagnostics();
 
 class WakeupCallback {
 public:
@@ -312,7 +349,8 @@ public:
      * @param thread_safe_mode Set to true if called from a different thread than the emulator
      * thread, such as coroutines.
      */
-    void WakeAfterDelay(s64 nanoseconds, bool thread_safe_mode = false);
+    void WakeAfterDelay(s64 nanoseconds, bool thread_safe_mode = false,
+                        ThreadWakeupSource source = ThreadWakeupSource::Generic);
 
     /**
      * Sets the result after the thread awakens (from either WaitSynchronization SVC)

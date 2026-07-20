@@ -151,7 +151,7 @@ Result AddressArbiter::ArbitrateAddress(std::shared_ptr<Thread> thread, Arbitrat
     case ArbitrationType::WaitIfLessThanWithTimeout:
         if ((s32)kernel.memory.Read32(address) < value) {
             thread->wakeup_callback = timeout_callback;
-            thread->WakeAfterDelay(nanoseconds);
+            thread->WakeAfterDelay(nanoseconds, false, ThreadWakeupSource::AddressArbiter);
             WaitThread(std::move(thread), address);
         }
         break;
@@ -170,7 +170,7 @@ Result AddressArbiter::ArbitrateAddress(std::shared_ptr<Thread> thread, Arbitrat
             // Only change the memory value if the thread should wait
             kernel.memory.Write32(address, (s32)memory_value - 1);
             thread->wakeup_callback = timeout_callback;
-            thread->WakeAfterDelay(nanoseconds);
+            thread->WakeAfterDelay(nanoseconds, false, ThreadWakeupSource::AddressArbiter);
             WaitThread(std::move(thread), address);
         }
         break;
