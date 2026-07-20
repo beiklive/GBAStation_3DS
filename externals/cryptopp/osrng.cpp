@@ -22,7 +22,7 @@
 #include "rng.h"
 
 #ifdef __SWITCH__
-extern "C" void tico_switch_random_bytes(void* output, size_t size);
+extern "C" void gbastation_switch_random_bytes(void* output, size_t size);
 #endif
 
 // FreeBSD links /dev/urandom -> /dev/random. It showed up when we added
@@ -187,7 +187,7 @@ NonblockingRng::~NonblockingRng()
 void NonblockingRng::GenerateBlock(byte *output, size_t size)
 {
 #ifdef __SWITCH__
-	tico_switch_random_bytes(output, size);
+	gbastation_switch_random_bytes(output, size);
 #elif defined(CRYPTOPP_WIN32_AVAILABLE)
 	// Acquiring a provider is expensive. Do it once and retain the reference.
 # if defined(CRYPTOPP_CXX11_STATIC_INIT)

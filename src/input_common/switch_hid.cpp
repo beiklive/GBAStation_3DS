@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include "tico/switch_libnx.h"
+#include "GBAStation/switch_libnx.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
 #include "common/vector_math.h"

@@ -6,7 +6,7 @@
 #if !defined(__SWITCH__)
 #include <openssl/rand.h>
 #else
-extern "C" void tico_switch_random_bytes(void* output, std::size_t size);
+extern "C" void gbastation_switch_random_bytes(void* output, std::size_t size);
 #endif
 #include "common/archives.h"
 #include "common/common_types.h"
@@ -81,7 +81,7 @@ void InstallInterfaces(Core::System& system) {
 void GenerateRandomData(std::vector<u8>& out) {
     // Fill the output buffer with random data.
 #if defined(__SWITCH__)
-    tico_switch_random_bytes(out.data(), out.size());
+    gbastation_switch_random_bytes(out.data(), out.size());
 #else
     RAND_bytes(out.data(), static_cast<int>(out.size()));
 #endif

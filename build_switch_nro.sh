@@ -110,12 +110,12 @@ cmake -G Ninja -B "${BUILD_DIR}" "${SCRIPT_DIR}" \
     -DCITRA_USE_PRECOMPILED_HEADERS=OFF \
     -DCITRA_WARNINGS_AS_ERRORS=OFF \
     -DENABLE_LTO=OFF \
-    -DTICO_SWITCH_DIAGNOSTIC_LOGS="${DIAGNOSTIC_LOGS}" \
+    -DGBASTATION_SWITCH_DIAGNOSTIC_LOGS="${DIAGNOSTIC_LOGS}" \
     "${CMAKE_EXTRA_ARGS[@]}"
 
-cmake --build "${BUILD_DIR}" --target tico -j"$(nproc)"
+cmake --build "${BUILD_DIR}" --target gbastation -j"$(nproc)"
 
-ELF_FILE="${BUILD_DIR}/src/tico/azahar-switch.elf"
+ELF_FILE="${BUILD_DIR}/src/GBAStation/azahar-switch.elf"
 if [ ! -f "${ELF_FILE}" ]; then
     ELF_FILE="$(find "${BUILD_DIR}" -type f \( -name 'azahar-switch.elf' -o -name 'azahar-switch' \) | head -1)"
 fi
@@ -127,7 +127,7 @@ fi
 
 NACP_FILE="${BUILD_DIR}/GBAStation3DSStub.nacp"
 NRO_FILE="${SCRIPT_DIR}/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
-ROMFS_DIR="${BUILD_DIR}/tico_romfs"
+ROMFS_DIR="${BUILD_DIR}/gbastation_romfs"
 DEBUG_ELF="${BUILD_DIR}/azahar-switch${OUTPUT_SUFFIX}.debug.elf"
 STRIPPED_ELF="${BUILD_DIR}/azahar-switch${OUTPUT_SUFFIX}.stripped.elf"
 GENERATED_LINKER_MAP="${BUILD_DIR}/azahar-switch.map"
@@ -138,12 +138,8 @@ STRINGS="${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-strings"
 nacptool --create "GBAStation 3DS Stub" "GBAStation" "1.0.5" "${NACP_FILE}"
 rm -rf "${ROMFS_DIR}"
 mkdir -p "${ROMFS_DIR}"
-if [ -d "${SCRIPT_DIR}/src/tico/config" ]; then
-    cp -R "${SCRIPT_DIR}/src/tico/config" "${ROMFS_DIR}/config"
-fi
-if [ -f "${SCRIPT_DIR}/src/tico/fonts/font.ttf" ]; then
-    mkdir -p "${ROMFS_DIR}/fonts"
-    cp "${SCRIPT_DIR}/src/tico/fonts/font.ttf" "${ROMFS_DIR}/fonts/font.ttf"
+if [ -d "${SCRIPT_DIR}/src/GBAStation/rescources" ]; then
+    cp -R "${SCRIPT_DIR}/src/GBAStation/rescources" "${ROMFS_DIR}/rescources"
 fi
 cp "${ELF_FILE}" "${DEBUG_ELF}"
 cp "${ELF_FILE}" "${STRIPPED_ELF}"
@@ -238,4 +234,4 @@ echo "M6 audit: ${AUDIT_LOG}"
 echo "SHA-256: ${SHA256_FILE}"
 echo "Copy to SD as: /switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
 echo "ROM fallback path: sdmc:/GBAStation/3ds/3Dlandchs.cci"
-echo "Boot markers: sdmc:/123/system/3ds/azahar_boot.txt and sdmc:/123/system/3ds/debug/startup.txt"
+echo "Boot markers: sdmc:/GBAStation/system/3ds/azahar_boot.txt and sdmc:/GBAStation/system/3ds/debug/startup.txt"

@@ -212,7 +212,7 @@ if (ENABLE_LIBRETRO)
 endif()
 
 if (SWITCH)
-    add_subdirectory(tico)
+    add_subdirectory(GBAStation)
 endif()
 
 if (ENABLE_ROOM)

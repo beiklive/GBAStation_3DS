@@ -24,11 +24,11 @@
 
 #if defined(__SWITCH__)
 extern "C" {
-void* tico_switch_jit_create(std::size_t size, void** rw_addr, void** rx_addr);
-int tico_switch_jit_set_writable(void* handle);
-int tico_switch_jit_set_executable(void* handle);
-int tico_switch_jit_sync_range(void* handle, std::size_t offset, std::size_t size);
-void tico_switch_jit_close(void* handle);
+void* gbastation_switch_jit_create(std::size_t size, void** rw_addr, void** rx_addr);
+int gbastation_switch_jit_set_writable(void* handle);
+int gbastation_switch_jit_set_executable(void* handle);
+int gbastation_switch_jit_sync_range(void* handle, std::size_t offset, std::size_t size);
+void gbastation_switch_jit_close(void* handle);
 }
 #endif
 
@@ -42,13 +42,13 @@ public:
 #if defined(__SWITCH__)
         void* rw_addr = nullptr;
         void* rx_addr = nullptr;
-        m_jit = tico_switch_jit_create(size, &rw_addr, &rx_addr);
+        m_jit = gbastation_switch_jit_create(size, &rw_addr, &rx_addr);
         if (m_jit == nullptr)
             throw std::bad_alloc{};
         m_wmemory = static_cast<std::uint32_t*>(rw_addr);
         m_memory = static_cast<std::uint32_t*>(rx_addr);
         if (m_memory == nullptr || m_wmemory == nullptr) {
-            tico_switch_jit_close(m_jit);
+            gbastation_switch_jit_close(m_jit);
             m_jit = nullptr;
             m_wmemory = nullptr;
             m_memory = nullptr;
@@ -80,7 +80,7 @@ public:
             return;
 
 #if defined(__SWITCH__)
-        tico_switch_jit_close(m_jit);
+        gbastation_switch_jit_close(m_jit);
 #elif defined(_WIN32)
         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
 #else
@@ -115,7 +115,7 @@ public:
     void protect()
     {
 #if defined(__SWITCH__)
-        if (!m_writes_synchronized && tico_switch_jit_set_executable(m_jit) != 0)
+        if (!m_writes_synchronized && gbastation_switch_jit_set_executable(m_jit) != 0)
             throw std::bad_alloc{};
         m_writes_synchronized = false;
 #elif defined(__APPLE__) && !TARGET_OS_IPHONE
@@ -129,7 +129,7 @@ public:
     {
 #if defined(__SWITCH__)
         m_writes_synchronized = false;
-        if (tico_switch_jit_set_writable(m_jit) != 0)
+        if (gbastation_switch_jit_set_writable(m_jit) != 0)
             throw std::bad_alloc{};
 #elif defined(__APPLE__) && !TARGET_OS_IPHONE
         pthread_jit_write_protect_np(0);
@@ -153,7 +153,7 @@ public:
             throw std::bad_alloc{};
         }
 
-        const int result = tico_switch_jit_sync_range(m_jit, offset, size);
+        const int result = gbastation_switch_jit_sync_range(m_jit, offset, size);
         if (result < 0)
             throw std::bad_alloc{};
         // A return value of 1 selects the older SetProcessMemoryPermission fallback.  In that

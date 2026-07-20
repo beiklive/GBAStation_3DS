@@ -11,7 +11,7 @@
 #if !defined(__SWITCH__)
 #include <openssl/rand.h>
 #else
-extern "C" void tico_switch_random_bytes(void* output, std::size_t size);
+extern "C" void gbastation_switch_random_bytes(void* output, std::size_t size);
 #endif
 #include "common/alignment.h"
 #include "common/archives.h"
@@ -4952,8 +4952,8 @@ void Module::Interface::ExportTicketWrapped(Kernel::HLERequestContext& ctx) {
     std::vector<u8> iv(0x10);
 
 #if defined(__SWITCH__)
-    tico_switch_random_bytes(key.data(), key.size());
-    tico_switch_random_bytes(iv.data(), iv.size());
+    gbastation_switch_random_bytes(key.data(), key.size());
+    gbastation_switch_random_bytes(iv.data(), iv.size());
 #else
     RAND_bytes(key.data(), static_cast<int>(key.size()));
     RAND_bytes(iv.data(), static_cast<int>(iv.size()));

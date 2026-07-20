@@ -11,7 +11,7 @@
 #include "audio_core/libnx_sink.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
-#include "tico/switch_libnx.h"
+#include "GBAStation/switch_libnx.h"
 
 namespace AudioCore {
 

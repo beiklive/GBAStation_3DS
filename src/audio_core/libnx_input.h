@@ -11,7 +11,7 @@
 #include <vector>
 #include "audio_core/input.h"
 #include "common/common_types.h"
-#include "tico/switch_libnx.h"
+#include "GBAStation/switch_libnx.h"
 
 namespace AudioCore {
 
