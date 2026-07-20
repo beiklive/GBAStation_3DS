@@ -87,6 +87,7 @@ struct LaunchOptions {
     SwitchFrontend::GBAStationDisplaySettings display_settings;
     std::string return_nro_path{LauncherPath};
     bool return_to_nro{true};
+    bool display_settings_from_game_db{};
 };
 #if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
 constexpr bool DiagnosticLogsEnabled = true;
@@ -621,6 +622,7 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
             options.title = game_record.title;
         }
         options.display_settings = game_record.display;
+        options.display_settings_from_game_db = true;
     }
     StartupLog("ParseLaunchOptions: rom=%s title=%s return=%s target=%s",
                options.rom_path.c_str(), options.title.c_str(),
@@ -732,9 +734,7 @@ void ConfigureSettings() {
 
 bool ExitComboPressed() {
     static bool was_down = false;
-    const u64 buttons = padGetButtons(&pad);
-    const u64 menu_mask = SwitchFrontend::InputMapping::MenuHotkeyMask();
-    const bool down = menu_mask != 0 && (buttons & menu_mask) == menu_mask;
+    const bool down = SwitchFrontend::InputMapping::MenuHotkeyPressed(pad);
     const bool triggered = down && !was_down;
     was_down = down;
     return triggered;
@@ -800,6 +800,154 @@ bool TryParseSystemLanguage(std::string_view value, Service::CFG::SystemLanguage
         return true;
     }
     return false;
+}
+
+bool TryParseInt(std::string_view value, int& out) {
+    if (value.empty()) {
+        return false;
+    }
+    try {
+        std::size_t consumed = 0;
+        const int parsed = std::stoi(std::string(value), &consumed);
+        if (consumed == value.size()) {
+            out = parsed;
+            return true;
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+bool TryParseFloat(std::string_view value, float& out) {
+    if (value.empty()) {
+        return false;
+    }
+    try {
+        std::size_t consumed = 0;
+        const float parsed = std::stof(std::string(value), &consumed);
+        if (consumed == value.size()) {
+            out = parsed;
+            return true;
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+bool ParseConfigBool(std::string_view value, bool fallback) {
+    const std::string lower = LowerCopy(value);
+    if (lower == "true" || lower == "1" || lower == "on" || lower == "yes") {
+        return true;
+    }
+    if (lower == "false" || lower == "0" || lower == "off" || lower == "no") {
+        return false;
+    }
+    return fallback;
+}
+
+std::string FormatFloat(float value) {
+    char text[32]{};
+    std::snprintf(text, sizeof(text), "%.3f", value);
+    return text;
+}
+
+void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& settings,
+                                    bool include_screen, bool include_overlay) {
+    using SwitchFrontend::GBAStationConfig::GetConfigValue;
+    int parsed_int = 0;
+    float parsed_float = 0.0f;
+
+    if (include_screen) {
+        const std::string layout = GetConfigValue("ndsScreenLayout");
+        if (!layout.empty()) {
+            settings.screen_layout = layout;
+        }
+        if (TryParseInt(GetConfigValue("ndsScreenOrientation"), parsed_int)) {
+            settings.screen_orientation = parsed_int;
+        }
+        if (TryParseInt(GetConfigValue("ndsInternalResolution"), parsed_int)) {
+            settings.internal_resolution = std::clamp(parsed_int, 1, 4);
+        } else if (TryParseInt(GetConfigValue("upscale"), parsed_int)) {
+            settings.internal_resolution = std::clamp(parsed_int, 1, 4);
+        }
+        const std::string integer_scale = GetConfigValue("ndsIntegerScale");
+        if (!integer_scale.empty()) {
+            settings.integer_scale = ParseConfigBool(integer_scale, settings.integer_scale);
+        }
+        if (TryParseInt(GetConfigValue("ndsScreenGap"), parsed_int)) {
+            settings.screen_gap = std::clamp(parsed_int, -256, 256);
+        }
+        if (TryParseFloat(GetConfigValue("ndsTopScale"), parsed_float)) {
+            settings.top_scale = std::clamp(parsed_float, 1.0f, 10.0f);
+        }
+        if (TryParseFloat(GetConfigValue("ndsTopOffsetX"), parsed_float)) {
+            settings.top_offset_x = std::clamp(parsed_float, -1024.0f, 1024.0f);
+        }
+        if (TryParseFloat(GetConfigValue("ndsTopOffsetY"), parsed_float)) {
+            settings.top_offset_y = std::clamp(parsed_float, -1024.0f, 1024.0f);
+        }
+        if (TryParseFloat(GetConfigValue("ndsBottomScale"), parsed_float)) {
+            settings.bottom_scale = std::clamp(parsed_float, 1.0f, 10.0f);
+        }
+        if (TryParseFloat(GetConfigValue("ndsBottomOffsetX"), parsed_float)) {
+            settings.bottom_offset_x = std::clamp(parsed_float, -1024.0f, 1024.0f);
+        }
+        if (TryParseFloat(GetConfigValue("ndsBottomOffsetY"), parsed_float)) {
+            settings.bottom_offset_y = std::clamp(parsed_float, -1024.0f, 1024.0f);
+        }
+    }
+
+    if (include_overlay) {
+        const std::string overlay_enabled = GetConfigValue("overlayEnabled");
+        if (!overlay_enabled.empty()) {
+            settings.overlay_enabled = ParseConfigBool(overlay_enabled, settings.overlay_enabled);
+        }
+        const std::string overlay_path = GetConfigValue("overlayPath");
+        if (!overlay_path.empty()) {
+            settings.overlay_path = overlay_path;
+        }
+    }
+
+    if (TryParseFloat(GetConfigValue("fastforward.multiplier"), parsed_float)) {
+        settings.fast_forward_multiplier = std::clamp(parsed_float, 0.1f, 5.0f);
+    }
+}
+
+bool SaveGlobalOverlayDefaults(const SwitchFrontend::GBAStationDisplaySettings& display) {
+    SwitchFrontend::GBAStationConfig::SetConfigValue(
+        "overlayEnabled", display.overlay_enabled ? "true" : "false");
+    SwitchFrontend::GBAStationConfig::SetConfigValue("overlayPath", display.overlay_path);
+    return SwitchFrontend::GBAStationConfig::SaveConfig();
+}
+
+bool SaveGlobalScreenDefaults(const SwitchFrontend::GBAStationDisplaySettings& display) {
+    SwitchFrontend::GBAStationConfig::SetConfigValue("fastforward.multiplier",
+                                                     FormatFloat(display.fast_forward_multiplier));
+    SwitchFrontend::GBAStationConfig::SetConfigValue(
+        "ndsInternalResolution", std::to_string(std::clamp(display.internal_resolution, 1, 4)));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("upscale",
+                                                     std::to_string(std::clamp(
+                                                         display.internal_resolution, 1, 4)));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsIntegerScale",
+                                                     display.integer_scale ? "true" : "false");
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsScreenLayout", display.screen_layout);
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsScreenOrientation",
+                                                     std::to_string(display.screen_orientation));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsScreenGap",
+                                                     std::to_string(display.screen_gap));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsTopScale",
+                                                     FormatFloat(display.top_scale));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsTopOffsetX",
+                                                     FormatFloat(display.top_offset_x));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsTopOffsetY",
+                                                     FormatFloat(display.top_offset_y));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsBottomScale",
+                                                     FormatFloat(display.bottom_scale));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsBottomOffsetX",
+                                                     FormatFloat(display.bottom_offset_x));
+    SwitchFrontend::GBAStationConfig::SetConfigValue("ndsBottomOffsetY",
+                                                     FormatFloat(display.bottom_offset_y));
+    return SwitchFrontend::GBAStationConfig::SaveConfig();
 }
 
 void ApplyConfiguredSystemLanguage(Core::System& system) {
@@ -908,16 +1056,9 @@ int Run(int argc, char** argv) {
     StartupLog("Run: ConfigureSettings");
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
-    {
-        const std::string multiplier =
-            SwitchFrontend::GBAStationConfig::GetConfigValue("fastforward.multiplier", "4.0");
-        char* end = nullptr;
-        const float parsed = std::strtof(multiplier.c_str(), &end);
-        if (end != multiplier.c_str()) {
-            launch_options.display_settings.fast_forward_multiplier =
-                std::clamp(parsed, 0.1f, 5.0f);
-        }
-    }
+    ApplyConfiguredDisplayDefaults(launch_options.display_settings,
+                                   !launch_options.display_settings_from_game_db,
+                                   !launch_options.display_settings_from_game_db);
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
     SwitchFrontend::GBAStationConfig::ApplyConfig();
@@ -1043,6 +1184,7 @@ int Run(int argc, char** argv) {
     AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
     bool last_fast_forward_active = false;
     bool fast_forward_compile_throttled = false;
+    bool force_input_suppressed_during_shutdown = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
     const char* exit_reason = "loop condition ended";
     while (true) {
@@ -1080,10 +1222,7 @@ int Run(int argc, char** argv) {
         }
         const bool menu_visible =
             menu_initialized && SwitchFrontend::VulkanOverlay::IsVisible();
-        const u64 fast_forward_mask = SwitchFrontend::InputMapping::FastForwardHotkeyMask();
-        const u64 held_buttons = padGetButtons(&pad);
-        const bool fast_forward_combo =
-            fast_forward_mask != 0 && (held_buttons & fast_forward_mask) == fast_forward_mask;
+        const bool fast_forward_combo = SwitchFrontend::InputMapping::FastForwardHotkeyPressed(pad);
         if (SwitchFrontend::InputMapping::FastForwardToggleMode() && fast_forward_combo &&
             !previous_fast_forward_combo && !menu_visible) {
             fast_forward_toggle = !fast_forward_toggle;
@@ -1138,9 +1277,8 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = false;
         }
         bool suppress_game_input = menu_visible || block_game_input_until_release;
-        const u64 swap_screens_mask = SwitchFrontend::InputMapping::SwapScreensHotkeyMask();
         const bool swap_screens_combo =
-            swap_screens_mask != 0 && (held_buttons & swap_screens_mask) == swap_screens_mask;
+            SwitchFrontend::InputMapping::SwapScreensHotkeyPressed(pad);
         if (!suppress_game_input && swap_screens_combo && !previous_swap_screens_combo) {
             const bool swapped = !Settings::values.swap_screen.GetValue();
             Settings::values.swap_screen.SetValue(swapped);
@@ -1152,9 +1290,7 @@ int Run(int argc, char** argv) {
         }
         previous_swap_screens_combo = swap_screens_combo;
 
-        const u64 mic_input_mask = SwitchFrontend::InputMapping::MicInputHotkeyMask();
-        const bool mic_input_combo =
-            mic_input_mask != 0 && (held_buttons & mic_input_mask) == mic_input_mask;
+        const bool mic_input_combo = SwitchFrontend::InputMapping::MicInputHotkeyPressed(pad);
         if (!suppress_game_input && mic_input_combo && !previous_mic_input_combo) {
             if (!mic_input_simulated) {
                 mic_restore_input_type = Settings::values.input_type.GetValue();
@@ -1264,10 +1400,49 @@ int Run(int argc, char** argv) {
             SwitchFrontend::OverlayUI::ShowToast(saved ? "遮罩设置已保存"
                                                         : "遮罩设置保存失败");
             block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncOverlaySettings) {
+            const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            int count = 0;
+            const bool db_saved = SwitchFrontend::GameDatabase::SyncDisplaySettings(
+                display, false, true, count);
+            const bool config_saved = SaveGlobalOverlayDefaults(display);
+            char message[96]{};
+            std::snprintf(message, sizeof(message),
+                          db_saved && config_saved ? "遮罩已同步到 %d 个游戏"
+                                                   : "遮罩同步失败",
+                          count);
+            SwitchFrontend::OverlayUI::ShowToast(message);
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncDisplaySettings) {
+            const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            window.SetDisplaySettings(display);
+            if (Settings::values.resolution_factor.GetValue() !=
+                static_cast<u32>(display.internal_resolution)) {
+                Settings::values.resolution_factor.SetValue(
+                    static_cast<u16>(display.internal_resolution));
+                system.ApplySettings();
+            }
+            int count = 0;
+            const bool db_saved = SwitchFrontend::GameDatabase::SyncDisplaySettings(
+                display, true, false, count);
+            const bool config_saved = SaveGlobalScreenDefaults(display);
+            char message[96]{};
+            std::snprintf(message, sizeof(message),
+                          db_saved && config_saved ? "画面设置已同步到 %d 个游戏"
+                                                   : "画面设置同步失败",
+                          count);
+            SwitchFrontend::OverlayUI::ShowToast(message);
+            block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::Exit) {
             exit_reason = "GBAStation menu requested exit";
             DebugLog("menu requested exit after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            force_input_suppressed_during_shutdown = true;
+            if (menu_initialized) {
+                SwitchFrontend::VulkanOverlay::PrepareForShutdown();
+            }
+            window.SetInputSuppressed(true);
+            InputCommon::SwitchHID::SetInputSuppressed(true);
             Common::RequestFastShutdown();
             break;
         }
@@ -1276,6 +1451,9 @@ int Run(int argc, char** argv) {
             exit_reason = "ZL+ZR fallback exit";
             DebugLog("menu unavailable; fallback exit combo after %llu iterations",
                      static_cast<unsigned long long>(loop_count));
+            force_input_suppressed_during_shutdown = true;
+            window.SetInputSuppressed(true);
+            InputCommon::SwitchHID::SetInputSuppressed(true);
             Common::RequestFastShutdown();
             break;
         }
@@ -1391,17 +1569,16 @@ int Run(int argc, char** argv) {
     Settings::ResetTemporaryFrameLimit();
     const auto shutdown_started = Clock::now();
     if (menu_initialized) {
-        DebugLog("shutdown step: VulkanOverlay::Shutdown begin");
-        SwitchFrontend::VulkanOverlay::Shutdown();
-        menu_initialized = false;
-        DebugLog("shutdown step: VulkanOverlay::Shutdown done");
+        SwitchFrontend::VulkanOverlay::PrepareForShutdown();
     }
     if (menu_audio_muted) {
         Settings::values.volume.SetValue(menu_restore_volume);
         menu_audio_muted = false;
     }
-    window.SetInputSuppressed(false);
-    InputCommon::SwitchHID::SetInputSuppressed(false);
+    if (force_input_suppressed_during_shutdown) {
+        window.SetInputSuppressed(true);
+        InputCommon::SwitchHID::SetInputSuppressed(true);
+    }
     if (system.IsPoweredOn()) {
         DebugLog("shutdown step: system.Shutdown begin");
         const auto step_started = Clock::now();
@@ -1411,6 +1588,14 @@ int Run(int argc, char** argv) {
                                             Clock::now() - step_started)
                                             .count()));
     }
+    if (menu_initialized) {
+        DebugLog("shutdown step: VulkanOverlay::Shutdown begin");
+        SwitchFrontend::VulkanOverlay::Shutdown();
+        menu_initialized = false;
+        DebugLog("shutdown step: VulkanOverlay::Shutdown done");
+    }
+    window.SetInputSuppressed(false);
+    InputCommon::SwitchHID::SetInputSuppressed(false);
     DebugLog("shutdown step: InputCommon::Shutdown begin");
     InputCommon::Shutdown();
     DebugLog("shutdown step: InputCommon::Shutdown done");

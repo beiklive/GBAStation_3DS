@@ -31,7 +31,7 @@ namespace {
 
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
-constexpr int DisplayControlCount = 8;
+constexpr int DisplayControlCount = 10;
 constexpr int CustomLayoutControlCount = 6;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
@@ -274,6 +274,13 @@ void PublishAction(OverlayUI::Action action, bool close_menu) {
     if (close_menu) {
         visible.store(false, std::memory_order_release);
         content_focused.store(false, std::memory_order_release);
+        custom_layout_sidebar.store(false, std::memory_order_release);
+        overlay_sidebar.store(false, std::memory_order_release);
+        file_picker.store(false, std::memory_order_release);
+        file_preview.store(false, std::memory_order_release);
+        previous_navigation = {};
+        selector_repeat_direction = 0;
+        navigation_repeat_direction = 0;
     }
 }
 
@@ -481,8 +488,7 @@ void Update(PadState* pad) {
         return;
     }
     const u64 held = padGetButtons(pad);
-    const u64 menu_mask = InputMapping::MenuHotkeyMask();
-    const bool combo = menu_mask != 0 && (held & menu_mask) == menu_mask;
+    const bool combo = InputMapping::MenuHotkeyPressed(*pad);
     if (combo && !previous_combo) {
         const bool next_visible = !visible.load(std::memory_order_relaxed);
         if (!next_visible && custom_layout_sidebar.exchange(false, std::memory_order_acq_rel)) {
@@ -499,6 +505,9 @@ void Update(PadState* pad) {
         AudioCore::PlayLibnxUiSound(next_visible ? AudioCore::LibnxUiSound::Click
                                                 : AudioCore::LibnxUiSound::Back);
         content_focused.store(false, std::memory_order_release);
+        previous_navigation = {};
+        selector_repeat_direction = 0;
+        navigation_repeat_direction = 0;
         if (next_visible) {
             selected_item.store(0, std::memory_order_release);
             content_focus.store(0, std::memory_order_release);
@@ -778,6 +787,12 @@ void Update(PadState* pad) {
                         overlay_focus.store(0, std::memory_order_release);
                         overlay_sidebar.store(true, std::memory_order_release);
                         navigation_repeat_direction = 0;
+                    } else if (focus == 8) {
+                        AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
+                        PublishAction(OverlayUI::Action::SyncOverlaySettings, false);
+                    } else if (focus == 9) {
+                        AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
+                        PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
                     }
                 } else {
                     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
@@ -863,6 +878,25 @@ GBAStationDisplaySettings GetDisplaySettings() {
 
 void SetFastForwardActive(bool active) {
     fast_forward_active.store(active, std::memory_order_release);
+}
+
+void PrepareForShutdown() {
+    visible.store(false, std::memory_order_release);
+    exit_requested.store(true, std::memory_order_release);
+    content_focused.store(false, std::memory_order_release);
+    custom_layout_sidebar.store(false, std::memory_order_release);
+    overlay_sidebar.store(false, std::memory_order_release);
+    file_picker.store(false, std::memory_order_release);
+    file_preview.store(false, std::memory_order_release);
+    fast_forward_active.store(false, std::memory_order_release);
+    pending_action.store(0, std::memory_order_release);
+    previous_navigation = {};
+    selector_repeat_direction = 0;
+    navigation_repeat_direction = 0;
+    if (initialized.load(std::memory_order_acquire)) {
+        Vulkan::SetOverlayDrawCallback(nullptr);
+        Vulkan::SetOverlayResetCallback(nullptr);
+    }
 }
 
 void Shutdown() {

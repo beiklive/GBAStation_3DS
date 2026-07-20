@@ -236,6 +236,7 @@ bool BuildFontAtlas() {
         "暂无金手指功能将在后续版本提供屏幕布局画面方向整数倍缩放屏幕间距"
         "自定义画面布局调整当前项上屏布局下屏布局缩放偏移"
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
+        "同步遮罩同步画面设置执行已同步到个游戏失败"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
         "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
@@ -1416,15 +1417,17 @@ void BuildMenu(const State& state) {
         Border(976, 166, 240, 440, 1, {0.0f, 0.48f, 0.80f, 0.40f});
         Text(1020, 380, 24, Muted, "NO THUMB");
     } else if (item == Item::Display) {
-        const std::array<const char*, 8> labels{{
+        const std::array<const char*, 10> labels{{
             "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局",
             "自定义画面布局", "画面方向", "屏幕间距", "遮罩选择",
+            "同步遮罩", "同步画面设置",
         }};
-        const std::array<int, 8> icons{{
+        const std::array<int, 10> icons{{
             0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
+            0xE873, 0xE873,
         }};
         const bool custom_enabled = state.display.screen_layout == "custom";
-        std::array<std::string, 8> values{};
+        std::array<std::string, 10> values{};
         char multiplier[24]{};
         std::snprintf(multiplier, sizeof(multiplier),
                       std::fabs(state.display.fast_forward_multiplier -
@@ -1440,12 +1443,14 @@ void BuildMenu(const State& state) {
         values[5] = std::to_string(state.display.screen_orientation) + "°";
         values[6] = std::to_string(state.display.screen_gap) + " px";
         values[7] = state.display.overlay_enabled ? "已开启" : "设置";
-        constexpr float RowH = 44.0f;
-        constexpr std::array<float, 8> RowY{{190, 240, 290, 372, 422, 472, 522, 604}};
-        Text(ContentX, 176, 16, Cyan, "基础画面设置");
-        Text(ContentX, 358, 16, Cyan, "布局设置");
-        Text(ContentX, 590, 16, Cyan, "个性化设置");
-        for (int row = 0; row < 8; ++row) {
+        values[8] = "执行";
+        values[9] = "执行";
+        constexpr float RowH = 40.0f;
+        constexpr std::array<float, 10> RowY{{178, 222, 266, 330, 374, 418, 462, 526, 570, 614}};
+        Text(ContentX, 164, 16, Cyan, "基础画面设置");
+        Text(ContentX, 316, 16, Cyan, "布局设置");
+        Text(ContentX, 512, 16, Cyan, "个性化设置");
+        for (int row = 0; row < 10; ++row) {
             const float y = RowY[row];
             const bool focused = state.content_focused && state.content_focus == row;
             const bool enabled = row != 4 || custom_enabled;
@@ -1464,9 +1469,10 @@ void BuildMenu(const State& state) {
                 SelectorValue(ContentX, y, ContentW, RowH, values[row],
                               enabled ? Cyan : Muted);
             } else {
-                TextRight(ContentX + ContentW - (row == 4 || row == 7 ? 46.0f : 18.0f),
+                const bool is_button = row == 4 || row == 7 || row == 8 || row == 9;
+                TextRight(ContentX + ContentW - (is_button ? 46.0f : 18.0f),
                           y + 29, 17, enabled ? Cyan : Muted, values[row]);
-                if (row == 4 || row == 7) {
+                if (is_button) {
                     IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
                                  enabled ? Cyan : Muted, 0xE5CC);
                 }

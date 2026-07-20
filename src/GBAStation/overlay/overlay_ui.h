@@ -41,6 +41,8 @@ enum class Action {
     FastForwardMultiplierChanged,
     OverlaySettingsChanged,
     OverlaySettingsCommitted,
+    SyncOverlaySettings,
+    SyncDisplaySettings,
 };
 
 enum class ToastCorner {

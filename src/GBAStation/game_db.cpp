@@ -87,8 +87,27 @@ void WriteDisplaySettings(nlohmann::json& item, const GBAStationDisplaySettings&
     item["ndsBottomScale"] = std::clamp(settings.bottom_scale, 1.0f, 10.0f);
     item["ndsBottomOffsetX"] = std::clamp(settings.bottom_offset_x, -1024.0f, 1024.0f);
     item["ndsBottomOffsetY"] = std::clamp(settings.bottom_offset_y, -1024.0f, 1024.0f);
+}
+
+void WriteOverlaySettings(nlohmann::json& item, const GBAStationDisplaySettings& settings) {
     item["overlayEnabled"] = settings.overlay_enabled;
     item["overlayPath"] = settings.overlay_path;
+}
+
+void WriteAllDisplaySettings(nlohmann::json& item, const GBAStationDisplaySettings& settings) {
+    item["ndsScreenLayout"] = IsKnownLayout(settings.screen_layout) ? settings.screen_layout
+                                                                    : "priority_top";
+    item["ndsScreenOrientation"] = std::to_string(settings.screen_orientation);
+    item["ndsInternalResolution"] = std::clamp(settings.internal_resolution, 1, 4);
+    item["ndsIntegerScale"] = settings.integer_scale;
+    item["ndsScreenGap"] = std::clamp(settings.screen_gap, -256, 256);
+    item["ndsTopScale"] = std::clamp(settings.top_scale, 1.0f, 10.0f);
+    item["ndsTopOffsetX"] = std::clamp(settings.top_offset_x, -1024.0f, 1024.0f);
+    item["ndsTopOffsetY"] = std::clamp(settings.top_offset_y, -1024.0f, 1024.0f);
+    item["ndsBottomScale"] = std::clamp(settings.bottom_scale, 1.0f, 10.0f);
+    item["ndsBottomOffsetX"] = std::clamp(settings.bottom_offset_x, -1024.0f, 1024.0f);
+    item["ndsBottomOffsetY"] = std::clamp(settings.bottom_offset_y, -1024.0f, 1024.0f);
+    WriteOverlaySettings(item, settings);
 }
 
 bool ReadDatabase(const char* path, nlohmann::json& data) {
@@ -203,10 +222,36 @@ bool SaveDisplaySettings(const std::string& rom_path, const std::string& title,
     nlohmann::json data;
     LoadWritableDatabase(data, target_path);
     auto& matched = FindOrCreateRecord(data, rom_path, title);
-    WriteDisplaySettings(matched, settings);
+    WriteAllDisplaySettings(matched, settings);
     const bool saved = WriteDatabase(target_path, data);
     LOG_INFO(Frontend, "3DS GameDB display settings save {} path={}", saved ? "ok" : "failed",
              target_path);
+    return saved;
+}
+
+bool SyncDisplaySettings(const GBAStationDisplaySettings& settings, bool include_screen,
+                         bool include_overlay, int& updated_count) {
+    updated_count = 0;
+    const char* target_path = nullptr;
+    nlohmann::json data;
+    LoadWritableDatabase(data, target_path);
+    for (auto& item : data) {
+        if (!item.is_object()) {
+            continue;
+        }
+        if (include_screen) {
+            WriteDisplaySettings(item, settings);
+        }
+        if (include_overlay) {
+            WriteOverlaySettings(item, settings);
+        }
+        ++updated_count;
+    }
+    const bool saved = WriteDatabase(target_path, data);
+    LOG_INFO(Frontend,
+             "3DS GameDB sync {} screen={} overlay={} count={} path={}",
+             saved ? "ok" : "failed", include_screen ? 1 : 0, include_overlay ? 1 : 0,
+             updated_count, target_path);
     return saved;
 }
 

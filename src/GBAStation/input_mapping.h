@@ -17,6 +17,12 @@ u64 PointerModeHotkeyMask();
 u64 PointerClickHotkeyMask();
 u64 SwapScreensHotkeyMask();
 u64 MicInputHotkeyMask();
+bool MenuHotkeyPressed(const PadState& pad);
+bool FastForwardHotkeyPressed(const PadState& pad);
+bool PointerModeHotkeyPressed(const PadState& pad);
+bool PointerClickHotkeyPressed(const PadState& pad);
+bool SwapScreensHotkeyPressed(const PadState& pad);
+bool MicInputHotkeyPressed(const PadState& pad);
 bool FastForwardToggleMode();
 bool FastForwardEnabled();
 
