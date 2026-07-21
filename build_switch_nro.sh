@@ -221,9 +221,9 @@ SHA256_FILE="${BUILD_DIR}/SHA256SUMS${OUTPUT_SUFFIX}"
 sha256sum "${hash_files[@]}" > "${SHA256_FILE}"
 
 if [ -n "${SWITCH_SD_ROOT:-}" ]; then
-    mkdir -p "${SWITCH_SD_ROOT}/switch"
-    cp "${NRO_FILE}" "${SWITCH_SD_ROOT}/switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
-    echo "Installed: ${SWITCH_SD_ROOT}/switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
+    mkdir -p "${SWITCH_SD_ROOT}/GBAStation/core"
+    cp "${NRO_FILE}" "${SWITCH_SD_ROOT}/GBAStation/core/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
+    echo "Installed: ${SWITCH_SD_ROOT}/GBAStation/core/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
 fi
 
 echo "Variant: ${BUILD_VARIANT} (diagnostic logs: ${DIAGNOSTIC_LOGS})"
@@ -232,6 +232,6 @@ echo "Debug ELF: ${DEBUG_ELF}"
 echo "Linker map: ${LINKER_MAP}"
 echo "M6 audit: ${AUDIT_LOG}"
 echo "SHA-256: ${SHA256_FILE}"
-echo "Copy to SD as: /switch/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
+echo "Copy to SD as: /GBAStation/core/GBAStation3DSStub${OUTPUT_SUFFIX}.nro"
 echo "ROM fallback path: sdmc:/GBAStation/3ds/3Dlandchs.cci"
-echo "Boot markers: sdmc:/GBAStation/system/3ds/azahar_boot.txt and sdmc:/GBAStation/system/3ds/debug/startup.txt"
+echo "Boot markers: sdmc:/GBAStation/3ds/azahar_boot.txt and sdmc:/GBAStation/3ds/debug/startup.txt"

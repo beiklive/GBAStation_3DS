@@ -9,6 +9,7 @@
 #include <dynarmic/interface/A32/a32.h>
 #include <dynarmic/interface/optimization_flags.h>
 #include "common/assert.h"
+#include "common/arch.h"
 #include "common/microprofile.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_cp15.h"
@@ -21,6 +22,10 @@
 #endif
 #include "core/hle/kernel/svc.h"
 #include "core/memory.h"
+
+#if CITRA_ARCH(arm64)
+#include <dynarmic/backend/arm64/dispatch_diagnostics.h>
+#endif
 
 #ifndef SIGILL
 constexpr u32 SIGILL = 4;
@@ -54,6 +59,11 @@ constexpr std::size_t SwitchCodeCacheSize = 64 * 1024 * 1024;
 } // namespace
 
 DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
+#if CITRA_ARCH(arm64)
+    const auto dispatch_stats = Dynarmic::Backend::Arm64::GetAndResetArm64DispatchDiagnostics();
+#else
+    constexpr DynarmicDiagnostics dispatch_stats{};
+#endif
     return {
         .jit_instances_created = dynarmic_jit_instances_created.exchange(0),
         .instruction_cache_clears = dynarmic_instruction_cache_clears.exchange(0),
@@ -67,6 +77,9 @@ DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
         .memory_write_callbacks = dynarmic_memory_write_callbacks.exchange(0),
         .memory_exclusive_callbacks = dynarmic_memory_exclusive_callbacks.exchange(0),
         .memory_code_callbacks = dynarmic_memory_code_callbacks.exchange(0),
+        .fast_dispatch_misses = dispatch_stats.fast_dispatch_misses,
+        .fast_dispatch_updates = dispatch_stats.fast_dispatch_updates,
+        .fast_dispatch_clears = dispatch_stats.fast_dispatch_clears,
         .last_read_callback_addr = dynarmic_last_read_callback_addr.load(),
         .last_write_callback_addr = dynarmic_last_write_callback_addr.load(),
     };

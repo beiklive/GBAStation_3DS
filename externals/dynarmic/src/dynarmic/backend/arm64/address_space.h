@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <map>
 #include <optional>
 
@@ -15,6 +16,7 @@
 #include <tsl/robin_set.h>
 
 #include "dynarmic/backend/arm64/emit_arm64.h"
+#include "dynarmic/backend/arm64/dispatch_diagnostics.h"
 #include "dynarmic/backend/arm64/fastmem.h"
 #include "dynarmic/interface/halt_reason.h"
 #include "dynarmic/ir/basic_block.h"
@@ -66,6 +68,9 @@ protected:
     void Link(EmittedBlockInfo& block);
     void LinkBlockLinks(const CodePtr entry_point, const CodePtr target_ptr, const std::vector<BlockRelocation>& block_relocations_list);
     void RelinkForDescriptor(IR::LocationDescriptor target_descriptor, CodePtr target_ptr);
+    CodePtr GetOrEmitFastDispatch(IR::LocationDescriptor descriptor);
+    void UpdateFastDispatchEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr);
+    void ClearFastDispatchEntry(IR::LocationDescriptor descriptor);
 
     FakeCall FastmemCallback(u64 host_pc);
 
@@ -90,6 +95,7 @@ protected:
         RunCodeFuncType run_code;
         RunCodeFuncType step_code;
         void* return_to_dispatcher;
+        void* fast_dispatch;
         void* return_from_run_code;
 
         void* read_memory_8;
@@ -133,6 +139,21 @@ protected:
         void* add_ticks;
         void* get_ticks_remaining;
     } prelude_info;
+
+    struct FastDispatchEntry {
+        u64 descriptor;
+        CodePtr code_ptr;
+    };
+
+    static constexpr size_t fast_dispatch_table_size = 0x10000;
+    static constexpr u64 fast_dispatch_table_index_mask = fast_dispatch_table_size - 1;
+    static constexpr int fast_dispatch_table_entry_shift = 4;
+    static constexpr size_t FastDispatchIndex(u64 descriptor) {
+        descriptor ^= descriptor >> 20;
+        descriptor ^= descriptor >> 32;
+        return static_cast<size_t>(descriptor & fast_dispatch_table_index_mask);
+    }
+    std::array<FastDispatchEntry, fast_dispatch_table_size> fast_dispatch_table{};
 };
 
 }  // namespace Dynarmic::Backend::Arm64

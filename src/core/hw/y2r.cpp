@@ -531,20 +531,23 @@ constexpr auto MortonQuadYTable = MakeMortonQuadYTable();
 
     if (cvt.block_alignment == BlockAlignment::Block8x8 && (height & 7) == 0) {
         u8* out = output_base;
+#if Y2R_USE_NEON
+        const u16 y_coefficient = static_cast<u16>(cvt.coefficients[0]);
+#endif
         for (unsigned int strip_y = 0; strip_y < height; strip_y += 8) {
-            for (unsigned int tile_x = 0; tile_x < width; tile_x += 8) {
-                std::array<const u8*, 8> y_rows{};
-                std::array<const u8*, 4> u_rows{};
-                std::array<const u8*, 4> v_rows{};
-                for (unsigned int local_y = 0; local_y < 8; ++local_y) {
-                    y_rows[local_y] = src_y + (strip_y + local_y) * y_stride;
-                }
-                for (unsigned int local_uv_y = 0; local_uv_y < 4; ++local_uv_y) {
-                    const unsigned int y = (strip_y / 2) + local_uv_y;
-                    u_rows[local_uv_y] = src_u + y * uv_stride;
-                    v_rows[local_uv_y] = src_v + y * v_stride;
-                }
+            std::array<const u8*, 8> y_rows{};
+            std::array<const u8*, 4> u_rows{};
+            std::array<const u8*, 4> v_rows{};
+            for (unsigned int local_y = 0; local_y < 8; ++local_y) {
+                y_rows[local_y] = src_y + (strip_y + local_y) * y_stride;
+            }
+            for (unsigned int local_uv_y = 0; local_uv_y < 4; ++local_uv_y) {
+                const unsigned int y = (strip_y / 2) + local_uv_y;
+                u_rows[local_uv_y] = src_u + y * uv_stride;
+                v_rows[local_uv_y] = src_v + y * v_stride;
+            }
 
+            for (unsigned int tile_x = 0; tile_x < width; tile_x += 8) {
 #if Y2R_USE_NEON
                 for (unsigned int quad = 0; quad < TILE_SIZE / 4; quad += 2) {
                     const unsigned int local_x0 = MortonQuadXTable[quad];
@@ -564,9 +567,8 @@ constexpr auto MortonQuadYTable = MakeMortonQuadYTable();
                     const uint8x8_t y_values = PackY8(y_row0[x0], y_row0[x0 + 1], y_row1[x0],
                                                       y_row1[x0 + 1], y_row0[x1], y_row0[x1 + 1],
                                                       y_row1[x1], y_row1[x1 + 1]);
-                    ConvertYUV420OctetRGB8Neon(
-                        luts, static_cast<u16>(cvt.coefficients[0]), y_values, u_row[uv_x0],
-                        v_row[uv_x0], u_row[uv_x1], v_row[uv_x1], out);
+                    ConvertYUV420OctetRGB8Neon(luts, y_coefficient, y_values, u_row[uv_x0],
+                                               v_row[uv_x0], u_row[uv_x1], v_row[uv_x1], out);
                     out += 24;
                 }
 #else

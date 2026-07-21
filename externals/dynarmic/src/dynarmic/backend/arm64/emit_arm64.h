@@ -46,6 +46,7 @@ using CodePtr = std::byte*;
 
 enum class LinkTarget {
     ReturnToDispatcher,
+    FastDispatch,
     ReturnFromRunCode,
     ReadMemory8,
     ReadMemory16,

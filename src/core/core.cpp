@@ -75,6 +75,7 @@ std::atomic<u64> diagnostic_runloop_entry_pc_sample_counter{};
 std::atomic<u64> diagnostic_runloop_entry_pc_samples_recorded{};
 std::atomic<u64> diagnostic_runloop_entry_pc_sample_write{};
 std::array<std::atomic<u32>, 128> diagnostic_runloop_entry_pc_samples{};
+std::array<std::atomic<u32>, 128> diagnostic_runloop_entry_lr_samples{};
 std::atomic<u64> diagnostic_runloop_exit_pc_sample_counter{};
 std::atomic<u64> diagnostic_runloop_pc_samples_recorded{};
 std::atomic<u64> diagnostic_runloop_pc_sample_write{};
@@ -91,11 +92,19 @@ void SamplePc(std::atomic<u64>& counter, std::atomic<u64>& recorded, std::atomic
     recorded.fetch_add(1, std::memory_order_relaxed);
 }
 
-void SampleRunLoopEntryPc(u32 pc, u32 cpsr) {
-    SamplePc(diagnostic_runloop_entry_pc_sample_counter,
-             diagnostic_runloop_entry_pc_samples_recorded,
-             diagnostic_runloop_entry_pc_sample_write, diagnostic_runloop_entry_pc_samples, pc,
-             cpsr);
+void SampleRunLoopEntryPc(u32 pc, u32 cpsr, u32 lr) {
+    if ((diagnostic_runloop_entry_pc_sample_counter.fetch_add(1, std::memory_order_relaxed) &
+         0x3F) != 0) {
+        return;
+    }
+    const u32 thumb_bit = (cpsr & (1u << 5)) != 0 ? 1u : 0u;
+    const u64 index =
+        diagnostic_runloop_entry_pc_sample_write.fetch_add(1, std::memory_order_relaxed) %
+        diagnostic_runloop_entry_pc_samples.size();
+    diagnostic_runloop_entry_pc_samples[index].store((pc & ~u32{3}) | thumb_bit,
+                                                     std::memory_order_relaxed);
+    diagnostic_runloop_entry_lr_samples[index].store(lr & ~u32{1}, std::memory_order_relaxed);
+    diagnostic_runloop_entry_pc_samples_recorded.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SampleRunLoopExitPc(u32 pc, u32 cpsr) {
@@ -142,6 +151,50 @@ void CollectTopPcSamples(std::array<std::atomic<u32>, 128>& samples, std::array<
     }
 }
 
+void CollectTopPcLrSamples(std::array<std::atomic<u32>, 128>& pc_samples,
+                           std::array<std::atomic<u32>, 128>& lr_samples,
+                           std::array<u32, 4>& top_pcs, std::array<u32, 4>& top_lrs,
+                           std::array<u64, 4>& top_pc_counts) {
+    std::array<std::pair<std::pair<u32, u32>, u64>, 128> counts{};
+    for (std::size_t index = 0; index < pc_samples.size(); ++index) {
+        const u32 pc = pc_samples[index].exchange(0, std::memory_order_relaxed);
+        const u32 lr = lr_samples[index].exchange(0, std::memory_order_relaxed);
+        if (pc == 0) {
+            continue;
+        }
+        for (auto& [candidate, count] : counts) {
+            if (candidate.first == pc && candidate.second == lr) {
+                count++;
+                break;
+            }
+            if (count == 0) {
+                candidate = {pc, lr};
+                count = 1;
+                break;
+            }
+        }
+    }
+    for (const auto& [pc_lr, count] : counts) {
+        if (count == 0) {
+            continue;
+        }
+        for (std::size_t i = 0; i < top_pc_counts.size(); ++i) {
+            if (count <= top_pc_counts[i]) {
+                continue;
+            }
+            for (std::size_t j = top_pc_counts.size() - 1; j > i; --j) {
+                top_pc_counts[j] = top_pc_counts[j - 1];
+                top_pcs[j] = top_pcs[j - 1];
+                top_lrs[j] = top_lrs[j - 1];
+            }
+            top_pc_counts[i] = count;
+            top_pcs[i] = pc_lr.first;
+            top_lrs[i] = pc_lr.second;
+            break;
+        }
+    }
+}
+
 void AddRunLoopDiagnostics(const RunLoopDiagnostics& stats) {
     diagnostic_runloop_calls.fetch_add(stats.calls, std::memory_order_relaxed);
     diagnostic_runloop_active_runs.fetch_add(stats.active_runs, std::memory_order_relaxed);
@@ -170,8 +223,9 @@ RunLoopDiagnostics GetAndResetRunLoopDiagnostics() {
     result.pc_samples =
         diagnostic_runloop_pc_samples_recorded.exchange(0, std::memory_order_relaxed);
 
-    CollectTopPcSamples(diagnostic_runloop_entry_pc_samples, result.top_entry_pcs,
-                        result.top_entry_pc_counts);
+    CollectTopPcLrSamples(diagnostic_runloop_entry_pc_samples, diagnostic_runloop_entry_lr_samples,
+                          result.top_entry_pcs, result.top_entry_lrs,
+                          result.top_entry_pc_counts);
     CollectTopPcSamples(diagnostic_runloop_pc_samples, result.top_pcs, result.top_pc_counts);
     return result;
 }
@@ -347,7 +401,8 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         } else {
             loop_diag.active_runs++;
             SampleRunLoopEntryPc(current_core_to_execute->GetPC(),
-                                 current_core_to_execute->GetCPSR());
+                                 current_core_to_execute->GetCPSR(),
+                                 current_core_to_execute->GetReg(14));
             if (tight_loop) {
                 current_core_to_execute->Run();
             } else {
@@ -389,7 +444,8 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
                 PrepareReschedule();
             } else {
                 loop_diag.active_runs++;
-                SampleRunLoopEntryPc(cpu_core->GetPC(), cpu_core->GetCPSR());
+                SampleRunLoopEntryPc(cpu_core->GetPC(), cpu_core->GetCPSR(),
+                                     cpu_core->GetReg(14));
                 // In the rare case the break flag is set (due to exception thrown)
                 // there is probably no need to adjust the timer accordingly.
                 if (tight_loop) {

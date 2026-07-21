@@ -21,6 +21,9 @@ struct DynarmicDiagnostics {
     u64 memory_write_callbacks{};
     u64 memory_exclusive_callbacks{};
     u64 memory_code_callbacks{};
+    u64 fast_dispatch_misses{};
+    u64 fast_dispatch_updates{};
+    u64 fast_dispatch_clears{};
     u32 last_read_callback_addr{};
     u32 last_write_callback_addr{};
 };

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <atomic>
 #include <cstdio>
 
 #include <mcl/bit_cast.hpp>
@@ -19,6 +20,23 @@
 #include "dynarmic/interface/exclusive_monitor.h"
 
 namespace Dynarmic::Backend::Arm64 {
+
+namespace {
+std::atomic<u64> diagnostic_fast_dispatch_misses{};
+std::atomic<u64> diagnostic_fast_dispatch_updates{};
+std::atomic<u64> diagnostic_fast_dispatch_clears{};
+} // namespace
+
+Arm64DispatchDiagnostics GetAndResetArm64DispatchDiagnostics() {
+    return {
+        .fast_dispatch_misses =
+            diagnostic_fast_dispatch_misses.exchange(0, std::memory_order_relaxed),
+        .fast_dispatch_updates =
+            diagnostic_fast_dispatch_updates.exchange(0, std::memory_order_relaxed),
+        .fast_dispatch_clears =
+            diagnostic_fast_dispatch_clears.exchange(0, std::memory_order_relaxed),
+    };
+}
 
 AddressSpace::AddressSpace(size_t code_cache_size)
         : code_cache_size(code_cache_size)
@@ -70,6 +88,27 @@ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
     return block_info.entry_point;
 }
 
+CodePtr AddressSpace::GetOrEmitFastDispatch(IR::LocationDescriptor descriptor) {
+    diagnostic_fast_dispatch_misses.fetch_add(1, std::memory_order_relaxed);
+    CodePtr block_entry = GetOrEmit(descriptor);
+    UpdateFastDispatchEntry(descriptor, block_entry);
+    return block_entry;
+}
+
+void AddressSpace::UpdateFastDispatchEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr) {
+    const auto index = FastDispatchIndex(descriptor.Value());
+    fast_dispatch_table[index] = {descriptor.Value(), target_ptr};
+    diagnostic_fast_dispatch_updates.fetch_add(1, std::memory_order_relaxed);
+}
+
+void AddressSpace::ClearFastDispatchEntry(IR::LocationDescriptor descriptor) {
+    const auto index = FastDispatchIndex(descriptor.Value());
+    if (fast_dispatch_table[index].descriptor == descriptor.Value()) {
+        fast_dispatch_table[index] = {};
+        diagnostic_fast_dispatch_clears.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors) {
     UnprotectCodeMemory();
 
@@ -82,6 +121,7 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
         // Unlink before removal because InvalidateBasicBlocks can be called within a fastmem callback,
         // and the currently executing block may have references to itself which need to be unlinked.
         RelinkForDescriptor(descriptor, nullptr);
+        ClearFastDispatchEntry(descriptor);
 
         block_entries.erase(iter);
     }
@@ -94,6 +134,7 @@ void AddressSpace::ClearCache() {
     reverse_block_entries.clear();
     block_infos.clear();
     block_references.clear();
+    fast_dispatch_table.fill({});
     code.set_offset(prelude_info.end_of_prelude);
 }
 
@@ -142,6 +183,9 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
         switch (target) {
         case LinkTarget::ReturnToDispatcher:
             c.B(prelude_info.return_to_dispatcher);
+            break;
+        case LinkTarget::FastDispatch:
+            c.B(prelude_info.fast_dispatch);
             break;
         case LinkTarget::ReturnFromRunCode:
             c.B(prelude_info.return_from_run_code);

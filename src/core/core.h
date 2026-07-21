@@ -90,6 +90,7 @@ struct RunLoopDiagnostics {
     u64 max_slice_ticks{};
     u64 entry_pc_samples{};
     std::array<u32, 4> top_entry_pcs{};
+    std::array<u32, 4> top_entry_lrs{};
     std::array<u64, 4> top_entry_pc_counts{};
     u64 pc_samples{};
     std::array<u32, 4> top_pcs{};

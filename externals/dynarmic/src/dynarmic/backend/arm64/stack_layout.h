@@ -23,7 +23,7 @@ struct alignas(16) RSBEntry {
     u64 code_ptr;
 };
 
-constexpr size_t RSBCount = 8;
+constexpr size_t RSBCount = 16;
 constexpr u64 RSBIndexMask = (RSBCount - 1) * sizeof(RSBEntry);
 
 struct alignas(16) StackLayout {

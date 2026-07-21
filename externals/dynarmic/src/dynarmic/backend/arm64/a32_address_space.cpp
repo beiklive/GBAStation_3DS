@@ -333,6 +333,51 @@ void A32AddressSpace::EmitPrelude() {
         code.dx(mcl::bit_cast<u64>(Common::FptrCast(fn)));
     }
 
+    prelude_info.fast_dispatch = code.xptr<void*>();
+    {
+        oaknut::Label cache_miss, l_this, l_addr;
+
+        code.LDAR(Wscratch0, Xhalt);
+        code.CBNZ(Wscratch0, return_from_run_code);
+
+        if (conf.enable_cycle_counting) {
+            code.CMP(Xticks, 0);
+            code.B(LE, return_from_run_code);
+        }
+
+        static_assert(offsetof(A32JitState, regs) + 16 * sizeof(u32) == offsetof(A32JitState, upper_location_descriptor));
+        code.LDUR(X0, Xstate, offsetof(A32JitState, regs) + 15 * sizeof(u32));
+        code.MOV(Xscratch0, mcl::bit_cast<u64>(fast_dispatch_table.data()));
+        code.LSR(Xscratch2, X0, 20);
+        code.EOR(Xscratch2, Xscratch2, X0);
+        code.LSR(Xscratch1, X0, 32);
+        code.EOR(Xscratch2, Xscratch2, Xscratch1);
+        code.AND(Xscratch2, Xscratch2, fast_dispatch_table_index_mask);
+        code.LSL(Xscratch2, Xscratch2, fast_dispatch_table_entry_shift);
+        code.ADD(Xscratch0, Xscratch0, Xscratch2);
+        code.LDP(Xscratch1, Xscratch2, Xscratch0, 0);
+        code.CMP(X0, Xscratch1);
+        code.B(NE, cache_miss);
+        code.BR(Xscratch2);
+
+        code.l(cache_miss);
+        code.LDR(X0, l_this);
+        code.MOV(X1, Xstate);
+        code.LDR(Xscratch0, l_addr);
+        code.BLR(Xscratch0);
+        code.BR(X0);
+
+        const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
+            return self.GetOrEmitFastDispatch(context.GetLocationDescriptor());
+        };
+
+        code.align(8);
+        code.l(l_this);
+        code.dx(mcl::bit_cast<u64>(this));
+        code.l(l_addr);
+        code.dx(mcl::bit_cast<u64>(Common::FptrCast(fn)));
+    }
+
     prelude_info.return_from_run_code = code.xptr<void*>();
     {
         code.l(return_from_run_code);
