@@ -22,5 +22,7 @@ bool SyncDisplaySettings(const GBAStationDisplaySettings& settings, bool include
                          bool include_overlay, int& updated_count);
 bool UpdatePlayStats(const std::string& rom_path, const std::string& title,
                      bool increment_count, int additional_seconds);
+bool AddInstalledTitle(const std::string& content_path, const std::string& title,
+                       const std::string& three_ds_id);
 
 } // namespace SwitchFrontend::GameDatabase

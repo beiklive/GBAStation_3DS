@@ -90,12 +90,12 @@ ImageResource atlas_image;
 ImageResource gradient_image;
 BufferResource atlas_staging;
 BufferResource gradient_staging;
-BufferResource vertex_buffer;
 ImageResource overlay_image;
 BufferResource overlay_staging;
 ImageResource preview_image;
 BufferResource preview_staging;
 std::unordered_map<VkImage, SwapResource> swap_resources;
+std::unordered_map<VkImage, BufferResource> vertex_buffers;
 vk::Extent2D framebuffer_extent{};
 bool atlas_uploaded{};
 bool overlay_uploaded{};
@@ -361,6 +361,13 @@ void DestroyBuffer(BufferResource& resource) {
     resource = {};
 }
 
+void DestroyVertexBuffers() {
+    for (auto& [image, resource] : vertex_buffers) {
+        DestroyBuffer(resource);
+    }
+    vertex_buffers.clear();
+}
+
 bool CreateImage(vk::Format format, u32 width, u32 height, ImageResource& resource) {
     const vk::ImageCreateInfo image_info{
         .imageType = vk::ImageType::e2D,
@@ -417,6 +424,7 @@ void DestroySwapResources() {
         device.destroyImageView(resource.view);
     }
     swap_resources.clear();
+    DestroyVertexBuffers();
     framebuffer_extent = vk::Extent2D{};
 }
 
@@ -718,6 +726,24 @@ vk::Framebuffer GetFramebuffer(vk::Image image, vk::Extent2D extent) {
     const vk::Framebuffer framebuffer = device.createFramebuffer(framebuffer_info);
     swap_resources.emplace(key, SwapResource{view, framebuffer});
     return framebuffer;
+}
+
+BufferResource* GetVertexBuffer(vk::Image image) {
+    const VkImage key = static_cast<VkImage>(image);
+    if (const auto it = vertex_buffers.find(key); it != vertex_buffers.end()) {
+        return &it->second;
+    }
+
+    BufferResource resource{};
+    if (!CreateBuffer(VertexBufferSize, vk::BufferUsageFlagBits::eVertexBuffer,
+                      vk::MemoryPropertyFlagBits::eHostVisible |
+                          vk::MemoryPropertyFlagBits::eHostCoherent,
+                      resource, true)) {
+        DestroyBuffer(resource);
+        return nullptr;
+    }
+    const auto [it, inserted] = vertex_buffers.emplace(key, resource);
+    return inserted ? &it->second : nullptr;
 }
 
 void UploadImage(vk::CommandBuffer command_buffer, vk::Buffer staging, vk::Image image,
@@ -1493,10 +1519,49 @@ void BuildMenu(const State& state) {
             }
         }
     } else if (item == Item::Cheats) {
-        Rect(ContentX, 184, ContentW, 58, {1, 1, 1, 0.045f});
-        Border(ContentX, 184, ContentW, 58, 1, {1, 1, 1, 0.10f});
-        Text(ContentX + 20, 221, 21, Muted, "暂无金手指");
-        Text(ContentX, 300, 20, Muted, "金手指功能将在后续版本提供");
+        if (state.cheats.empty()) {
+            Rect(ContentX, 184, ContentW, 58, {1, 1, 1, 0.045f});
+            Border(ContentX, 184, ContentW, 58, 1, {1, 1, 1, 0.10f});
+            Text(ContentX + 20, 221, 21, Muted, "未找到当前游戏的金手指文件");
+            Text(ContentX, 300, 18, Muted,
+                 "请放入 sdmc:/GBAStation/3ds/cheats/<TitleID>.txt");
+        } else {
+            constexpr float RowH = 62.0f;
+            constexpr float RowGap = 6.0f;
+            constexpr int VisibleRows = 6;
+            const int selected_cheat = std::clamp(state.content_focus, 0,
+                                                   static_cast<int>(state.cheats.size()) - 1);
+            const int first = std::clamp(selected_cheat - VisibleRows / 2, 0,
+                                         std::max(0, static_cast<int>(state.cheats.size()) - VisibleRows));
+            for (int row = 0; row < VisibleRows && first + row < static_cast<int>(state.cheats.size()); ++row) {
+                const int index = first + row;
+                const auto& cheat = state.cheats[index];
+                const float y = 168.0f + row * (RowH + RowGap);
+                const bool focused = state.content_focused && index == selected_cheat;
+                Rect(ContentX, y, ContentW, RowH,
+                     focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                             : std::array<float, 4>{1, 1, 1, 0.045f});
+                if (focused) {
+                    FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
+                } else {
+                    Border(ContentX, y, ContentW, RowH, 1.0f, {1, 1, 1, 0.10f});
+                }
+                IconCentered(ContentX + 24, y + RowH * 0.5f, 20,
+                             cheat.enabled ? Cyan : Muted, cheat.enabled ? 0xE5CA : 0xE835);
+                Text(ContentX + 48, y + 26, 19, cheat.enabled ? White : Muted, cheat.name);
+                if (!cheat.description.empty()) {
+                    Text(ContentX + 48, y + 49, 14, Muted, cheat.description);
+                }
+                TextRight(ContentX + ContentW - 20, y + 35, 17,
+                          cheat.enabled ? Cyan : Muted, cheat.enabled ? "已启用" : "已关闭");
+            }
+            if (state.cheats.size() > VisibleRows) {
+                char position[32]{};
+                std::snprintf(position, sizeof(position), "%d / %d", selected_cheat + 1,
+                              static_cast<int>(state.cheats.size()));
+                TextRight(ContentX + ContentW, 596, 16, Muted, position);
+            }
+        }
     } else {
         const char* body = "按 A 继续游戏";
         if (item == Item::Reset) body = "按 A 重置游戏，未保存的进度可能丢失";
@@ -1511,7 +1576,7 @@ void BuildMenu(const State& state) {
     DrawToast(state);
 }
 
-void TransformVertices(vk::Extent2D extent) {
+void TransformVertices(BufferResource& vertex_buffer) {
     for (Vertex& vertex : vertices) {
         vertex.x = vertex.x / 1280.0f * 2.0f - 1.0f;
         vertex.y = vertex.y / 720.0f * 2.0f - 1.0f;
@@ -1543,10 +1608,6 @@ bool Init(const Vulkan::Instance& instance) {
                       vk::MemoryPropertyFlagBits::eHostVisible |
                           vk::MemoryPropertyFlagBits::eHostCoherent,
                       atlas_staging, true) ||
-        !CreateBuffer(VertexBufferSize, vk::BufferUsageFlagBits::eVertexBuffer,
-                      vk::MemoryPropertyFlagBits::eHostVisible |
-                          vk::MemoryPropertyFlagBits::eHostCoherent,
-                      vertex_buffer, true) ||
         !CreateBuffer(gradient_pixels.size(), vk::BufferUsageFlagBits::eTransferSrc,
                       vk::MemoryPropertyFlagBits::eHostVisible |
                           vk::MemoryPropertyFlagBits::eHostCoherent,
@@ -1589,11 +1650,13 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     }
     DrawFpsIndicator(state);
     DrawFastForwardIndicator(state);
-    TransformVertices(extent);
     const vk::Framebuffer framebuffer = GetFramebuffer(image, extent);
-    if (!framebuffer || vertices.empty() || vertices.size() * sizeof(Vertex) > VertexBufferSize) {
+    BufferResource* vertex_buffer = GetVertexBuffer(image);
+    if (!framebuffer || !vertex_buffer || vertices.empty() ||
+        vertices.size() * sizeof(Vertex) > VertexBufferSize) {
         return;
     }
+    TransformVertices(*vertex_buffer);
 
     const vk::RenderPassBeginInfo begin{
         .renderPass = render_pass,
@@ -1608,7 +1671,7 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     command_buffer.setScissor(0, scissor);
     command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
     const vk::DeviceSize offset = 0;
-    command_buffer.bindVertexBuffers(0, vertex_buffer.buffer, offset);
+    command_buffer.bindVertexBuffers(0, vertex_buffer->buffer, offset);
     if (overlay_vertex_count != 0) {
         command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
                                           overlay_descriptor_set, {});
@@ -1652,7 +1715,6 @@ void Shutdown() {
         return;
     }
     DestroyRenderObjects();
-    DestroyBuffer(vertex_buffer);
     DestroyBuffer(atlas_staging);
     DestroyBuffer(gradient_staging);
     DestroyBuffer(overlay_staging);

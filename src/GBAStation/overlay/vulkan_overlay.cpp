@@ -76,12 +76,15 @@ std::atomic_int overlay_focus{};
 std::atomic_bool file_picker{};
 std::atomic_int file_picker_focus{};
 std::atomic_bool file_preview{};
+std::atomic_int cheat_count{};
 
 std::mutex display_data_mutex;
 std::string display_overlay_path;
 std::string file_picker_path{OverlayRoot};
 std::vector<VulkanMenuRenderer::FileEntry> file_entries;
 std::string file_preview_path;
+std::vector<CheatEntry> cheat_entries;
+CheatToggleCallback cheat_toggle_callback;
 
 bool previous_combo{};
 vk::Device device;
@@ -339,6 +342,10 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
         state.file_picker_path = file_picker_path;
         state.file_entries = file_entries;
         state.file_preview_path = file_preview_path;
+        state.cheats.reserve(cheat_entries.size());
+        for (const auto& cheat : cheat_entries) {
+            state.cheats.push_back({cheat.name, cheat.description, cheat.enabled});
+        }
     }
     state.toast = OverlayUI::GetToast();
     for (int slot = 0; slot < static_cast<int>(state.occupied.size()); ++slot) {
@@ -755,8 +762,11 @@ void Update(PadState* pad) {
             const int count = (item == VulkanMenuRenderer::Item::SaveState ||
                                item == VulkanMenuRenderer::Item::LoadState)
                                   ? 10
-                                  : (item == VulkanMenuRenderer::Item::Display ? DisplayControlCount
-                                                                               : 1);
+                                  : (item == VulkanMenuRenderer::Item::Cheats
+                                         ? std::max(1, cheat_count.load(std::memory_order_acquire))
+                                         : (item == VulkanMenuRenderer::Item::Display
+                                                ? DisplayControlCount
+                                                : 1));
             const int previous_focus = focus;
             if ((up && !previous_navigation.up) || repeated_navigation < 0) {
                 focus = item == VulkanMenuRenderer::Item::Display
@@ -821,9 +831,25 @@ void Update(PadState* pad) {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
                         PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
                     }
-                } else {
-                    AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
-                    OverlayUI::ShowToast("暂无可用金手指");
+                } else if (item == VulkanMenuRenderer::Item::Cheats) {
+                    bool toggled = false;
+                    {
+                        std::lock_guard lock{display_data_mutex};
+                        if (focus >= 0 && focus < static_cast<int>(cheat_entries.size()) &&
+                            cheat_toggle_callback) {
+                            const bool enabled = !cheat_entries[focus].enabled;
+                            if (cheat_toggle_callback(static_cast<std::size_t>(focus), enabled)) {
+                                cheat_entries[focus].enabled = enabled;
+                                toggled = true;
+                            }
+                        }
+                    }
+                    if (toggled) {
+                        AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
+                    } else {
+                        AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
+                        OverlayUI::ShowToast("暂无可用金手指");
+                    }
                 }
             }
         }
@@ -915,6 +941,13 @@ void SetFpsOverlay(bool visible, float fps) {
     fps_overlay_value.store(fps, std::memory_order_release);
 }
 
+void SetCheats(std::vector<CheatEntry> cheats, CheatToggleCallback on_toggle) {
+    std::lock_guard lock{display_data_mutex};
+    cheat_entries = std::move(cheats);
+    cheat_toggle_callback = std::move(on_toggle);
+    cheat_count.store(static_cast<int>(cheat_entries.size()), std::memory_order_release);
+}
+
 void PrepareForShutdown() {
     visible.store(false, std::memory_order_release);
     exit_requested.store(true, std::memory_order_release);
@@ -923,6 +956,12 @@ void PrepareForShutdown() {
     overlay_sidebar.store(false, std::memory_order_release);
     file_picker.store(false, std::memory_order_release);
     file_preview.store(false, std::memory_order_release);
+    cheat_count.store(0, std::memory_order_release);
+    {
+        std::lock_guard lock{display_data_mutex};
+        cheat_entries.clear();
+        cheat_toggle_callback = {};
+    }
     fast_forward_active.store(false, std::memory_order_release);
     fps_overlay_visible.store(false, std::memory_order_release);
     fps_overlay_value.store(0.0f, std::memory_order_release);

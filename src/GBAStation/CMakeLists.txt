@@ -142,6 +142,7 @@ target_link_libraries(gbastation PRIVATE
     video_core
     network
     input_common
+    lodepng
     json-headers
     tsl::robin_map
     ${PLATFORM_LIBRARIES}

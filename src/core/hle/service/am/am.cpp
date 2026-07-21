@@ -1059,8 +1059,9 @@ void ContentFile::Cancel(FS::MediaType media_type, u64 title_id) {
     FileUtil::Delete(path);
 }
 
-InstallStatus InstallCIA(const std::string& path,
-                         std::function<ProgressCallback>&& update_callback) {
+static InstallStatus InstallCIAImpl(const std::string& path,
+                                    std::function<ProgressCallback>&& update_callback,
+                                    bool allow_encrypted) {
     LOG_INFO(Service_AM, "Installing {}...", path);
 
     if (!FileUtil::Exists(path)) {
@@ -1082,7 +1083,12 @@ InstallStatus InstallCIA(const std::string& path,
             Core::System::GetInstance(),
             Service::AM::GetTitleMediaType(container.GetTitleMetadata().GetTitleID()));
 
-        if (container.GetTitleMetadata().HasEncryptedContent(container.GetHeader())) {
+        if (allow_encrypted) {
+            installFile.AuthorizeDecryptionFromHLE();
+        }
+
+        if (!allow_encrypted &&
+            container.GetTitleMetadata().HasEncryptedContent(container.GetHeader())) {
             LOG_ERROR(Service_AM, "File {} is encrypted! Aborting...", path);
             return InstallStatus::ErrorEncrypted;
         }
@@ -1093,18 +1099,23 @@ InstallStatus InstallCIA(const std::string& path,
         std::size_t total_bytes_read = 0;
         while (total_bytes_read != file_size) {
             std::size_t bytes_read = in_file->ReadBytes(buffer.data(), buffer.size());
+            if (bytes_read == 0) {
+                LOG_ERROR(Service_AM, "CIA file installation stopped before EOF: {} of {} bytes",
+                          total_bytes_read, file_size);
+                return InstallStatus::ErrorAborted;
+            }
             auto result = installFile.Write(static_cast<u64>(total_bytes_read), bytes_read, true,
                                             false, static_cast<u8*>(buffer.data()));
 
-            if (update_callback) {
-                update_callback(total_bytes_read, file_size);
-            }
             if (result.Failed()) {
                 LOG_ERROR(Service_AM, "CIA file installation aborted with error code {:08x}",
                           result.Code().raw);
                 return InstallStatus::ErrorAborted;
             }
             total_bytes_read += bytes_read;
+            if (update_callback) {
+                update_callback(total_bytes_read, file_size);
+            }
         }
         installFile.Close();
 
@@ -1135,6 +1146,16 @@ InstallStatus InstallCIA(const std::string& path,
 
     LOG_ERROR(Service_AM, "CIA file {} is invalid!", path);
     return InstallStatus::ErrorInvalid;
+}
+
+InstallStatus InstallCIA(const std::string& path,
+                         std::function<ProgressCallback>&& update_callback) {
+    return InstallCIAImpl(path, std::move(update_callback), false);
+}
+
+InstallStatus InstallEncryptedCIA(const std::string& path,
+                                  std::function<ProgressCallback>&& update_callback) {
+    return InstallCIAImpl(path, std::move(update_callback), true);
 }
 
 InstallStatus CheckCIAToInstall(const std::string& path, bool& is_compressed,
@@ -1190,6 +1211,9 @@ ResultVal<std::pair<TitleInfo, std::unique_ptr<Loader::SMDH>>> GetCIAInfos(
     }
 
     std::unique_ptr<FileUtil::IOFile> in_file = std::make_unique<FileUtil::IOFile>(path, "rb");
+    if (FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(in_file.get()) != std::nullopt) {
+        in_file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(in_file));
+    }
     FileSys::CIAContainer container;
     if (container.Load(in_file.get()) == Loader::ResultStatus::Success) {
         in_file->Seek(0, SEEK_SET);

@@ -188,6 +188,13 @@ PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& i
 PresentWindow::~PresentWindow() {
     scheduler.Finish();
     const vk::Device device = instance.GetDevice();
+    WaitPresent();
+    if (use_present_thread && present_thread.joinable()) {
+        present_thread.request_stop();
+        frame_cv.notify_all();
+        present_thread.join();
+    }
+    device.waitIdle();
     device.destroyCommandPool(command_pool);
     device.destroyRenderPass(present_renderpass);
     for (auto& frame : swap_chain) {

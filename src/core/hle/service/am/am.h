@@ -375,7 +375,12 @@ private:
  * @returns bool whether the install was successful
  */
 InstallStatus InstallCIA(const std::string& path,
-                         std::function<ProgressCallback>&& update_callback = nullptr);
+                          std::function<ProgressCallback>&& update_callback = nullptr);
+
+// Controlled frontend entry point. Encrypted CIA/NCCH contents are decrypted only while being
+// written into the current emulated console's unique-crypto NAND files.
+InstallStatus InstallEncryptedCIA(const std::string& path,
+                                  std::function<ProgressCallback>&& update_callback = nullptr);
 
 /**
  * Checks if the provided path is a valid CIA file

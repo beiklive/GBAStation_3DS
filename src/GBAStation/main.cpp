@@ -17,11 +17,17 @@
 #include <cstring>
 #include <exception>
 #include <fcntl.h>
+#include <fstream>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include <json.hpp>
+#include <lodepng.h>
 
 #include "audio_core/input_details.h"
 #include "audio_core/hle/hle.h"
@@ -40,6 +46,7 @@
 #include "common/string_util.h"
 #include "common/thread.h"
 #include "core/arm/dynarmic/arm_dynarmic_diagnostics.h"
+#include "core/cheats/cheat_base.h"
 #include "core/core.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
@@ -48,6 +55,7 @@
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/image_interface.h"
 #include "core/hle/kernel/thread.h"
+#include "core/hle/service/am/am.h"
 #include "core/hw/y2r.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/service.h"
@@ -87,6 +95,7 @@ constexpr const char* StderrLogPath = "sdmc:/GBAStation/3ds/debug/stderr.txt";
 constexpr const char* FallbackRomPath = "sdmc:/GBAStation/3ds/games/3Dlandchs.cci";
 constexpr const char* MemMapLogPath = "sdmc:/GBAStation/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
+constexpr const char* CiaInstallResultPath = "sdmc:/GBAStation/3ds/cia_install_result.json";
 
 struct LaunchOptions {
     std::string rom_path;
@@ -95,6 +104,7 @@ struct LaunchOptions {
     std::string return_nro_path{LauncherPath};
     bool return_to_nro{true};
     bool display_settings_from_game_db{};
+    bool install_cia{};
 };
 #if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
 constexpr bool DiagnosticLogsEnabled = true;
@@ -761,6 +771,38 @@ std::string TitleFromPath(std::string_view path) {
     return std::string{path.substr(begin, end - begin)};
 }
 
+std::string SaveStateThumbnailPath(u64 program_id, int slot) {
+    std::ostringstream path;
+    path << FileUtil::GetUserPath(FileUtil::UserPath::StatesDir) << std::uppercase << std::hex
+         << std::setw(16) << std::setfill('0') << program_id << '.' << std::dec << std::setw(2)
+         << std::setfill('0') << slot << ".png";
+    return path.str();
+}
+
+const char* CiaInstallStatusName(Service::AM::InstallStatus status) {
+    switch (status) {
+    case Service::AM::InstallStatus::Success:
+        return "success";
+    case Service::AM::InstallStatus::ErrorFailedToOpenFile:
+        return "open_failed";
+    case Service::AM::InstallStatus::ErrorFileNotFound:
+        return "file_not_found";
+    case Service::AM::InstallStatus::ErrorAborted:
+        return "aborted";
+    case Service::AM::InstallStatus::ErrorInvalid:
+        return "invalid_cia";
+    case Service::AM::InstallStatus::ErrorEncrypted:
+        return "encrypted_content";
+    }
+    return "unknown";
+}
+
+bool IsThreeDsApplicationTitle(u64 title_id) {
+    // Updates (0004000E), DLC (0004008C), system titles and shared data are installed
+    // into their normal AM locations but must not appear as standalone library games.
+    return static_cast<u32>(title_id >> 32) == 0x00040000;
+}
+
 LaunchOptions ParseLaunchOptions(int argc, char** argv) {
     LaunchOptions options;
     for (int i = 1; i < argc; ++i) {
@@ -774,6 +816,10 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
         }
         if (argument == "--exit-to-home") {
             options.return_to_nro = false;
+            continue;
+        }
+        if (argument == "--install-cia") {
+            options.install_cia = true;
             continue;
         }
         if (argument.starts_with("--")) {
@@ -1247,9 +1293,11 @@ int Run(int argc, char** argv) {
     ApplyConfiguredDisplayDefaults(launch_options.display_settings,
                                    !launch_options.display_settings_from_game_db,
                                    !launch_options.display_settings_from_game_db);
+    SwitchFrontend::GBAStationConfig::ApplyConfig();
+    // Per-game display settings have precedence over the global Azahar configuration.  This
+    // must be the final resolution write before System::Load constructs the rasterizer cache.
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
-    SwitchFrontend::GBAStationConfig::ApplyConfig();
     Settings::values.swap_screen.SetValue(false);
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
@@ -1264,6 +1312,65 @@ int Run(int argc, char** argv) {
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0);
     StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
     FileUtil::SetUserPath(std::string{SystemDir} + "/");
+    if (launch_options.install_cia) {
+        u64 title_id = 0;
+        auto cia_info = Service::AM::GetCIAInfos(rom_path);
+        if (cia_info.Succeeded()) {
+            title_id = cia_info.Unwrap().first.tid;
+        }
+
+        const Service::AM::InstallStatus install_status =
+            Service::AM::InstallEncryptedCIA(rom_path, [](std::size_t written, std::size_t total) {
+                DebugLog("CIA install progress written=%zu total=%zu", written, total);
+            });
+
+        std::string installed_path;
+        bool library_added = false;
+        std::ostringstream title_id_text;
+        title_id_text << std::uppercase << std::hex << std::setw(16) << std::setfill('0')
+                      << title_id;
+        if (install_status == Service::AM::InstallStatus::Success && title_id != 0 &&
+            IsThreeDsApplicationTitle(title_id)) {
+            const auto media_type = Service::AM::GetTitleMediaType(title_id);
+            installed_path = Service::AM::GetTitleContentPath(media_type, title_id);
+            bool executable = false;
+            if (auto loader = Loader::GetLoader(installed_path);
+                loader && loader->IsExecutable(executable) == Loader::ResultStatus::Success &&
+                executable) {
+                library_added = SwitchFrontend::GameDatabase::AddInstalledTitle(
+                    installed_path, launch_options.title, title_id_text.str());
+            }
+        }
+
+        nlohmann::json result{
+            {"source_path", rom_path},
+            {"title", launch_options.title},
+            {"3ds_id", title_id_text.str()},
+            {"installed_path", installed_path},
+            {"status", static_cast<u32>(install_status)},
+            {"status_name", CiaInstallStatusName(install_status)},
+            {"success", install_status == Service::AM::InstallStatus::Success},
+            {"library_added", library_added},
+        };
+        {
+            std::ofstream output(CiaInstallResultPath, std::ios::trunc);
+            if (output) {
+                output << result.dump(2) << '\n';
+            }
+        }
+        ExitLog("CIA install complete status=%u title_id=%s path=%s library_added=%d",
+                static_cast<unsigned>(install_status), title_id_text.str().c_str(),
+                installed_path.c_str(), library_added ? 1 : 0);
+        InputCommon::Shutdown();
+        if (romfs_initialized) {
+            romfsExit();
+        }
+        thread_core_guard.Restore("cia-install");
+        DebugClose();
+        const bool queued_launcher_return = QueueLauncherReturn(launch_options);
+        appletUnlockExit();
+        return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     StartupLog("Run: Common::Log init");
     bool common_log_started = false;
     if (EnableCommonLogFile) {
@@ -1325,6 +1432,11 @@ int Run(int argc, char** argv) {
     }
     u64 program_id{};
     if (system.GetAppLoader().ReadProgramId(program_id) == Loader::ResultStatus::Success) {
+        std::ostringstream program_id_text;
+        program_id_text << std::uppercase << std::hex << std::setw(16) << std::setfill('0')
+                        << program_id;
+        SwitchFrontend::GameDatabase::AddInstalledTitle(
+            launch_options.rom_path, launch_options.title, program_id_text.str());
         const u64 movie_id = system.Movie().GetCurrentMovieID();
         for (const Core::SaveStateInfo& state : Core::ListSaveStates(program_id, movie_id)) {
             if (state.slot > 0 && state.slot <= SwitchFrontend::OverlayUI::StateSlotCount) {
@@ -1337,6 +1449,27 @@ int Run(int argc, char** argv) {
         [slot_state_cache](int slot) {
             return slot > 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
                    (*slot_state_cache)[slot].load(std::memory_order_acquire);
+        });
+
+    std::vector<SwitchFrontend::VulkanOverlay::CheatEntry> menu_cheats;
+    for (const auto& cheat : system.CheatEngine().GetCheats()) {
+        std::string description = cheat->GetComments();
+        if (const std::size_t line_end = description.find('\n'); line_end != std::string::npos) {
+            description.resize(line_end);
+        }
+        menu_cheats.push_back({cheat->GetName(), std::move(description), cheat->IsEnabled()});
+    }
+    SwitchFrontend::VulkanOverlay::SetCheats(
+        std::move(menu_cheats), [&system, program_id](std::size_t index, bool enabled) {
+            const auto cheats = system.CheatEngine().GetCheats();
+            if (index >= cheats.size()) {
+                return false;
+            }
+            cheats[index]->SetEnabled(enabled);
+            if (program_id != 0) {
+                system.CheatEngine().SaveCheatFile(program_id);
+            }
+            return true;
         });
 
     SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);
@@ -1517,6 +1650,38 @@ int Run(int argc, char** argv) {
             if (accepted) {
                 if (saving) {
                     (*slot_state_cache)[slot].store(true, std::memory_order_release);
+                    if (program_id != 0 && !renderer.IsScreenshotPending()) {
+                        const auto layout = Layout::FrameLayoutFromResolutionScale(
+                            renderer.GetResolutionScaleFactor());
+                        auto pixels = std::make_shared<std::vector<u8>>(
+                            static_cast<std::size_t>(layout.width) * layout.height * 4);
+                        const std::string thumbnail_path = SaveStateThumbnailPath(program_id, slot);
+                        renderer.RequestScreenshot(
+                            pixels->data(),
+                            [pixels, thumbnail_path, width = layout.width,
+                             height = layout.height](bool invert_y) {
+                                std::vector<u8> rgba(pixels->size());
+                                for (u32 y = 0; y < height; ++y) {
+                                    const u32 source_y = invert_y ? height - 1 - y : y;
+                                    for (u32 x = 0; x < width; ++x) {
+                                        const std::size_t source =
+                                            (static_cast<std::size_t>(source_y) * width + x) * 4;
+                                        const std::size_t target =
+                                            (static_cast<std::size_t>(y) * width + x) * 4;
+                                        rgba[target + 0] = (*pixels)[source + 2];
+                                        rgba[target + 1] = (*pixels)[source + 1];
+                                        rgba[target + 2] = (*pixels)[source + 0];
+                                        rgba[target + 3] = 0xFF;
+                                    }
+                                }
+                                const unsigned error =
+                                    lodepng::encode(thumbnail_path, rgba, width, height);
+                                DebugLog("savestate thumbnail %s path=%s error=%u",
+                                         error == 0 ? "saved" : "failed",
+                                         thumbnail_path.c_str(), error);
+                            },
+                            layout);
+                    }
                 } else {
                     pause_frame_ready = false;
                     pause_frame_baseline = renderer.GetCurrentFrame();
@@ -1550,7 +1715,6 @@ int Run(int argc, char** argv) {
                 static_cast<u32>(display.internal_resolution)) {
                 Settings::values.resolution_factor.SetValue(
                     static_cast<u16>(display.internal_resolution));
-                system.ApplySettings();
             }
             window.SetDisplaySettings(display);
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
@@ -1610,7 +1774,6 @@ int Run(int argc, char** argv) {
                 static_cast<u32>(display.internal_resolution)) {
                 Settings::values.resolution_factor.SetValue(
                     static_cast<u16>(display.internal_resolution));
-                system.ApplySettings();
             }
             int count = 0;
             const bool db_saved = SwitchFrontend::GameDatabase::SyncDisplaySettings(

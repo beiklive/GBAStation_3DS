@@ -231,6 +231,25 @@ bool SaveDisplaySettings(const std::string& rom_path, const std::string& title,
     return saved;
 }
 
+bool AddInstalledTitle(const std::string& content_path, const std::string& title,
+                       const std::string& three_ds_id) {
+    const char* target_path = nullptr;
+    nlohmann::json data;
+    LoadWritableDatabase(data, target_path);
+    auto& item = FindOrCreateRecord(data, content_path, title);
+    item["platform"] = 7;
+    item["3ds_id"] = three_ds_id;
+    item["core"] = "azahar";
+    item["playCount"] = item.value("playCount", 0);
+    item["playTime"] = item.value("playTime", 0);
+    item["lastPlayed"] = item.value("lastPlayed", "");
+    item["favourite"] = item.value("favourite", false);
+    const bool saved = WriteDatabase(target_path, data);
+    LOG_INFO(Frontend, "3DS GameDB installed title save {} id={} path={}",
+             saved ? "ok" : "failed", three_ds_id, content_path);
+    return saved;
+}
+
 bool SyncDisplaySettings(const GBAStationDisplaySettings& settings, bool include_screen,
                          bool include_overlay, int& updated_count) {
     updated_count = 0;

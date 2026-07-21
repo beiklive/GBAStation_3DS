@@ -25,6 +25,12 @@ struct FileEntry {
     bool directory{};
 };
 
+struct CheatEntry {
+    std::string name;
+    std::string description;
+    bool enabled{};
+};
+
 enum class Item {
     Resume,
     SaveState,
@@ -56,6 +62,7 @@ struct State {
     std::string file_preview_path;
     std::string toast;
     std::array<bool, 10> occupied{};
+    std::vector<CheatEntry> cheats;
     GBAStationDisplaySettings display{};
 };
 
