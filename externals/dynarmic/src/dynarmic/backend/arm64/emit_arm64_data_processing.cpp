@@ -890,6 +890,20 @@ static void EmitAddSub(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* 
     auto Rresult = ctx.reg_alloc.WriteReg<bitsize>(inst);
     auto Ra = ctx.reg_alloc.ReadReg<bitsize>(args[0]);
 
+    if constexpr (bitsize == 32 && !sub) {
+        if (const auto iter = ctx.folded_add_shifts.find(inst);
+            iter != ctx.folded_add_shifts.end()) {
+            ASSERT(!nzcv_inst);
+            ASSERT(!overflow_inst);
+            ASSERT(args[2].IsImmediate() && !args[2].GetImmediateU1());
+
+            auto Rb = ctx.reg_alloc.ReadW(args[1]);
+            RegAlloc::Realize(Rresult, Ra, Rb);
+            code.ADD(Rresult, *Ra, Rb, LSL, iter->second);
+            return;
+        }
+    }
+
     if (overflow_inst) {
         // There is a limited set of circumstances where this is required, so assert for this.
         ASSERT(!sub);

@@ -80,6 +80,12 @@ DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
         .fast_dispatch_misses = dispatch_stats.fast_dispatch_misses,
         .fast_dispatch_updates = dispatch_stats.fast_dispatch_updates,
         .fast_dispatch_clears = dispatch_stats.fast_dispatch_clears,
+        .fast_dispatch_false_misses = dispatch_stats.fast_dispatch_false_misses,
+        .dispatcher_cache_hits = dispatch_stats.dispatcher_cache_hits,
+        .dispatcher_cache_misses = dispatch_stats.dispatcher_cache_misses,
+        .dispatcher_cache_collisions = dispatch_stats.dispatcher_cache_collisions,
+        .top_dispatcher_descriptors = dispatch_stats.top_dispatcher_descriptors,
+        .top_dispatcher_descriptor_counts = dispatch_stats.top_dispatcher_descriptor_counts,
         .last_read_callback_addr = dynarmic_last_read_callback_addr.load(),
         .last_write_callback_addr = dynarmic_last_write_callback_addr.load(),
     };

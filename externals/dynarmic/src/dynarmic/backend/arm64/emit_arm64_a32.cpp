@@ -115,11 +115,17 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Po
         code.l(fail);
     }
 
-    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+    EmitRelocation(code, ctx,
+                   ctx.conf.HasOptimization(OptimizationFlag::FastDispatch) && !is_single_step
+                       ? LinkTarget::FastDispatch
+                       : LinkTarget::ReturnToDispatcher);
 }
 
-void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool) {
-    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool is_single_step) {
+    EmitRelocation(code, ctx,
+                   ctx.conf.HasOptimization(OptimizationFlag::FastDispatch) && !is_single_step
+                       ? LinkTarget::FastDispatch
+                       : LinkTarget::ReturnToDispatcher);
 }
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::If terminal, IR::LocationDescriptor initial_location, bool is_single_step) {

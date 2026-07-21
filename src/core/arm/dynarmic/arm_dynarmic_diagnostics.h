@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/common_types.h"
 
 namespace Core {
@@ -24,6 +26,12 @@ struct DynarmicDiagnostics {
     u64 fast_dispatch_misses{};
     u64 fast_dispatch_updates{};
     u64 fast_dispatch_clears{};
+    u64 fast_dispatch_false_misses{};
+    u64 dispatcher_cache_hits{};
+    u64 dispatcher_cache_misses{};
+    u64 dispatcher_cache_collisions{};
+    std::array<u64, 4> top_dispatcher_descriptors{};
+    std::array<u64, 4> top_dispatcher_descriptor_counts{};
     u32 last_read_callback_addr{};
     u32 last_write_callback_addr{};
 };

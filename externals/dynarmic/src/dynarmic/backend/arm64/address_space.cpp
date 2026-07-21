@@ -25,17 +25,109 @@ namespace {
 std::atomic<u64> diagnostic_fast_dispatch_misses{};
 std::atomic<u64> diagnostic_fast_dispatch_updates{};
 std::atomic<u64> diagnostic_fast_dispatch_clears{};
+std::atomic<u64> diagnostic_fast_dispatch_false_misses{};
+std::atomic<u64> diagnostic_dispatcher_cache_hits{};
+std::atomic<u64> diagnostic_dispatcher_cache_misses{};
+std::atomic<u64> diagnostic_dispatcher_cache_collisions{};
+constexpr u64 DispatcherCacheHitSampleRate = 1024;
+std::atomic<u64> diagnostic_dispatcher_descriptor_sample_write{};
+std::atomic<u64> diagnostic_dispatcher_descriptor_samples_recorded{};
+std::array<std::atomic<u64>, 256> diagnostic_dispatcher_descriptor_samples{};
+
+void AddDispatcherDescriptorSample(u64 descriptor) {
+    const auto index = diagnostic_dispatcher_descriptor_sample_write.fetch_add(
+                           1, std::memory_order_relaxed) %
+                       diagnostic_dispatcher_descriptor_samples.size();
+    diagnostic_dispatcher_descriptor_samples[index].store(descriptor, std::memory_order_relaxed);
+    diagnostic_dispatcher_descriptor_samples_recorded.fetch_add(1, std::memory_order_relaxed);
+}
+
+void CollectTopDispatcherDescriptors(Arm64DispatchDiagnostics& stats) {
+    const u64 recorded = diagnostic_dispatcher_descriptor_samples_recorded.exchange(
+        0, std::memory_order_relaxed);
+    diagnostic_dispatcher_descriptor_sample_write.store(0, std::memory_order_relaxed);
+    const size_t count =
+        static_cast<size_t>(std::min<u64>(recorded, diagnostic_dispatcher_descriptor_samples.size()));
+
+    std::array<u64, 4> top_descriptors{};
+    std::array<u64, 4> top_counts{};
+
+    for (size_t i = 0; i < count; ++i) {
+        const u64 descriptor =
+            diagnostic_dispatcher_descriptor_samples[i].load(std::memory_order_relaxed);
+        if (descriptor == 0) {
+            continue;
+        }
+
+        size_t slot = top_descriptors.size();
+        for (size_t j = 0; j < top_descriptors.size(); ++j) {
+            if (top_descriptors[j] == descriptor) {
+                slot = j;
+                break;
+            }
+        }
+
+        if (slot == top_descriptors.size()) {
+            for (size_t j = 0; j < top_descriptors.size(); ++j) {
+                if (top_counts[j] == 0) {
+                    slot = j;
+                    top_descriptors[j] = descriptor;
+                    break;
+                }
+            }
+        }
+
+        if (slot == top_descriptors.size()) {
+            size_t min_slot = 0;
+            for (size_t j = 1; j < top_counts.size(); ++j) {
+                if (top_counts[j] < top_counts[min_slot]) {
+                    min_slot = j;
+                }
+            }
+            top_descriptors[min_slot] = descriptor;
+            top_counts[min_slot] = 1;
+            continue;
+        }
+
+        ++top_counts[slot];
+    }
+
+    for (size_t i = 0; i < top_descriptors.size(); ++i) {
+        size_t best = i;
+        for (size_t j = i + 1; j < top_descriptors.size(); ++j) {
+            if (top_counts[j] > top_counts[best]) {
+                best = j;
+            }
+        }
+        std::swap(top_counts[i], top_counts[best]);
+        std::swap(top_descriptors[i], top_descriptors[best]);
+    }
+
+    stats.top_dispatcher_descriptors = top_descriptors;
+    stats.top_dispatcher_descriptor_counts = top_counts;
+}
 } // namespace
 
 Arm64DispatchDiagnostics GetAndResetArm64DispatchDiagnostics() {
-    return {
+    Arm64DispatchDiagnostics stats{
         .fast_dispatch_misses =
             diagnostic_fast_dispatch_misses.exchange(0, std::memory_order_relaxed),
         .fast_dispatch_updates =
             diagnostic_fast_dispatch_updates.exchange(0, std::memory_order_relaxed),
         .fast_dispatch_clears =
             diagnostic_fast_dispatch_clears.exchange(0, std::memory_order_relaxed),
+        .fast_dispatch_false_misses =
+            diagnostic_fast_dispatch_false_misses.exchange(0, std::memory_order_relaxed),
+        .dispatcher_cache_hits =
+            diagnostic_dispatcher_cache_hits.exchange(0, std::memory_order_relaxed) *
+            DispatcherCacheHitSampleRate,
+        .dispatcher_cache_misses =
+            diagnostic_dispatcher_cache_misses.exchange(0, std::memory_order_relaxed),
+        .dispatcher_cache_collisions =
+            diagnostic_dispatcher_cache_collisions.exchange(0, std::memory_order_relaxed),
     };
+    CollectTopDispatcherDescriptors(stats);
+    return stats;
 }
 
 AddressSpace::AddressSpace(size_t code_cache_size)
@@ -54,7 +146,21 @@ AddressSpace::AddressSpace(size_t code_cache_size)
 AddressSpace::~AddressSpace() = default;
 
 CodePtr AddressSpace::Get(IR::LocationDescriptor descriptor) {
+    const u64 descriptor_value = descriptor.Value();
+    const auto cache_index = DispatcherCacheIndex(descriptor_value);
+    for (const auto& entry : dispatcher_cache[cache_index]) {
+        if (entry.descriptor == descriptor_value && entry.code_ptr) {
+            if ((dispatcher_cache_hit_sampler++ & (DispatcherCacheHitSampleRate - 1)) == 0) {
+                diagnostic_dispatcher_cache_hits.fetch_add(1, std::memory_order_relaxed);
+                AddDispatcherDescriptorSample(descriptor_value);
+            }
+            return entry.code_ptr;
+        }
+    }
+
+    diagnostic_dispatcher_cache_misses.fetch_add(1, std::memory_order_relaxed);
     if (const auto iter = block_entries.find(descriptor); iter != block_entries.end()) {
+        UpdateDispatcherCacheEntry(descriptor, iter->second);
         return iter->second;
     }
     return nullptr;
@@ -85,32 +191,101 @@ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
 
     IR::Block ir_block = GenerateIR(descriptor);
     const EmittedBlockInfo block_info = Emit(std::move(ir_block));
+    UpdateDispatcherCacheEntry(descriptor, block_info.entry_point);
     return block_info.entry_point;
 }
 
 CodePtr AddressSpace::GetOrEmitFastDispatch(IR::LocationDescriptor descriptor) {
     diagnostic_fast_dispatch_misses.fetch_add(1, std::memory_order_relaxed);
+    const u64 descriptor_value = descriptor.Value();
+    const u64 generation = fast_dispatch_generation.load(std::memory_order_relaxed);
+    for (auto& entry : fast_dispatch_table[FastDispatchIndex(descriptor_value)]) {
+        const u64 entry_generation =
+            std::atomic_ref<u64>{entry.generation}.load(std::memory_order_acquire);
+        if (entry_generation == generation && entry.descriptor == descriptor_value && entry.code_ptr) {
+            diagnostic_fast_dispatch_false_misses.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+    }
     CodePtr block_entry = GetOrEmit(descriptor);
     UpdateFastDispatchEntry(descriptor, block_entry);
     return block_entry;
 }
 
 void AddressSpace::UpdateFastDispatchEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr) {
-    const auto index = FastDispatchIndex(descriptor.Value());
-    fast_dispatch_table[index] = {descriptor.Value(), target_ptr};
+    const u64 descriptor_value = descriptor.Value();
+    const auto index = FastDispatchIndex(descriptor_value);
+    auto& set = fast_dispatch_table[index];
+    const u64 generation = fast_dispatch_generation.load(std::memory_order_relaxed);
+
+    for (auto& entry : set) {
+        if (entry.descriptor == descriptor_value || !entry.code_ptr) {
+            auto entry_generation = std::atomic_ref<u64>{entry.generation};
+            entry_generation.store(0, std::memory_order_release);
+            entry.code_ptr = target_ptr;
+            entry.descriptor = descriptor_value;
+            entry_generation.store(generation, std::memory_order_release);
+            diagnostic_fast_dispatch_updates.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+
+    const size_t way = static_cast<size_t>(fast_dispatch_replace_way[index] & 1);
+    fast_dispatch_replace_way[index] ^= 1;
+    auto& entry = set[way];
+    auto entry_generation = std::atomic_ref<u64>{entry.generation};
+    entry_generation.store(0, std::memory_order_release);
+    entry.code_ptr = target_ptr;
+    entry.descriptor = descriptor_value;
+    entry_generation.store(generation, std::memory_order_release);
     diagnostic_fast_dispatch_updates.fetch_add(1, std::memory_order_relaxed);
 }
 
 void AddressSpace::ClearFastDispatchEntry(IR::LocationDescriptor descriptor) {
-    const auto index = FastDispatchIndex(descriptor.Value());
-    if (fast_dispatch_table[index].descriptor == descriptor.Value()) {
-        fast_dispatch_table[index] = {};
-        diagnostic_fast_dispatch_clears.fetch_add(1, std::memory_order_relaxed);
+    const u64 descriptor_value = descriptor.Value();
+    auto& set = fast_dispatch_table[FastDispatchIndex(descriptor_value)];
+
+    for (auto& entry : set) {
+        if (entry.descriptor == descriptor_value) {
+            std::atomic_ref<u64>{entry.generation}.store(0, std::memory_order_release);
+            entry.code_ptr = nullptr;
+            entry.descriptor = 0;
+            diagnostic_fast_dispatch_clears.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+void AddressSpace::UpdateDispatcherCacheEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr) {
+    const u64 descriptor_value = descriptor.Value();
+    auto& set = dispatcher_cache[DispatcherCacheIndex(descriptor_value)];
+
+    for (auto& entry : set) {
+        if (entry.descriptor == descriptor_value || !entry.code_ptr) {
+            entry = {descriptor_value, target_ptr};
+            return;
+        }
+    }
+
+    const size_t way = static_cast<size_t>((descriptor_value >> 32) & 1);
+    diagnostic_dispatcher_cache_collisions.fetch_add(1, std::memory_order_relaxed);
+    set[way] = {descriptor_value, target_ptr};
+}
+
+void AddressSpace::ClearDispatcherCacheEntry(IR::LocationDescriptor descriptor) {
+    const u64 descriptor_value = descriptor.Value();
+    auto& set = dispatcher_cache[DispatcherCacheIndex(descriptor_value)];
+
+    for (auto& entry : set) {
+        if (entry.descriptor == descriptor_value) {
+            entry = {};
+        }
     }
 }
 
 void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors) {
     UnprotectCodeMemory();
+
+    fast_dispatch_generation.fetch_add(1, std::memory_order_release);
 
     for (const auto& descriptor : descriptors) {
         const auto iter = block_entries.find(descriptor);
@@ -122,6 +297,7 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
         // and the currently executing block may have references to itself which need to be unlinked.
         RelinkForDescriptor(descriptor, nullptr);
         ClearFastDispatchEntry(descriptor);
+        ClearDispatcherCacheEntry(descriptor);
 
         block_entries.erase(iter);
     }
@@ -130,11 +306,14 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
 }
 
 void AddressSpace::ClearCache() {
+    fast_dispatch_generation.fetch_add(1, std::memory_order_release);
     block_entries.clear();
     reverse_block_entries.clear();
     block_infos.clear();
     block_references.clear();
     fast_dispatch_table.fill({});
+    fast_dispatch_replace_way.fill(0);
+    dispatcher_cache.fill({});
     code.set_offset(prelude_info.end_of_prelude);
 }
 

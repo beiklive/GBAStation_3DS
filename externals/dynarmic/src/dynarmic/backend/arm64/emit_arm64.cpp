@@ -191,16 +191,51 @@ static void EmitAddCycles(oaknut::CodeGenerator& code, EmitContext& ctx, size_t 
     }
 }
 
+static std::unordered_map<const IR::Inst*, u8> FoldAddShiftedOperands(IR::Block& block) {
+    std::unordered_map<const IR::Inst*, u8> folded_add_shifts;
+
+    for (IR::Inst& inst : block) {
+        if (inst.GetOpcode() != IR::Opcode::Add32 ||
+            inst.GetAssociatedPseudoOperation(IR::Opcode::GetNZCVFromOp) ||
+            inst.GetAssociatedPseudoOperation(IR::Opcode::GetOverflowFromOp) ||
+            !inst.GetArg(2).IsImmediate() || inst.GetArg(2).GetU1() ||
+            inst.GetArg(1).IsImmediate()) {
+            continue;
+        }
+
+        IR::Inst* shift = inst.GetArg(1).GetInst();
+        if (shift->GetOpcode() != IR::Opcode::LogicalShiftLeft32 || shift->UseCount() != 1 ||
+            shift->GetAssociatedPseudoOperation(IR::Opcode::GetCarryFromOp) ||
+            !shift->GetArg(1).IsImmediate()) {
+            continue;
+        }
+
+        const u8 amount = shift->GetArg(1).GetU8();
+        if (amount == 0 || amount > 31) {
+            continue;
+        }
+
+        inst.SetArg(1, shift->GetArg(0));
+        shift->Invalidate();
+        folded_add_shifts.emplace(&inst, amount);
+    }
+
+    return folded_add_shifts;
+}
+
 EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const EmitConfig& conf, FastmemManager& fastmem_manager) {
     if (conf.very_verbose_debugging_output) {
         std::puts(IR::DumpBlock(block).c_str());
     }
 
+    auto folded_add_shifts = FoldAddShiftedOperands(block);
+
     EmittedBlockInfo ebi;
 
     FpsrManager fpsr_manager{code, conf.state_fpsr_offset};
     RegAlloc reg_alloc{code, fpsr_manager, GPR_ORDER, FPR_ORDER};
-    EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {}};
+    EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {},
+                    std::move(folded_add_shifts)};
 
     ebi.entry_point = code.xptr<CodePtr>();
 

@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <oaknut/oaknut.hpp>
@@ -41,6 +42,7 @@ struct EmitContext {
     FastmemManager& fastmem;
 
     std::vector<std::function<void()>> deferred_emits;
+    std::unordered_map<const IR::Inst*, u8> folded_add_shifts;
 
     FP::FPCR FPCR(bool fpcr_controlled = true) const {
         const FP::FPCR fpcr = conf.descriptor_to_fpcr(block.Location());

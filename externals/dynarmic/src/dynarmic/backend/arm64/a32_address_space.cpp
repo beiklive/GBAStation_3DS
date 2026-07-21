@@ -237,6 +237,8 @@ void A32AddressSpace::EmitPrelude() {
         }
 
         if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+            code.MOV(Wscratch2, 0);
+            code.STR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
             code.LDR(Xscratch0, l_return_to_dispatcher);
             for (size_t i = 0; i < RSBCount; i++) {
                 code.STR(Xscratch0, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, code_ptr) + i * sizeof(RSBEntry));
@@ -276,6 +278,8 @@ void A32AddressSpace::EmitPrelude() {
         }
 
         if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+            code.MOV(Wscratch2, 0);
+            code.STR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
             code.LDR(Xscratch0, l_return_to_dispatcher);
             for (size_t i = 0; i < RSBCount; i++) {
                 code.STR(Xscratch0, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, code_ptr) + i * sizeof(RSBEntry));
@@ -335,7 +339,7 @@ void A32AddressSpace::EmitPrelude() {
 
     prelude_info.fast_dispatch = code.xptr<void*>();
     {
-        oaknut::Label cache_miss, l_this, l_addr;
+        oaknut::Label check_way1, cache_miss, l_this, l_addr;
 
         code.LDAR(Wscratch0, Xhalt);
         code.CBNZ(Wscratch0, return_from_run_code);
@@ -346,6 +350,11 @@ void A32AddressSpace::EmitPrelude() {
         }
 
         static_assert(offsetof(A32JitState, regs) + 16 * sizeof(u32) == offsetof(A32JitState, upper_location_descriptor));
+        static_assert(offsetof(FastDispatchEntry, descriptor) == 0);
+        static_assert(offsetof(FastDispatchEntry, code_ptr) == 8);
+        static_assert(offsetof(FastDispatchEntry, generation) == 16);
+        static_assert(sizeof(FastDispatchEntry) == 32);
+        static_assert(sizeof(fast_dispatch_table[0]) == 64);
         code.LDUR(X0, Xstate, offsetof(A32JitState, regs) + 15 * sizeof(u32));
         code.MOV(Xscratch0, mcl::bit_cast<u64>(fast_dispatch_table.data()));
         code.LSR(Xscratch2, X0, 20);
@@ -353,9 +362,29 @@ void A32AddressSpace::EmitPrelude() {
         code.LSR(Xscratch1, X0, 32);
         code.EOR(Xscratch2, Xscratch2, Xscratch1);
         code.AND(Xscratch2, Xscratch2, fast_dispatch_table_index_mask);
-        code.LSL(Xscratch2, Xscratch2, fast_dispatch_table_entry_shift);
+        code.LSL(Xscratch2, Xscratch2, fast_dispatch_table_set_shift);
         code.ADD(Xscratch0, Xscratch0, Xscratch2);
+
+        code.MOV(Xscratch1, mcl::bit_cast<u64>(&fast_dispatch_generation));
+        code.LDAR(Xscratch1, Xscratch1);
+        code.ADD(Xscratch2, Xscratch0, offsetof(FastDispatchEntry, generation));
+        code.LDAR(Xscratch2, Xscratch2);
+        code.CMP(Xscratch1, Xscratch2);
+        code.B(NE, check_way1);
         code.LDP(Xscratch1, Xscratch2, Xscratch0, 0);
+        code.CMP(X0, Xscratch1);
+        code.B(NE, check_way1);
+        code.BR(Xscratch2);
+
+        code.l(check_way1);
+        code.MOV(Xscratch1, mcl::bit_cast<u64>(&fast_dispatch_generation));
+        code.LDAR(Xscratch1, Xscratch1);
+        code.ADD(Xscratch2, Xscratch0,
+                 sizeof(FastDispatchEntry) + offsetof(FastDispatchEntry, generation));
+        code.LDAR(Xscratch2, Xscratch2);
+        code.CMP(Xscratch1, Xscratch2);
+        code.B(NE, cache_miss);
+        code.LDP(Xscratch1, Xscratch2, Xscratch0, sizeof(FastDispatchEntry));
         code.CMP(X0, Xscratch1);
         code.B(NE, cache_miss);
         code.BR(Xscratch2);

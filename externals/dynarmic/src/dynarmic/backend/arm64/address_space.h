@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <optional>
 
@@ -71,6 +72,8 @@ protected:
     CodePtr GetOrEmitFastDispatch(IR::LocationDescriptor descriptor);
     void UpdateFastDispatchEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr);
     void ClearFastDispatchEntry(IR::LocationDescriptor descriptor);
+    void UpdateDispatcherCacheEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr);
+    void ClearDispatcherCacheEntry(IR::LocationDescriptor descriptor);
 
     FakeCall FastmemCallback(u64 host_pc);
 
@@ -140,20 +143,44 @@ protected:
         void* get_ticks_remaining;
     } prelude_info;
 
-    struct FastDispatchEntry {
+    struct alignas(16) FastDispatchEntry {
+        u64 descriptor;
+        CodePtr code_ptr;
+        u64 generation;
+    };
+
+    static constexpr size_t fast_dispatch_table_set_count = 0x8000;
+    static constexpr size_t fast_dispatch_table_ways = 2;
+    static constexpr u64 fast_dispatch_table_index_mask = fast_dispatch_table_set_count - 1;
+    static constexpr int fast_dispatch_table_set_shift = 6;
+    static constexpr size_t FastDispatchIndex(u64 descriptor) {
+        const u64 hash = descriptor ^ (descriptor >> 20) ^ (descriptor >> 32);
+        return static_cast<size_t>(hash & fast_dispatch_table_index_mask);
+    }
+    static_assert(((0x0300000000945038ULL ^ (0x0300000000945038ULL >> 20) ^
+                    (0x0300000000945038ULL >> 32)) &
+                   fast_dispatch_table_index_mask) == 0x5031);
+    std::array<std::array<FastDispatchEntry, fast_dispatch_table_ways>, fast_dispatch_table_set_count>
+        fast_dispatch_table{};
+    std::array<u8, fast_dispatch_table_set_count> fast_dispatch_replace_way{};
+    std::atomic<u64> fast_dispatch_generation{1};
+
+    struct DispatcherCacheEntry {
         u64 descriptor;
         CodePtr code_ptr;
     };
 
-    static constexpr size_t fast_dispatch_table_size = 0x10000;
-    static constexpr u64 fast_dispatch_table_index_mask = fast_dispatch_table_size - 1;
-    static constexpr int fast_dispatch_table_entry_shift = 4;
-    static constexpr size_t FastDispatchIndex(u64 descriptor) {
-        descriptor ^= descriptor >> 20;
+    static constexpr size_t dispatcher_cache_set_count = 0x4000;
+    static constexpr size_t dispatcher_cache_ways = 2;
+    static constexpr u64 dispatcher_cache_index_mask = dispatcher_cache_set_count - 1;
+    static constexpr size_t DispatcherCacheIndex(u64 descriptor) {
+        descriptor ^= descriptor >> 16;
         descriptor ^= descriptor >> 32;
-        return static_cast<size_t>(descriptor & fast_dispatch_table_index_mask);
+        return static_cast<size_t>(descriptor & dispatcher_cache_index_mask);
     }
-    std::array<FastDispatchEntry, fast_dispatch_table_size> fast_dispatch_table{};
+    std::array<std::array<DispatcherCacheEntry, dispatcher_cache_ways>, dispatcher_cache_set_count>
+        dispatcher_cache{};
+    u64 dispatcher_cache_hit_sampler{};
 };
 
 }  // namespace Dynarmic::Backend::Arm64
