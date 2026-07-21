@@ -10,6 +10,12 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define Y2R_USE_NEON 1
+#else
+#define Y2R_USE_NEON 0
+#endif
 #include "common/assert.h"
 #include "common/color.h"
 #include "common/common_types.h"
@@ -123,7 +129,10 @@ Diagnostics GetAndResetDiagnostics() {
 }
 
 [[nodiscard]] static u8 ClampToByte(s32 value) {
-    return static_cast<u8>(std::clamp(value, 0, 0xFF));
+    if (static_cast<u32>(value) <= 0xFF) {
+        return static_cast<u8>(value);
+    }
+    return value < 0 ? 0 : 0xFF;
 }
 
 [[nodiscard]] static Common::Vec4<u8> ConvertPixel(s32 y, s32 u, s32 v,
@@ -190,6 +199,131 @@ struct ConversionLuts {
            (static_cast<u32>(ClampToByte(g >> 5)) << 16) |
            (static_cast<u32>(ClampToByte(r >> 5)) << 24);
 }
+
+static void StoreRGB8(u8* output, u8 r, u8 g, u8 b) {
+    output[2] = r;
+    output[1] = g;
+    output[0] = b;
+}
+
+static void ConvertYToRGB8(const ConversionLuts& luts, u8 y, s32 r_uv, s32 g_uv, s32 b_uv,
+                           u8* output) {
+    const s32 cY = luts.y[y];
+    const s32 r = ((cY + r_uv) >> 3) + luts.r_offset;
+    const s32 g = ((cY + g_uv) >> 3) + luts.g_offset;
+    const s32 b = ((cY + b_uv) >> 3) + luts.b_offset;
+    StoreRGB8(output, ClampToByte(r >> 5), ClampToByte(g >> 5), ClampToByte(b >> 5));
+}
+
+static void ConvertYUV420QuadRGB8(const ConversionLuts& luts, u8 y00, u8 y01, u8 y10, u8 y11,
+                                  u8 u, u8 v, u8* out00, u8* out01, u8* out10, u8* out11) {
+    const s32 r_uv = luts.rv[v];
+    const s32 g_uv = luts.gv[v] + luts.gu[u];
+    const s32 b_uv = luts.bu[u];
+    ConvertYToRGB8(luts, y00, r_uv, g_uv, b_uv, out00);
+    ConvertYToRGB8(luts, y01, r_uv, g_uv, b_uv, out01);
+    ConvertYToRGB8(luts, y10, r_uv, g_uv, b_uv, out10);
+    ConvertYToRGB8(luts, y11, r_uv, g_uv, b_uv, out11);
+}
+
+#if Y2R_USE_NEON
+[[nodiscard]] static uint8x8_t PackY8(u8 y0, u8 y1, u8 y2, u8 y3, u8 y4, u8 y5, u8 y6, u8 y7) {
+    const u64 packed = static_cast<u64>(y0) | (static_cast<u64>(y1) << 8) |
+                       (static_cast<u64>(y2) << 16) | (static_cast<u64>(y3) << 24) |
+                       (static_cast<u64>(y4) << 32) | (static_cast<u64>(y5) << 40) |
+                       (static_cast<u64>(y6) << 48) | (static_cast<u64>(y7) << 56);
+    return vcreate_u8(packed);
+}
+
+[[nodiscard]] static uint8x8_t ClampS32PairToU8(int32x4_t low, int32x4_t high) {
+    const int16x8_t as_s16 = vcombine_s16(vqmovn_s32(low), vqmovn_s32(high));
+    return vqmovun_s16(as_s16);
+}
+
+static void ConvertYUV420OctetRGB8Neon(const ConversionLuts& luts, u16 y_coefficient,
+                                       uint8x8_t y_values, u8 u0, u8 v0, u8 u1, u8 v1,
+                                       u8* output) {
+    const uint16x8_t y16 = vmovl_u8(y_values);
+    const int32x4_t cy_low =
+        vreinterpretq_s32_u32(vmull_n_u16(vget_low_u16(y16), y_coefficient));
+    const int32x4_t cy_high =
+        vreinterpretq_s32_u32(vmull_n_u16(vget_high_u16(y16), y_coefficient));
+
+    const int32x4_t r_low = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_low, vdupq_n_s32(luts.rv[v0])), 3),
+                  vdupq_n_s32(luts.r_offset)),
+        5);
+    const int32x4_t r_high = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_high, vdupq_n_s32(luts.rv[v1])), 3),
+                  vdupq_n_s32(luts.r_offset)),
+        5);
+
+    const int32x4_t g_uv_low = vdupq_n_s32(luts.gv[v0] + luts.gu[u0]);
+    const int32x4_t g_uv_high = vdupq_n_s32(luts.gv[v1] + luts.gu[u1]);
+    const int32x4_t g_low = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_low, g_uv_low), 3), vdupq_n_s32(luts.g_offset)), 5);
+    const int32x4_t g_high = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_high, g_uv_high), 3), vdupq_n_s32(luts.g_offset)), 5);
+
+    const int32x4_t b_low = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_low, vdupq_n_s32(luts.bu[u0])), 3),
+                  vdupq_n_s32(luts.b_offset)),
+        5);
+    const int32x4_t b_high = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_high, vdupq_n_s32(luts.bu[u1])), 3),
+                  vdupq_n_s32(luts.b_offset)),
+        5);
+
+    uint8x8x3_t rgb;
+    rgb.val[0] = ClampS32PairToU8(b_low, b_high);
+    rgb.val[1] = ClampS32PairToU8(g_low, g_high);
+    rgb.val[2] = ClampS32PairToU8(r_low, r_high);
+    vst3_u8(output, rgb);
+}
+
+[[nodiscard]] static int32x4_t PackRepeatedPairS32(s32 a, s32 b) {
+    return vcombine_s32(vdup_n_s32(a), vdup_n_s32(b));
+}
+
+static void ConvertYUV422OctetRGB8Neon(const ConversionLuts& luts, u16 y_coefficient,
+                                       uint8x8_t y_values, u8 u0, u8 v0, u8 u1, u8 v1, u8 u2,
+                                       u8 v2, u8 u3, u8 v3, u8* output) {
+    const uint16x8_t y16 = vmovl_u8(y_values);
+    const int32x4_t cy_low =
+        vreinterpretq_s32_u32(vmull_n_u16(vget_low_u16(y16), y_coefficient));
+    const int32x4_t cy_high =
+        vreinterpretq_s32_u32(vmull_n_u16(vget_high_u16(y16), y_coefficient));
+
+    const int32x4_t r_uv_low = PackRepeatedPairS32(luts.rv[v0], luts.rv[v1]);
+    const int32x4_t r_uv_high = PackRepeatedPairS32(luts.rv[v2], luts.rv[v3]);
+    const int32x4_t r_low = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_low, r_uv_low), 3), vdupq_n_s32(luts.r_offset)), 5);
+    const int32x4_t r_high = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_high, r_uv_high), 3), vdupq_n_s32(luts.r_offset)), 5);
+
+    const int32x4_t g_uv_low =
+        PackRepeatedPairS32(luts.gv[v0] + luts.gu[u0], luts.gv[v1] + luts.gu[u1]);
+    const int32x4_t g_uv_high =
+        PackRepeatedPairS32(luts.gv[v2] + luts.gu[u2], luts.gv[v3] + luts.gu[u3]);
+    const int32x4_t g_low = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_low, g_uv_low), 3), vdupq_n_s32(luts.g_offset)), 5);
+    const int32x4_t g_high = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_high, g_uv_high), 3), vdupq_n_s32(luts.g_offset)), 5);
+
+    const int32x4_t b_uv_low = PackRepeatedPairS32(luts.bu[u0], luts.bu[u1]);
+    const int32x4_t b_uv_high = PackRepeatedPairS32(luts.bu[u2], luts.bu[u3]);
+    const int32x4_t b_low = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_low, b_uv_low), 3), vdupq_n_s32(luts.b_offset)), 5);
+    const int32x4_t b_high = vshrq_n_s32(
+        vaddq_s32(vshrq_n_s32(vaddq_s32(cy_high, b_uv_high), 3), vdupq_n_s32(luts.b_offset)), 5);
+
+    uint8x8x3_t rgb;
+    rgb.val[0] = ClampS32PairToU8(b_low, b_high);
+    rgb.val[1] = ClampS32PairToU8(g_low, g_high);
+    rgb.val[2] = ClampS32PairToU8(r_low, r_high);
+    vst3_u8(output, rgb);
+}
+#endif
 
 static void ConvertYUV422PairRGBA8Packed(const ConversionLuts& luts, u8 y0, u8 y1, u8 u, u8 v,
                                          u8 alpha, u32& out0, u32& out1) {
@@ -312,6 +446,288 @@ constexpr std::array<unsigned int, TILE_SIZE / 2> MakeMortonPairYTable() {
 
 constexpr auto MortonPairXTable = MakeMortonPairXTable();
 constexpr auto MortonPairYTable = MakeMortonPairYTable();
+
+constexpr std::array<unsigned int, TILE_SIZE / 4> MakeMortonQuadXTable() {
+    std::array<unsigned int, TILE_SIZE / 4> table{};
+    for (unsigned int i = 0; i < TILE_SIZE; i += 4) {
+        table[i / 4] = MortonToLinearTable[i] & 7;
+    }
+    return table;
+}
+
+constexpr std::array<unsigned int, TILE_SIZE / 4> MakeMortonQuadYTable() {
+    std::array<unsigned int, TILE_SIZE / 4> table{};
+    for (unsigned int i = 0; i < TILE_SIZE; i += 4) {
+        table[i / 4] = MortonToLinearTable[i] >> 3;
+    }
+    return table;
+}
+
+constexpr auto MortonQuadXTable = MakeMortonQuadXTable();
+constexpr auto MortonQuadYTable = MakeMortonQuadYTable();
+
+[[nodiscard]] static bool DirectConvertYUV420Indiv8RGB8(Memory::MemorySystem& memory,
+                                                        const ConversionConfiguration& cvt) {
+    const unsigned int width = cvt.input_line_width;
+    const unsigned int height = cvt.input_lines;
+    if ((width & 1) != 0 || (height & 1) != 0) {
+        return false;
+    }
+    if (!HasRowDmaLayout(cvt.src_Y, width) || !HasRowDmaLayout(cvt.src_U, width / 2) ||
+        !HasRowDmaLayout(cvt.src_V, width / 2)) {
+        return false;
+    }
+    if (!HasWritableDmaLayout(cvt.dst, 3) || cvt.dst.gap != 0) {
+        return false;
+    }
+
+    const u8* src_y = memory.GetPointer(cvt.src_Y.address);
+    const u8* src_u = memory.GetPointer(cvt.src_U.address);
+    const u8* src_v = memory.GetPointer(cvt.src_V.address);
+    u8* output_base = memory.GetPointer(cvt.dst.address);
+    if (!src_y || !src_u || !src_v || !output_base) {
+        return false;
+    }
+
+    const std::size_t y_stride = cvt.src_Y.transfer_unit + cvt.src_Y.gap;
+    const std::size_t uv_stride = cvt.src_U.transfer_unit + cvt.src_U.gap;
+    const std::size_t v_stride = cvt.src_V.transfer_unit + cvt.src_V.gap;
+    const ConversionLuts luts = BuildConversionLuts(cvt.coefficients);
+
+    if (cvt.block_alignment == BlockAlignment::Linear) {
+        const std::size_t dst_stride = static_cast<std::size_t>(width) * 3;
+        for (unsigned int y = 0; y < height; y += 2) {
+            const u8* y_row0 = src_y + y * y_stride;
+            const u8* y_row1 = y_row0 + y_stride;
+            const u8* u_row = src_u + (y / 2) * uv_stride;
+            const u8* v_row = src_v + (y / 2) * v_stride;
+            u8* out_row0 = output_base + y * dst_stride;
+            u8* out_row1 = out_row0 + dst_stride;
+            unsigned int x = 0;
+#if Y2R_USE_NEON
+            const u16 y_coefficient = static_cast<u16>(cvt.coefficients[0]);
+            for (; x + 7 < width; x += 8) {
+                const unsigned int uv_x = x / 2;
+                ConvertYUV422OctetRGB8Neon(luts, y_coefficient, vld1_u8(y_row0 + x), u_row[uv_x],
+                                           v_row[uv_x], u_row[uv_x + 1], v_row[uv_x + 1],
+                                           u_row[uv_x + 2], v_row[uv_x + 2], u_row[uv_x + 3],
+                                           v_row[uv_x + 3], out_row0 + x * 3);
+                ConvertYUV422OctetRGB8Neon(luts, y_coefficient, vld1_u8(y_row1 + x), u_row[uv_x],
+                                           v_row[uv_x], u_row[uv_x + 1], v_row[uv_x + 1],
+                                           u_row[uv_x + 2], v_row[uv_x + 2], u_row[uv_x + 3],
+                                           v_row[uv_x + 3], out_row1 + x * 3);
+            }
+#endif
+            for (; x < width; x += 2) {
+                const unsigned int uv_x = x / 2;
+                ConvertYUV420QuadRGB8(luts, y_row0[x], y_row0[x + 1], y_row1[x], y_row1[x + 1],
+                                      u_row[uv_x], v_row[uv_x], out_row0 + x * 3,
+                                      out_row0 + (x + 1) * 3, out_row1 + x * 3,
+                                      out_row1 + (x + 1) * 3);
+            }
+        }
+        return true;
+    }
+
+    if (cvt.block_alignment == BlockAlignment::Block8x8 && (height & 7) == 0) {
+        u8* out = output_base;
+        for (unsigned int strip_y = 0; strip_y < height; strip_y += 8) {
+            for (unsigned int tile_x = 0; tile_x < width; tile_x += 8) {
+                std::array<const u8*, 8> y_rows{};
+                std::array<const u8*, 4> u_rows{};
+                std::array<const u8*, 4> v_rows{};
+                for (unsigned int local_y = 0; local_y < 8; ++local_y) {
+                    y_rows[local_y] = src_y + (strip_y + local_y) * y_stride;
+                }
+                for (unsigned int local_uv_y = 0; local_uv_y < 4; ++local_uv_y) {
+                    const unsigned int y = (strip_y / 2) + local_uv_y;
+                    u_rows[local_uv_y] = src_u + y * uv_stride;
+                    v_rows[local_uv_y] = src_v + y * v_stride;
+                }
+
+#if Y2R_USE_NEON
+                for (unsigned int quad = 0; quad < TILE_SIZE / 4; quad += 2) {
+                    const unsigned int local_x0 = MortonQuadXTable[quad];
+                    const unsigned int local_y0 = MortonQuadYTable[quad];
+                    const unsigned int local_x1 = MortonQuadXTable[quad + 1];
+                    const unsigned int local_y1 = MortonQuadYTable[quad + 1];
+                    ASSERT(local_y0 == local_y1);
+
+                    const unsigned int x0 = tile_x + local_x0;
+                    const unsigned int x1 = tile_x + local_x1;
+                    const u8* y_row0 = y_rows[local_y0];
+                    const u8* y_row1 = y_rows[local_y0 + 1];
+                    const u8* u_row = u_rows[local_y0 / 2];
+                    const u8* v_row = v_rows[local_y0 / 2];
+                    const unsigned int uv_x0 = x0 / 2;
+                    const unsigned int uv_x1 = x1 / 2;
+                    const uint8x8_t y_values = PackY8(y_row0[x0], y_row0[x0 + 1], y_row1[x0],
+                                                      y_row1[x0 + 1], y_row0[x1], y_row0[x1 + 1],
+                                                      y_row1[x1], y_row1[x1 + 1]);
+                    ConvertYUV420OctetRGB8Neon(
+                        luts, static_cast<u16>(cvt.coefficients[0]), y_values, u_row[uv_x0],
+                        v_row[uv_x0], u_row[uv_x1], v_row[uv_x1], out);
+                    out += 24;
+                }
+#else
+                for (unsigned int quad = 0; quad < TILE_SIZE / 4; ++quad) {
+                    const unsigned int local_x = MortonQuadXTable[quad];
+                    const unsigned int local_y = MortonQuadYTable[quad];
+                    const unsigned int x = tile_x + local_x;
+                    const u8* y_row0 = y_rows[local_y];
+                    const u8* y_row1 = y_rows[local_y + 1];
+                    const u8* u_row = u_rows[local_y / 2];
+                    const u8* v_row = v_rows[local_y / 2];
+                    const unsigned int uv_x = x / 2;
+                    ConvertYUV420QuadRGB8(luts, y_row0[x], y_row0[x + 1], y_row1[x],
+                                          y_row1[x + 1], u_row[uv_x], v_row[uv_x], out,
+                                          out + 3, out + 6, out + 9);
+                    out += 12;
+                }
+#endif
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+[[nodiscard]] static bool DirectConvertYUV422Indiv8RGB8(Memory::MemorySystem& memory,
+                                                        const ConversionConfiguration& cvt) {
+    const unsigned int width = cvt.input_line_width;
+    const unsigned int height = cvt.input_lines;
+    if ((width & 1) != 0) {
+        return false;
+    }
+    if (!HasRowDmaLayout(cvt.src_Y, width) || !HasRowDmaLayout(cvt.src_U, width / 2) ||
+        !HasRowDmaLayout(cvt.src_V, width / 2)) {
+        return false;
+    }
+    if (!HasWritableDmaLayout(cvt.dst, 3) || cvt.dst.gap != 0) {
+        return false;
+    }
+
+    const u8* src_y = memory.GetPointer(cvt.src_Y.address);
+    const u8* src_u = memory.GetPointer(cvt.src_U.address);
+    const u8* src_v = memory.GetPointer(cvt.src_V.address);
+    u8* output_base = memory.GetPointer(cvt.dst.address);
+    if (!src_y || !src_u || !src_v || !output_base) {
+        return false;
+    }
+
+    const std::size_t y_stride = cvt.src_Y.transfer_unit + cvt.src_Y.gap;
+    const std::size_t uv_stride = cvt.src_U.transfer_unit + cvt.src_U.gap;
+    const std::size_t v_stride = cvt.src_V.transfer_unit + cvt.src_V.gap;
+    const ConversionLuts luts = BuildConversionLuts(cvt.coefficients);
+
+    const auto write_pair = [&](const u8* y_row, const u8* u_row, const u8* v_row, unsigned int x,
+                                u8* out) {
+        const unsigned int uv_x = x / 2;
+        const u8 u = u_row[uv_x];
+        const u8 v = v_row[uv_x];
+        const s32 r_uv = luts.rv[v];
+        const s32 g_uv = luts.gv[v] + luts.gu[u];
+        const s32 b_uv = luts.bu[u];
+        ConvertYToRGB8(luts, y_row[x], r_uv, g_uv, b_uv, out);
+        ConvertYToRGB8(luts, y_row[x + 1], r_uv, g_uv, b_uv, out + 3);
+    };
+
+    if (cvt.block_alignment == BlockAlignment::Linear) {
+        const std::size_t dst_stride = static_cast<std::size_t>(width) * 3;
+        for (unsigned int y = 0; y < height; ++y) {
+            const u8* y_row = src_y + y * y_stride;
+            const u8* u_row = src_u + y * uv_stride;
+            const u8* v_row = src_v + y * v_stride;
+            u8* out_row = output_base + y * dst_stride;
+            unsigned int x = 0;
+#if Y2R_USE_NEON
+            const u16 y_coefficient = static_cast<u16>(cvt.coefficients[0]);
+            for (; x + 7 < width; x += 8) {
+                const unsigned int uv_x = x / 2;
+                ConvertYUV422OctetRGB8Neon(luts, y_coefficient, vld1_u8(y_row + x), u_row[uv_x],
+                                           v_row[uv_x], u_row[uv_x + 1], v_row[uv_x + 1],
+                                           u_row[uv_x + 2], v_row[uv_x + 2], u_row[uv_x + 3],
+                                           v_row[uv_x + 3], out_row + x * 3);
+            }
+#endif
+            for (; x < width; x += 2) {
+                write_pair(y_row, u_row, v_row, x, out_row + x * 3);
+            }
+        }
+        return true;
+    }
+
+    if (cvt.block_alignment == BlockAlignment::Block8x8 && (height & 7) == 0) {
+        u8* out = output_base;
+        for (unsigned int strip_y = 0; strip_y < height; strip_y += 8) {
+            for (unsigned int tile_x = 0; tile_x < width; tile_x += 8) {
+                std::array<const u8*, 8> y_rows{};
+                std::array<const u8*, 8> u_rows{};
+                std::array<const u8*, 8> v_rows{};
+                for (unsigned int local_y = 0; local_y < 8; ++local_y) {
+                    const unsigned int y = strip_y + local_y;
+                    y_rows[local_y] = src_y + y * y_stride;
+                    u_rows[local_y] = src_u + y * uv_stride;
+                    v_rows[local_y] = src_v + y * v_stride;
+                }
+
+#if Y2R_USE_NEON
+                const u16 y_coefficient = static_cast<u16>(cvt.coefficients[0]);
+                for (unsigned int pair = 0; pair < TILE_SIZE / 2; pair += 4) {
+                    const unsigned int lx0 = MortonPairXTable[pair];
+                    const unsigned int ly0 = MortonPairYTable[pair];
+                    const unsigned int lx1 = MortonPairXTable[pair + 1];
+                    const unsigned int ly1 = MortonPairYTable[pair + 1];
+                    const unsigned int lx2 = MortonPairXTable[pair + 2];
+                    const unsigned int ly2 = MortonPairYTable[pair + 2];
+                    const unsigned int lx3 = MortonPairXTable[pair + 3];
+                    const unsigned int ly3 = MortonPairYTable[pair + 3];
+                    const unsigned int x0 = tile_x + lx0;
+                    const unsigned int x1 = tile_x + lx1;
+                    const unsigned int x2 = tile_x + lx2;
+                    const unsigned int x3 = tile_x + lx3;
+                    const u8* y_row0 = y_rows[ly0];
+                    const u8* y_row1 = y_rows[ly1];
+                    const u8* y_row2 = y_rows[ly2];
+                    const u8* y_row3 = y_rows[ly3];
+                    const u8* u_row0 = u_rows[ly0];
+                    const u8* u_row1 = u_rows[ly1];
+                    const u8* u_row2 = u_rows[ly2];
+                    const u8* u_row3 = u_rows[ly3];
+                    const u8* v_row0 = v_rows[ly0];
+                    const u8* v_row1 = v_rows[ly1];
+                    const u8* v_row2 = v_rows[ly2];
+                    const u8* v_row3 = v_rows[ly3];
+                    const unsigned int uv_x0 = x0 / 2;
+                    const unsigned int uv_x1 = x1 / 2;
+                    const unsigned int uv_x2 = x2 / 2;
+                    const unsigned int uv_x3 = x3 / 2;
+                    const uint8x8_t y_values = PackY8(y_row0[x0], y_row0[x0 + 1], y_row1[x1],
+                                                      y_row1[x1 + 1], y_row2[x2], y_row2[x2 + 1],
+                                                      y_row3[x3], y_row3[x3 + 1]);
+                    ConvertYUV422OctetRGB8Neon(
+                        luts, y_coefficient, y_values, u_row0[uv_x0], v_row0[uv_x0],
+                        u_row1[uv_x1], v_row1[uv_x1], u_row2[uv_x2], v_row2[uv_x2],
+                        u_row3[uv_x3], v_row3[uv_x3], out);
+                    out += 24;
+                }
+#else
+                for (unsigned int pair = 0; pair < TILE_SIZE / 2; ++pair) {
+                    const unsigned int local_x = MortonPairXTable[pair];
+                    const unsigned int local_y = MortonPairYTable[pair];
+                    const unsigned int x = tile_x + local_x;
+                    write_pair(y_rows[local_y], u_rows[local_y], v_rows[local_y], x, out);
+                    out += 6;
+                }
+#endif
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
 
 template <OutputFormat output_format, std::size_t sample_stride>
 [[nodiscard]] static bool DirectConvertYUV420Indiv(Memory::MemorySystem& memory,
@@ -636,8 +1052,18 @@ template <OutputFormat output_format>
                                               const ConversionConfiguration& cvt) {
     switch (cvt.input_format) {
     case InputFormat::YUV420_Indiv8:
+        if constexpr (output_format == OutputFormat::RGB8) {
+            if (DirectConvertYUV420Indiv8RGB8(memory, cvt)) {
+                return true;
+            }
+        }
         return DirectConvertYUV420Indiv<output_format, 1>(memory, cvt);
     case InputFormat::YUV422_Indiv8:
+        if constexpr (output_format == OutputFormat::RGB8) {
+            if (DirectConvertYUV422Indiv8RGB8(memory, cvt)) {
+                return true;
+            }
+        }
         if constexpr (output_format == OutputFormat::RGBA8) {
             if (DirectConvertYUV422Indiv8RGBA8(memory, cvt)) {
                 return true;

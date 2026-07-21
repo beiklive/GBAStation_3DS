@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -76,6 +77,26 @@ namespace Core {
 class ARM_Interface;
 class ExclusiveMonitor;
 class Timing;
+
+struct RunLoopDiagnostics {
+    u64 calls{};
+    u64 active_runs{};
+    u64 idle_runs{};
+    u64 delayed_runs{};
+    u64 sync_runs{};
+    u64 reschedules{};
+    u64 executed_ticks{};
+    u64 max_delay_ticks{};
+    u64 max_slice_ticks{};
+    u64 entry_pc_samples{};
+    std::array<u32, 4> top_entry_pcs{};
+    std::array<u64, 4> top_entry_pc_counts{};
+    u64 pc_samples{};
+    std::array<u32, 4> top_pcs{};
+    std::array<u64, 4> top_pc_counts{};
+};
+
+RunLoopDiagnostics GetAndResetRunLoopDiagnostics();
 
 class System {
 public:

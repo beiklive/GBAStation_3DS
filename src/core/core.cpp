@@ -2,6 +2,8 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <atomic>
+#include <array>
 #include <stdexcept>
 #include <utility>
 #include <boost/serialization/array.hpp>
@@ -60,6 +62,120 @@ namespace Core {
 
 /*static*/ System System::s_instance;
 
+std::atomic<u64> diagnostic_runloop_calls{};
+std::atomic<u64> diagnostic_runloop_active_runs{};
+std::atomic<u64> diagnostic_runloop_idle_runs{};
+std::atomic<u64> diagnostic_runloop_delayed_runs{};
+std::atomic<u64> diagnostic_runloop_sync_runs{};
+std::atomic<u64> diagnostic_runloop_reschedules{};
+std::atomic<u64> diagnostic_runloop_executed_ticks{};
+std::atomic<u64> diagnostic_runloop_max_delay_ticks{};
+std::atomic<u64> diagnostic_runloop_max_slice_ticks{};
+std::atomic<u64> diagnostic_runloop_entry_pc_sample_counter{};
+std::atomic<u64> diagnostic_runloop_entry_pc_samples_recorded{};
+std::atomic<u64> diagnostic_runloop_entry_pc_sample_write{};
+std::array<std::atomic<u32>, 128> diagnostic_runloop_entry_pc_samples{};
+std::atomic<u64> diagnostic_runloop_exit_pc_sample_counter{};
+std::atomic<u64> diagnostic_runloop_pc_samples_recorded{};
+std::atomic<u64> diagnostic_runloop_pc_sample_write{};
+std::array<std::atomic<u32>, 128> diagnostic_runloop_pc_samples{};
+
+void SamplePc(std::atomic<u64>& counter, std::atomic<u64>& recorded, std::atomic<u64>& write,
+              std::array<std::atomic<u32>, 128>& samples, u32 pc, u32 cpsr) {
+    if ((counter.fetch_add(1, std::memory_order_relaxed) & 0x3F) != 0) {
+        return;
+    }
+    const u32 thumb_bit = (cpsr & (1u << 5)) != 0 ? 1u : 0u;
+    const u64 index = write.fetch_add(1, std::memory_order_relaxed) % samples.size();
+    samples[index].store((pc & ~u32{3}) | thumb_bit, std::memory_order_relaxed);
+    recorded.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SampleRunLoopEntryPc(u32 pc, u32 cpsr) {
+    SamplePc(diagnostic_runloop_entry_pc_sample_counter,
+             diagnostic_runloop_entry_pc_samples_recorded,
+             diagnostic_runloop_entry_pc_sample_write, diagnostic_runloop_entry_pc_samples, pc,
+             cpsr);
+}
+
+void SampleRunLoopExitPc(u32 pc, u32 cpsr) {
+    SamplePc(diagnostic_runloop_exit_pc_sample_counter, diagnostic_runloop_pc_samples_recorded,
+             diagnostic_runloop_pc_sample_write, diagnostic_runloop_pc_samples, pc, cpsr);
+}
+
+void CollectTopPcSamples(std::array<std::atomic<u32>, 128>& samples, std::array<u32, 4>& top_pcs,
+                         std::array<u64, 4>& top_pc_counts) {
+    std::array<std::pair<u32, u64>, 128> counts{};
+    for (auto& sample : samples) {
+        const u32 pc = sample.exchange(0, std::memory_order_relaxed);
+        if (pc == 0) {
+            continue;
+        }
+        for (auto& [candidate, count] : counts) {
+            if (candidate == pc) {
+                count++;
+                break;
+            }
+            if (count == 0) {
+                candidate = pc;
+                count = 1;
+                break;
+            }
+        }
+    }
+    for (const auto& [pc, count] : counts) {
+        if (count == 0) {
+            continue;
+        }
+        for (std::size_t i = 0; i < top_pc_counts.size(); ++i) {
+            if (count <= top_pc_counts[i]) {
+                continue;
+            }
+            for (std::size_t j = top_pc_counts.size() - 1; j > i; --j) {
+                top_pc_counts[j] = top_pc_counts[j - 1];
+                top_pcs[j] = top_pcs[j - 1];
+            }
+            top_pc_counts[i] = count;
+            top_pcs[i] = pc;
+            break;
+        }
+    }
+}
+
+void AddRunLoopDiagnostics(const RunLoopDiagnostics& stats) {
+    diagnostic_runloop_calls.fetch_add(stats.calls, std::memory_order_relaxed);
+    diagnostic_runloop_active_runs.fetch_add(stats.active_runs, std::memory_order_relaxed);
+    diagnostic_runloop_idle_runs.fetch_add(stats.idle_runs, std::memory_order_relaxed);
+    diagnostic_runloop_delayed_runs.fetch_add(stats.delayed_runs, std::memory_order_relaxed);
+    diagnostic_runloop_sync_runs.fetch_add(stats.sync_runs, std::memory_order_relaxed);
+    diagnostic_runloop_reschedules.fetch_add(stats.reschedules, std::memory_order_relaxed);
+    diagnostic_runloop_executed_ticks.fetch_add(stats.executed_ticks, std::memory_order_relaxed);
+    diagnostic_runloop_max_delay_ticks.fetch_add(stats.max_delay_ticks, std::memory_order_relaxed);
+    diagnostic_runloop_max_slice_ticks.fetch_add(stats.max_slice_ticks, std::memory_order_relaxed);
+}
+
+RunLoopDiagnostics GetAndResetRunLoopDiagnostics() {
+    RunLoopDiagnostics result;
+    result.calls = diagnostic_runloop_calls.exchange(0, std::memory_order_relaxed);
+    result.active_runs = diagnostic_runloop_active_runs.exchange(0, std::memory_order_relaxed);
+    result.idle_runs = diagnostic_runloop_idle_runs.exchange(0, std::memory_order_relaxed);
+    result.delayed_runs = diagnostic_runloop_delayed_runs.exchange(0, std::memory_order_relaxed);
+    result.sync_runs = diagnostic_runloop_sync_runs.exchange(0, std::memory_order_relaxed);
+    result.reschedules = diagnostic_runloop_reschedules.exchange(0, std::memory_order_relaxed);
+    result.executed_ticks = diagnostic_runloop_executed_ticks.exchange(0, std::memory_order_relaxed);
+    result.max_delay_ticks = diagnostic_runloop_max_delay_ticks.exchange(0, std::memory_order_relaxed);
+    result.max_slice_ticks = diagnostic_runloop_max_slice_ticks.exchange(0, std::memory_order_relaxed);
+    result.entry_pc_samples =
+        diagnostic_runloop_entry_pc_samples_recorded.exchange(0, std::memory_order_relaxed);
+    result.pc_samples =
+        diagnostic_runloop_pc_samples_recorded.exchange(0, std::memory_order_relaxed);
+
+    CollectTopPcSamples(diagnostic_runloop_entry_pc_samples, result.top_entry_pcs,
+                        result.top_entry_pc_counts);
+    CollectTopPcSamples(diagnostic_runloop_pc_samples, result.top_pcs, result.top_pc_counts);
+    return result;
+}
+
 template <>
 Core::System& Global() {
     return System::GetInstance();
@@ -84,6 +200,8 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
     if (!IsPoweredOn()) {
         return ResultStatus::ErrorNotInitialized;
     }
+    RunLoopDiagnostics loop_diag{};
+    loop_diag.calls = 1;
 
 #ifdef ENABLE_GDBSTUB
     if (GDBStub::IsServerEnabled()) {
@@ -197,6 +315,7 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             cpu_core->GetTimer().Advance();
             cpu_core->PrepareReschedule();
             kernel->GetThreadManager(cpu_core->GetID()).Reschedule();
+            loop_diag.reschedules++;
             cpu_core->GetTimer().SetNextSlice(delay);
             if (max_delay < delay) {
                 max_delay = delay;
@@ -213,21 +332,31 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         LOG_TRACE(Core_ARM11, "Core {} running (delayed) for {} ticks",
                   current_core_to_execute->GetID(),
                   current_core_to_execute->GetTimer().GetDowncount());
+        loop_diag.delayed_runs++;
+        loop_diag.max_delay_ticks += static_cast<u64>(max_delay);
+        const u64 start_ticks = current_core_to_execute->GetTimer().GetTicks();
         if (running_core != current_core_to_execute) {
             running_core = current_core_to_execute;
             kernel->SetRunningCPU(running_core);
         }
         if (kernel->GetCurrentThreadManager().GetCurrentThread() == nullptr) {
             LOG_TRACE(Core_ARM11, "Core {} idling", current_core_to_execute->GetID());
+            loop_diag.idle_runs++;
             current_core_to_execute->GetTimer().Idle();
             PrepareReschedule();
         } else {
+            loop_diag.active_runs++;
+            SampleRunLoopEntryPc(current_core_to_execute->GetPC(),
+                                 current_core_to_execute->GetCPSR());
             if (tight_loop) {
                 current_core_to_execute->Run();
             } else {
                 current_core_to_execute->Step();
             }
+            SampleRunLoopExitPc(current_core_to_execute->GetPC(),
+                                current_core_to_execute->GetCPSR());
         }
+        loop_diag.executed_ticks += current_core_to_execute->GetTimer().GetTicks() - start_ticks;
     } else {
         // Now all cores are at the same global time. So we will run them one after the other
         // with a max slice that is the minimum of all max slices of all cores
@@ -239,8 +368,11 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             cpu_core->GetTimer().Advance();
             cpu_core->PrepareReschedule();
             kernel->GetThreadManager(cpu_core->GetID()).Reschedule();
+            loop_diag.reschedules++;
             max_slice = std::min(max_slice, cpu_core->GetTimer().GetMaxSliceLength());
         }
+        loop_diag.sync_runs++;
+        loop_diag.max_slice_ticks += static_cast<u64>(max_slice);
         for (auto& cpu_core : cpu_cores) {
             cpu_core->GetTimer().SetNextSlice(max_slice);
             auto start_ticks = cpu_core->GetTimer().GetTicks();
@@ -252,9 +384,12 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             // instead advance to the next event and try to yield to the next thread
             if (kernel->GetCurrentThreadManager().GetCurrentThread() == nullptr) {
                 LOG_TRACE(Core_ARM11, "Core {} idling", cpu_core->GetID());
+                loop_diag.idle_runs++;
                 cpu_core->GetTimer().Idle();
                 PrepareReschedule();
             } else {
+                loop_diag.active_runs++;
+                SampleRunLoopEntryPc(cpu_core->GetPC(), cpu_core->GetCPSR());
                 // In the rare case the break flag is set (due to exception thrown)
                 // there is probably no need to adjust the timer accordingly.
                 if (tight_loop) {
@@ -262,12 +397,16 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
                 } else {
                     cpu_core->Step();
                 }
+                SampleRunLoopExitPc(cpu_core->GetPC(), cpu_core->GetCPSR());
             }
             max_slice = cpu_core->GetTimer().GetTicks() - start_ticks;
+            loop_diag.executed_ticks += max_slice;
         }
     }
 
     Reschedule();
+    loop_diag.reschedules++;
+    AddRunLoopDiagnostics(loop_diag);
 
     return status;
 }
