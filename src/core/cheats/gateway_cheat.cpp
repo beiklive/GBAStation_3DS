@@ -524,9 +524,6 @@ std::vector<std::shared_ptr<CheatBase>> GatewayCheat::LoadFile(const std::string
             } else {
                 comments += line.substr(1, line.length() - 1) + '\n';
             }
-        } else if (line.size() >= 2 && line.front() == '{' && line.back() == '}') {
-            // Common community cheat packs use braces for explanatory notes.
-            comments += line.substr(1, line.length() - 2) + '\n';
         } else if (!line.empty()) {
             cheat_lines.emplace_back(std::move(line));
         }

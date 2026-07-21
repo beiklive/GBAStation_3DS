@@ -355,10 +355,6 @@ void RendererVulkan::TryPresent([[maybe_unused]] int timeout_ms, bool is_seconda
 
 void RendererVulkan::PresentLastFrame() {
     const Layout::FramebufferLayout& layout = render_window.GetFramebufferLayout();
-    // The Switch frontend pauses the core while its menu is visible. Process a pending
-    // savestate thumbnail here as well, otherwise RenderScreenshot() would not run until
-    // the game is resumed and the captured image would no longer match the save action.
-    RenderScreenshot();
     isSecondaryWindow = false;
     RenderToWindow(main_present_window, layout, false, true);
     scheduler.DispatchWork();
