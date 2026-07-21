@@ -5,6 +5,7 @@ add_executable(gbastation
     game_db.cpp
     game_db.h
     main.cpp
+    switch_fastmem_resume.S
     switch_keyboard.cpp
     switch_keyboard.h
     input_mapping.cpp

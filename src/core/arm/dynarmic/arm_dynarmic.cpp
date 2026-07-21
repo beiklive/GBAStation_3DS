@@ -484,16 +484,21 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
     // Switch and rely on SVC sleep/wait paths for real guest blocking.
     config.hook_hint_instructions = false;
     config.code_cache_size = SwitchCodeCacheSize;
+    if (current_page_table) {
+        config.fastmem_pointer = memory.GetSwitchFastmemPointer(*current_page_table);
+        config.recompile_on_fastmem_failure = true;
+        config.fastmem_exclusive_access = false;
+    }
     dynarmic_jit_instances_created.fetch_add(1);
     dynarmic_last_code_cache_size.store(static_cast<u64>(config.code_cache_size));
     dynarmic_last_optimization_flags.store(static_cast<u32>(config.optimizations));
     dynarmic_last_hook_hint_instructions.store(config.hook_hint_instructions ? 1u : 0u);
     dynarmic_last_always_little_endian.store(config.always_little_endian ? 1u : 0u);
     LOG_INFO(Core_ARM11,
-             "Switch Dynarmic config: core={} optimizations=0x{:x} hook_hints={} little_endian={} code_cache={}",
+             "Switch Dynarmic config: core={} optimizations=0x{:x} hook_hints={} little_endian={} code_cache={} fastmem={}",
              GetID(), static_cast<unsigned>(config.optimizations),
              config.hook_hint_instructions ? 1 : 0, config.always_little_endian ? 1 : 0,
-             config.code_cache_size);
+             config.code_cache_size, config.fastmem_pointer ? 1 : 0);
 #endif
 
     // Multi-process state

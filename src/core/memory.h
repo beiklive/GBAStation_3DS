@@ -5,6 +5,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <boost/serialization/array.hpp>
@@ -26,6 +27,10 @@ class DspInterface;
 }
 
 namespace Memory {
+
+#ifdef __SWITCH__
+class SwitchFastmemArena;
+#endif
 
 /**
  * Page size used by the ARM architecture. This is the smallest granularity with which memory can
@@ -59,6 +64,8 @@ enum class PageType : u8 {
  * requires an indexed fetch and a check for NULL.
  */
 struct PageTable {
+    PageTable();
+    ~PageTable();
     /**
      * Array of memory pointers backing each page. An entry can only be non-null if the
      * corresponding entry in the `attributes` array is of type `Memory`.
@@ -107,6 +114,12 @@ struct PageTable {
      * the corresponding entry in `pointers` MUST be set to null.
      */
     std::array<PageType, PAGE_TABLE_NUM_ENTRIES> attributes;
+
+#ifdef __SWITCH__
+    // This is deliberately not serialized. It is a host-side mirror of the guest page table and
+    // is rebuilt from pointers/attributes after a state load.
+    std::unique_ptr<SwitchFastmemArena> fastmem_arena;
+#endif
 
     std::array<u8*, PAGE_TABLE_NUM_ENTRIES>& GetPointerArray() {
         return pointers.raw;
@@ -284,6 +297,11 @@ public:
     /// Currently active page table
     void SetCurrentPageTable(std::shared_ptr<PageTable> page_table);
     std::shared_ptr<PageTable> GetCurrentPageTable() const;
+
+#ifdef __SWITCH__
+    /// Returns a 4 GiB host mirror for this guest page table when Switch fastmem is available.
+    std::optional<uintptr_t> GetSwitchFastmemPointer(PageTable& page_table);
+#endif
 
     /**
      * Gets a pointer to the given address.

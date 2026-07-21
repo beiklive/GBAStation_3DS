@@ -480,6 +480,8 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
     loader/smdh.h
     memory.cpp
     memory.h
+    memory_switch_fastmem.cpp
+    memory_switch_fastmem.h
     movie.cpp
     movie.h
     nus_download.cpp

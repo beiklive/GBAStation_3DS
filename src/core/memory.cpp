@@ -25,6 +25,9 @@
 #include "core/hle/kernel/process.h"
 #include "core/hle/service/plgldr/plgldr.h"
 #include "core/memory.h"
+#ifdef __SWITCH__
+#include "core/memory_switch_fastmem.h"
+#endif
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
 
@@ -43,7 +46,22 @@ constexpr u32 SIGSEGV = 11;
 
 namespace Memory {
 
+PageTable::PageTable() = default;
+
+PageTable::~PageTable() {
+#ifdef __SWITCH__
+    if (fastmem_arena) {
+        fastmem_arena->Clear(*this);
+    }
+#endif
+}
+
 void PageTable::Clear() {
+#ifdef __SWITCH__
+    if (fastmem_arena) {
+        fastmem_arena->Clear(*this);
+    }
+#endif
     pointers.raw.fill(nullptr);
     pointers.refs.fill(MemoryRef());
     attributes.fill(PageType::Unmapped);
@@ -101,10 +119,17 @@ class MemorySystem::Impl {
 public:
     // Visual Studio would try to allocate these on compile time
     // if they are std::array which would exceed the memory limit.
+#ifdef __SWITCH__
+    SwitchCodeAliasBuffer fcram{Memory::FCRAM_N3DS_SIZE};
+    std::unique_ptr<u8[]> vram = std::make_unique<u8[]>(Memory::VRAM_SIZE);
+    std::unique_ptr<u8[]> n3ds_extra_ram = std::make_unique<u8[]>(Memory::N3DS_EXTRA_RAM_SIZE);
+    std::unique_ptr<u8[]> dsp_ram = std::make_unique<u8[]>(Memory::DSP_RAM_SIZE);
+#else
     std::unique_ptr<u8[]> fcram = std::make_unique<u8[]>(Memory::FCRAM_N3DS_SIZE);
     std::unique_ptr<u8[]> vram = std::make_unique<u8[]>(Memory::VRAM_SIZE);
     std::unique_ptr<u8[]> n3ds_extra_ram = std::make_unique<u8[]>(Memory::N3DS_EXTRA_RAM_SIZE);
     std::unique_ptr<u8[]> dsp_ram = std::make_unique<u8[]>(Memory::DSP_RAM_SIZE);
+#endif
 
     Core::System& system;
     std::shared_ptr<PageTable> current_page_table = nullptr;
@@ -417,6 +442,18 @@ std::shared_ptr<PageTable> MemorySystem::GetCurrentPageTable() const {
     return impl->current_page_table;
 }
 
+#ifdef __SWITCH__
+std::optional<uintptr_t> MemorySystem::GetSwitchFastmemPointer(PageTable& page_table) {
+    if (!page_table.fastmem_arena) {
+        page_table.fastmem_arena = std::make_unique<SwitchFastmemArena>(page_table);
+    }
+    if (!page_table.fastmem_arena->IsValid() || !page_table.fastmem_arena->HasMappings()) {
+        return std::nullopt;
+    }
+    return page_table.fastmem_arena->Pointer();
+}
+#endif
+
 void MemorySystem::RasterizerFlushVirtualRegion(VAddr start, u32 size, FlushMode mode) {
     impl->RasterizerFlushVirtualRegion(start, size, mode);
 }
@@ -446,6 +483,11 @@ void MemorySystem::RegisterWatchpoint(const Kernel::Process& process, VAddr addr
             switch (type) {
             case PageType::Memory:
                 mem = page_table.pointers.Ref(page_index);
+#ifdef __SWITCH__
+                if (page_table.fastmem_arena) {
+                    page_table.fastmem_arena->UnmapRange(page_table, page_index, 1);
+                }
+#endif
                 type = PageType::MemoryWatchpoint;
                 page_table.pointers[page_index] = nullptr;
                 break;
@@ -488,6 +530,11 @@ void MemorySystem::UnregisterWatchpoint(const Kernel::Process& process, VAddr ad
                 case PageType::MemoryWatchpoint:
                     type = PageType::Memory;
                     page_table.pointers[page_index] = it->second.memory;
+#ifdef __SWITCH__
+                    if (page_table.fastmem_arena) {
+                        page_table.fastmem_arena->MapRange(page_table, page_index, 1);
+                    }
+#endif
                     break;
                 case PageType::RasterizerCachedMemoryWatchpoint:
                     type = PageType::RasterizerCachedMemory;
@@ -517,6 +564,13 @@ void MemorySystem::MapPages(PageTable& page_table, u32 base, u32 size, MemoryRef
                                      FlushMode::FlushAndInvalidate);
     }
 
+    const u32 mapped_base = base;
+#ifdef __SWITCH__
+    if (page_table.fastmem_arena) {
+        page_table.fastmem_arena->UnmapRange(page_table, base, size);
+    }
+#endif
+
     u32 end = base + size;
     while (base != end) {
         ASSERT_MSG(base < PAGE_TABLE_NUM_ENTRIES, "out of range mapping at {:08X}", base);
@@ -534,6 +588,12 @@ void MemorySystem::MapPages(PageTable& page_table, u32 base, u32 size, MemoryRef
         if (memory != nullptr && memory.GetSize() > CITRA_PAGE_SIZE)
             memory += CITRA_PAGE_SIZE;
     }
+
+#ifdef __SWITCH__
+    if (page_table.fastmem_arena) {
+        page_table.fastmem_arena->MapRange(page_table, mapped_base, size);
+    }
+#endif
 }
 
 void MemorySystem::MapMemoryRegion(PageTable& page_table, VAddr base, u32 size, MemoryRef target) {
@@ -1007,6 +1067,12 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
                         break;
                     case PageType::Memory:
                     case PageType::MemoryWatchpoint:
+#ifdef __SWITCH__
+                        if (page_table->fastmem_arena) {
+                            page_table->fastmem_arena->UnmapRange(*page_table,
+                                                                  vaddr >> CITRA_PAGE_BITS, 1);
+                        }
+#endif
                         page_type = (page_type == PageType::Memory)
                                         ? PageType::RasterizerCachedMemory
                                         : PageType::RasterizerCachedMemoryWatchpoint;
@@ -1031,6 +1097,12 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
                         if (page_type == PageType::Memory) {
                             page_table->pointers[vaddr >> CITRA_PAGE_BITS] =
                                 GetPointerForRasterizerCache(vaddr & ~CITRA_PAGE_MASK);
+#ifdef __SWITCH__
+                            if (page_table->fastmem_arena) {
+                                page_table->fastmem_arena->MapRange(*page_table,
+                                                                    vaddr >> CITRA_PAGE_BITS, 1);
+                            }
+#endif
                         }
                         break;
                     }

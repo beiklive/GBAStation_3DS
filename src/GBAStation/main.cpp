@@ -2217,7 +2217,38 @@ extern "C" void userAppExit() {
     ExitLogClose();
 }
 
+struct alignas(16) SwitchExceptionResumeContext {
+    std::array<u64, 33> registers;
+    alignas(16) std::array<u64, 64> fpu_registers;
+    u64 pstate;
+};
+
+static_assert(offsetof(SwitchExceptionResumeContext, fpu_registers) == 272);
+static_assert(offsetof(SwitchExceptionResumeContext, pstate) == 784);
+
+extern "C" bool DynarmicHandleSwitchFastmemFault(u64 host_pc, u64* resume_pc);
+extern "C" [[noreturn]] void SwitchFastmemResumeException(
+    const SwitchExceptionResumeContext* context);
+
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    if (ctx) {
+        u64 resume_pc{};
+        if (DynarmicHandleSwitchFastmemFault(ctx->pc.x, &resume_pc)) {
+            SwitchExceptionResumeContext resume_context{};
+            for (size_t index = 0; index < 29; index++) {
+                resume_context.registers[index] = ctx->cpu_gprs[index].x;
+            }
+            resume_context.registers[29] = ctx->fp.x;
+            resume_context.registers[30] = ctx->lr.x;
+            resume_context.registers[31] = ctx->sp.x;
+            resume_context.registers[32] = resume_pc;
+            std::memcpy(resume_context.fpu_registers.data(), ctx->fpu_gprs,
+                        sizeof(ctx->fpu_gprs));
+            resume_context.pstate = ctx->pstate;
+            SwitchFastmemResumeException(&resume_context);
+        }
+    }
+
     WriteRawBootMarker("__libnx_exception_handler: entry");
     OpenStartupLogIfNeeded("a");
     ExitLog("__libnx_exception_handler entry");
