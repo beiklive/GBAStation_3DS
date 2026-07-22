@@ -39,6 +39,7 @@ struct FramebufferLayout;
 
 namespace VideoCore {
 class GPU;
+struct OverlayMenuState;
 }
 
 namespace Vulkan {
@@ -110,6 +111,8 @@ private:
     void ReloadPipeline(Settings::StereoRenderOption render_3d);
     void CompileShaders();
     void CreateOverlayFont();
+    void UploadOverlayFontAtlas(bool initial_upload);
+    bool EnsureOverlayFontGlyphs(const VideoCore::OverlayMenuState& state);
     void BuildLayouts();
     void BuildPipelines();
     void ConfigureFramebufferTexture(TextureInfo& texture,

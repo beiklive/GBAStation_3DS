@@ -585,6 +585,95 @@ void RendererVulkan::CompileShaders() {
     }
 }
 
+void RendererVulkan::UploadOverlayFontAtlas(bool initial_upload) {
+    const vk::DeviceSize atlas_size = OverlayFont::AtlasSize();
+    const u32 atlas_width = static_cast<u32>(OverlayFont::AtlasWidth());
+    const u32 atlas_height = static_cast<u32>(OverlayFont::AtlasHeight());
+
+    const vk::BufferCreateInfo staging_info = {
+        .size = atlas_size,
+        .usage = vk::BufferUsageFlagBits::eTransferSrc,
+    };
+    const VmaAllocationCreateInfo staging_alloc_info = {
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+    };
+    VkBuffer unsafe_staging{};
+    VmaAllocation staging_allocation{};
+    VmaAllocationInfo staging_mapped{};
+    VkBufferCreateInfo unsafe_staging_info = static_cast<VkBufferCreateInfo>(staging_info);
+    VkResult result = vmaCreateBuffer(instance.GetAllocator(), &unsafe_staging_info,
+                                      &staging_alloc_info, &unsafe_staging, &staging_allocation,
+                                      &staging_mapped);
+    if (result != VK_SUCCESS) [[unlikely]] {
+        LOG_CRITICAL(Render_Vulkan, "Failed allocating overlay font staging buffer with error {}",
+                     result);
+        UNREACHABLE();
+    }
+    std::memcpy(staging_mapped.pMappedData, OverlayFont::AtlasData(), atlas_size);
+    vk::Buffer staging_buffer{unsafe_staging};
+
+    renderpass_cache.EndRendering();
+    scheduler.Record([image = overlay_font_image, staging_buffer, width = atlas_width,
+                      height = atlas_height, initial_upload](vk::CommandBuffer cmdbuf) {
+        const vk::ImageSubresourceRange range = {
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        const vk::ImageMemoryBarrier to_transfer = {
+            .srcAccessMask = initial_upload ? vk::AccessFlagBits::eNone
+                                            : vk::AccessFlagBits::eShaderRead,
+            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .oldLayout = initial_upload ? vk::ImageLayout::eUndefined
+                                        : vk::ImageLayout::eShaderReadOnlyOptimal,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = range,
+        };
+        cmdbuf.pipelineBarrier(initial_upload ? vk::PipelineStageFlagBits::eTopOfPipe
+                                              : vk::PipelineStageFlagBits::eFragmentShader,
+                               vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, to_transfer);
+
+        const vk::BufferImageCopy copy = {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {width, height, 1},
+        };
+        cmdbuf.copyBufferToImage(staging_buffer, image, vk::ImageLayout::eTransferDstOptimal,
+                                 copy);
+
+        const vk::ImageMemoryBarrier to_shader = {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = range,
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {},
+                               to_shader);
+    });
+    scheduler.Finish();
+    vmaDestroyBuffer(instance.GetAllocator(), staging_buffer, staging_allocation);
+}
+
 void RendererVulkan::CreateOverlayFont() {
     vk::Device device = instance.GetDevice();
     OverlayFont::Initialize();
@@ -649,85 +738,7 @@ void RendererVulkan::CreateOverlayFont() {
     };
     overlay_font_sampler = device.createSampler(sampler_info);
 
-    const vk::DeviceSize atlas_size = OverlayFont::AtlasSize();
-    const vk::BufferCreateInfo staging_info = {
-        .size = atlas_size,
-        .usage = vk::BufferUsageFlagBits::eTransferSrc,
-    };
-    const VmaAllocationCreateInfo staging_alloc_info = {
-        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
-                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-    };
-    VkBuffer unsafe_staging{};
-    VmaAllocation staging_allocation{};
-    VmaAllocationInfo staging_mapped{};
-    VkBufferCreateInfo unsafe_staging_info = static_cast<VkBufferCreateInfo>(staging_info);
-    result = vmaCreateBuffer(instance.GetAllocator(), &unsafe_staging_info, &staging_alloc_info,
-                             &unsafe_staging, &staging_allocation, &staging_mapped);
-    if (result != VK_SUCCESS) [[unlikely]] {
-        LOG_CRITICAL(Render_Vulkan, "Failed allocating overlay font staging buffer with error {}",
-                     result);
-        UNREACHABLE();
-    }
-    std::memcpy(staging_mapped.pMappedData, OverlayFont::AtlasData(), atlas_size);
-    vk::Buffer staging_buffer{unsafe_staging};
-
-    renderpass_cache.EndRendering();
-    scheduler.Record([image = overlay_font_image, staging_buffer,
-                      width = atlas_width, height = atlas_height](vk::CommandBuffer cmdbuf) {
-        const vk::ImageSubresourceRange range = {
-            .aspectMask = vk::ImageAspectFlagBits::eColor,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        };
-        const vk::ImageMemoryBarrier to_transfer = {
-            .srcAccessMask = vk::AccessFlagBits::eNone,
-            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .oldLayout = vk::ImageLayout::eUndefined,
-            .newLayout = vk::ImageLayout::eTransferDstOptimal,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = image,
-            .subresourceRange = range,
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
-                               vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, to_transfer);
-
-        const vk::BufferImageCopy copy = {
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource{
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .imageOffset = {0, 0, 0},
-            .imageExtent = {width, height, 1},
-        };
-        cmdbuf.copyBufferToImage(staging_buffer, image, vk::ImageLayout::eTransferDstOptimal,
-                                 copy);
-
-        const vk::ImageMemoryBarrier to_shader = {
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
-            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = image,
-            .subresourceRange = range,
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                               vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {},
-                               to_shader);
-    });
-    scheduler.Finish();
-    vmaDestroyBuffer(instance.GetAllocator(), staging_buffer, staging_allocation);
+    UploadOverlayFontAtlas(true);
 
     const vk::DescriptorSetLayoutBinding binding = {
         .binding = 0,
@@ -2044,7 +2055,42 @@ std::string IconUtf8(u32 codepoint) {
     AppendUtf8(out, codepoint);
     return out;
 }
+
+void AppendTextCodepoints(std::vector<u32>& out, std::string_view text) {
+    std::size_t offset = 0;
+    u32 codepoint = 0;
+    while (DecodeNextUtf8(text, offset, codepoint)) {
+        out.push_back(codepoint);
+    }
+}
+
+std::vector<u32> CollectMenuTextCodepoints(const VideoCore::OverlayMenuState& state) {
+    std::vector<u32> codepoints;
+    AppendTextCodepoints(codepoints, state.title);
+    AppendTextCodepoints(codepoints, state.hint);
+    for (const auto& tab : state.tabs) {
+        AppendTextCodepoints(codepoints, tab.label);
+        AppendTextCodepoints(codepoints, tab.icon);
+    }
+    for (const auto& item : state.items) {
+        AppendTextCodepoints(codepoints, item.label);
+        AppendTextCodepoints(codepoints, item.value);
+    }
+    std::sort(codepoints.begin(), codepoints.end());
+    codepoints.erase(std::unique(codepoints.begin(), codepoints.end()), codepoints.end());
+    return codepoints;
+}
 } // namespace
+
+bool RendererVulkan::EnsureOverlayFontGlyphs(const VideoCore::OverlayMenuState& state) {
+    const std::vector<u32> codepoints = CollectMenuTextCodepoints(state);
+    if (!OverlayFont::EnsureCodepoints(codepoints)) {
+        return false;
+    }
+    UploadOverlayFontAtlas(false);
+    LOG_INFO(Render_Vulkan, "Overlay font atlas refreshed for dynamic menu text");
+    return true;
+}
 
 RendererVulkan::OverlayDraw RendererVulkan::PrepareFpsOverlay(
     const Layout::FramebufferLayout& layout) {
@@ -2119,6 +2165,7 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     if (!state.visible) {
         return {};
     }
+    EnsureOverlayFontGlyphs(state);
 
     const float w = static_cast<float>(layout.width);
     const float h = static_cast<float>(layout.height);

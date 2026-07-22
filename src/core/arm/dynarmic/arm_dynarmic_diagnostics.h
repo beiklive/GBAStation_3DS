@@ -19,6 +19,7 @@ struct DynarmicDiagnostics {
     u32 last_optimization_flags{};
     u32 last_hook_hint_instructions{};
     u32 last_always_little_endian{};
+    u32 last_fastmem_enabled{};
     u64 memory_read_callbacks{};
     u64 memory_write_callbacks{};
     u64 memory_exclusive_callbacks{};

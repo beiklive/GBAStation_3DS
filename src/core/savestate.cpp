@@ -50,9 +50,11 @@ static_assert(sizeof(CSTHeader) == 256, "CSTHeader should be 256 bytes");
 #pragma pack(pop)
 
 constexpr std::array<u8, 4> header_magic_bytes{{'C', 'S', 'T', 0x1B}};
-constexpr int save_state_compression_level = 1;
 #ifdef __SWITCH__
+constexpr int save_state_compression_level = -3;
 constexpr std::size_t switch_save_state_stream_buffer_size = 256 * 1024;
+#else
+constexpr int save_state_compression_level = 1;
 #endif
 
 static std::vector<u8> CompressSaveStateData(std::span<const u8> data) {

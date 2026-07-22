@@ -5,6 +5,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include <mcl/bit_cast.hpp>
 
@@ -33,6 +35,16 @@ constexpr u64 DispatcherCacheHitSampleRate = 1024;
 std::atomic<u64> diagnostic_dispatcher_descriptor_sample_write{};
 std::atomic<u64> diagnostic_dispatcher_descriptor_samples_recorded{};
 std::array<std::atomic<u64>, 256> diagnostic_dispatcher_descriptor_samples{};
+
+bool JitFastDispatchEnabled() {
+#ifdef __SWITCH__
+    const char* const value = std::getenv("GBASTATION_SWITCH_JIT_FAST_DISPATCH");
+    return value && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+                     std::strcmp(value, "on") == 0 || std::strcmp(value, "yes") == 0);
+#else
+    return true;
+#endif
+}
 
 void AddDispatcherDescriptorSample(u64 descriptor) {
     const auto index = diagnostic_dispatcher_descriptor_sample_write.fetch_add(
@@ -146,6 +158,13 @@ AddressSpace::AddressSpace(size_t code_cache_size)
 AddressSpace::~AddressSpace() = default;
 
 CodePtr AddressSpace::Get(IR::LocationDescriptor descriptor) {
+    if (!JitFastDispatchEnabled()) {
+        if (const auto iter = block_entries.find(descriptor); iter != block_entries.end()) {
+            return iter->second;
+        }
+        return nullptr;
+    }
+
     const u64 descriptor_value = descriptor.Value();
     const auto cache_index = DispatcherCacheIndex(descriptor_value);
     for (const auto& entry : dispatcher_cache[cache_index]) {
@@ -196,6 +215,10 @@ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
 }
 
 CodePtr AddressSpace::GetOrEmitFastDispatch(IR::LocationDescriptor descriptor) {
+    if (!JitFastDispatchEnabled()) {
+        return GetOrEmit(descriptor);
+    }
+
     diagnostic_fast_dispatch_misses.fetch_add(1, std::memory_order_relaxed);
     const u64 descriptor_value = descriptor.Value();
     const u64 generation = fast_dispatch_generation.load(std::memory_order_relaxed);
@@ -213,6 +236,10 @@ CodePtr AddressSpace::GetOrEmitFastDispatch(IR::LocationDescriptor descriptor) {
 }
 
 void AddressSpace::UpdateFastDispatchEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr) {
+    if (!JitFastDispatchEnabled()) {
+        return;
+    }
+
     const u64 descriptor_value = descriptor.Value();
     const auto index = FastDispatchIndex(descriptor_value);
     auto& set = fast_dispatch_table[index];
@@ -242,6 +269,10 @@ void AddressSpace::UpdateFastDispatchEntry(IR::LocationDescriptor descriptor, Co
 }
 
 void AddressSpace::ClearFastDispatchEntry(IR::LocationDescriptor descriptor) {
+    if (!JitFastDispatchEnabled()) {
+        return;
+    }
+
     const u64 descriptor_value = descriptor.Value();
     auto& set = fast_dispatch_table[FastDispatchIndex(descriptor_value)];
 
@@ -256,6 +287,10 @@ void AddressSpace::ClearFastDispatchEntry(IR::LocationDescriptor descriptor) {
 }
 
 void AddressSpace::UpdateDispatcherCacheEntry(IR::LocationDescriptor descriptor, CodePtr target_ptr) {
+    if (!JitFastDispatchEnabled()) {
+        return;
+    }
+
     const u64 descriptor_value = descriptor.Value();
     auto& set = dispatcher_cache[DispatcherCacheIndex(descriptor_value)];
 
@@ -272,6 +307,10 @@ void AddressSpace::UpdateDispatcherCacheEntry(IR::LocationDescriptor descriptor,
 }
 
 void AddressSpace::ClearDispatcherCacheEntry(IR::LocationDescriptor descriptor) {
+    if (!JitFastDispatchEnabled()) {
+        return;
+    }
+
     const u64 descriptor_value = descriptor.Value();
     auto& set = dispatcher_cache[DispatcherCacheIndex(descriptor_value)];
 
@@ -364,7 +403,8 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
             c.B(prelude_info.return_to_dispatcher);
             break;
         case LinkTarget::FastDispatch:
-            c.B(prelude_info.fast_dispatch);
+            c.B(JitFastDispatchEnabled() ? prelude_info.fast_dispatch
+                                         : prelude_info.return_to_dispatcher);
             break;
         case LinkTarget::ReturnFromRunCode:
             c.B(prelude_info.return_from_run_code);

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstddef>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -42,6 +43,9 @@ extern const unsigned char kAtlas[kAtlasWidth * kAtlasHeight];
 // Builds a larger atlas from Switch shared fonts when available. The generated Roboto ASCII atlas
 // above remains the fallback for non-Switch builds or font-loading failures.
 bool Initialize();
+// Rebuilds the runtime atlas with any missing codepoints. Returns true when the atlas changed and
+// the renderer should upload it again.
+bool EnsureCodepoints(const std::vector<u32>& codepoints);
 void Shutdown();
 
 int AtlasWidth();

@@ -47,6 +47,7 @@ std::atomic<u64> dynarmic_last_code_cache_size{};
 std::atomic<u32> dynarmic_last_optimization_flags{};
 std::atomic<u32> dynarmic_last_hook_hint_instructions{};
 std::atomic<u32> dynarmic_last_always_little_endian{};
+std::atomic<u32> dynarmic_last_fastmem_enabled{};
 std::atomic<u64> dynarmic_memory_read_callbacks{};
 std::atomic<u64> dynarmic_memory_write_callbacks{};
 std::atomic<u64> dynarmic_memory_exclusive_callbacks{};
@@ -73,6 +74,7 @@ DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
         .last_optimization_flags = dynarmic_last_optimization_flags.load(),
         .last_hook_hint_instructions = dynarmic_last_hook_hint_instructions.load(),
         .last_always_little_endian = dynarmic_last_always_little_endian.load(),
+        .last_fastmem_enabled = dynarmic_last_fastmem_enabled.load(),
         .memory_read_callbacks = dynarmic_memory_read_callbacks.exchange(0),
         .memory_write_callbacks = dynarmic_memory_write_callbacks.exchange(0),
         .memory_exclusive_callbacks = dynarmic_memory_exclusive_callbacks.exchange(0),
@@ -494,6 +496,7 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
     dynarmic_last_optimization_flags.store(static_cast<u32>(config.optimizations));
     dynarmic_last_hook_hint_instructions.store(config.hook_hint_instructions ? 1u : 0u);
     dynarmic_last_always_little_endian.store(config.always_little_endian ? 1u : 0u);
+    dynarmic_last_fastmem_enabled.store(config.fastmem_pointer ? 1u : 0u);
     LOG_INFO(Core_ARM11,
              "Switch Dynarmic config: core={} optimizations=0x{:x} hook_hints={} little_endian={} code_cache={} fastmem={}",
              GetID(), static_cast<unsigned>(config.optimizations),

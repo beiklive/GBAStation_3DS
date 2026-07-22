@@ -4,6 +4,7 @@
 
 #include <array>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <boost/serialization/array.hpp>
 #include <boost/serialization/binary_object.hpp>
@@ -45,6 +46,18 @@ constexpr u32 SIGSEGV = 11;
 #endif
 
 namespace Memory {
+
+#ifdef __SWITCH__
+namespace {
+
+bool SwitchFastmemEnabled() {
+    const char* const value = std::getenv("GBASTATION_SWITCH_FASTMEM");
+    return value && (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+                     std::strcmp(value, "on") == 0 || std::strcmp(value, "yes") == 0);
+}
+
+} // namespace
+#endif
 
 PageTable::PageTable() = default;
 
@@ -444,6 +457,9 @@ std::shared_ptr<PageTable> MemorySystem::GetCurrentPageTable() const {
 
 #ifdef __SWITCH__
 std::optional<uintptr_t> MemorySystem::GetSwitchFastmemPointer(PageTable& page_table) {
+    if (!SwitchFastmemEnabled()) {
+        return std::nullopt;
+    }
     if (!page_table.fastmem_arena) {
         page_table.fastmem_arena = std::make_unique<SwitchFastmemArena>(page_table);
     }

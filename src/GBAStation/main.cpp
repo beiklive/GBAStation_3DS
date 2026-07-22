@@ -90,6 +90,8 @@ constexpr const char* StderrLogPath = "sdmc:/GBAStation/3ds/debug/stderr.txt";
 constexpr const char* FallbackRomPath = "sdmc:/GBAStation/3ds/games/3Dlandchs.cci";
 constexpr const char* MemMapLogPath = "sdmc:/GBAStation/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
+constexpr const char* SwitchFastmemEnv = "GBASTATION_SWITCH_FASTMEM";
+constexpr const char* SwitchJitFastDispatchEnv = "GBASTATION_SWITCH_JIT_FAST_DISPATCH";
 
 struct LaunchOptions {
     std::string rom_path;
@@ -876,6 +878,8 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
 
 void ConfigureSettings() {
     Settings::RestoreGlobalState(false);
+    setenv(SwitchFastmemEnv, "0", 1);
+    setenv(SwitchJitFastDispatchEnv, "0", 1);
     Settings::values.use_cpu_jit.SetValue(true);
     Settings::values.cpu_clock_percentage.SetValue(100);
     Settings::values.is_new_3ds.SetValue(true);
@@ -1087,6 +1091,28 @@ bool ParseConfigBool(std::string_view value, bool fallback) {
         return false;
     }
     return fallback;
+}
+
+bool ApplySwitchFastmemConfig() {
+    using SwitchFrontend::GBAStationConfig::GetConfigValue;
+    std::string configured = GetConfigValue("switch_fastmem");
+    if (configured.empty()) {
+        configured = GetConfigValue("dynarmic_fastmem");
+    }
+    const bool enabled = ParseConfigBool(configured, false);
+    setenv(SwitchFastmemEnv, enabled ? "1" : "0", 1);
+    return enabled;
+}
+
+bool ApplySwitchJitFastDispatchConfig() {
+    using SwitchFrontend::GBAStationConfig::GetConfigValue;
+    std::string configured = GetConfigValue("switch_jit_fast_dispatch");
+    if (configured.empty()) {
+        configured = GetConfigValue("dynarmic_fast_dispatch");
+    }
+    const bool enabled = ParseConfigBool(configured, false);
+    setenv(SwitchJitFastDispatchEnv, enabled ? "1" : "0", 1);
+    return enabled;
 }
 
 std::string FormatFloat(float value) {
@@ -1312,6 +1338,8 @@ int Run(int argc, char** argv) {
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
     SwitchFrontend::GBAStationConfig::ApplyConfig();
+    const bool switch_fastmem_enabled = ApplySwitchFastmemConfig();
+    const bool switch_jit_fast_dispatch_enabled = ApplySwitchJitFastDispatchConfig();
     ApplyConfiguredDisplayDefaults(launch_options.display_settings,
                                    !launch_options.display_settings_from_game_db,
                                    !launch_options.display_settings_from_game_db);
@@ -1323,14 +1351,16 @@ int Run(int argc, char** argv) {
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
              launch_options.display_settings_from_game_db ? 1 : 0,
              launch_options.display_settings.internal_resolution,
              Settings::values.resolution_factor.GetValue(),
-             Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0);
+             Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
+             switch_fastmem_enabled ? 1 : 0,
+             switch_jit_fast_dispatch_enabled ? 1 : 0);
     StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
     FileUtil::SetUserPath(std::string{SystemDir} + "/");
     StartupLog("Run: Common::Log init");
@@ -1959,7 +1989,7 @@ int Run(int argc, char** argv) {
                            : 0;
             };
             const auto stats = system.GetAndResetPerfStats();
-            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f svc_ipc=%llu svc_unimpl=%llu svc_last_unimpl=0x%04x mvd_calls=%llu mvd_unimpl=%llu runloop_avg_ms=%.2f runloop_max_ms=%.2f rl_calls=%llu rl_active=%llu rl_idle=%llu rl_delayed=%llu rl_sync=%llu rl_resched=%llu rl_ticks=%llu rl_ticks_avg=%.1f rl_delay_avg=%.1f rl_slice_avg=%.1f rl_epc_samples=%llu rl_epc0=0x%08x/0x%08x:%llu rl_epc1=0x%08x/0x%08x:%llu rl_epc2=0x%08x/0x%08x:%llu rl_epc3=0x%08x/0x%08x:%llu rl_ecode0=%08x,%08x,%08x,%08x rl_ecode1=%08x,%08x,%08x,%08x rl_elrctx0=%08x,%08x,%08x,%08x rl_elrctx1=%08x,%08x,%08x,%08x rl_xpc_samples=%llu rl_xpc0=0x%08x:%llu rl_xpc1=0x%08x:%llu rl_xpc2=0x%08x:%llu rl_xpc3=0x%08x:%llu rl_xcode0=%08x,%08x,%08x,%08x rl_xcode1=%08x,%08x,%08x,%08x pending_compilations=%zu jit_new=%llu jit_icache_clear=%llu jit_inv=%llu jit_inv_kb=%.1f jit_cache_mb=%.1f jit_opt=0x%08x jit_hook_hints=%u jit_little=%u jit_mem_r=%llu jit_mem_w=%llu jit_mem_x=%llu jit_mem_code=%llu jit_fd_miss=%llu jit_fd_update=%llu jit_fd_clear=%llu jit_fd_false=%llu jit_disp_hit=%llu jit_disp_miss=%llu jit_disp_collision=%llu jit_disp0=0x%08llx:%llu jit_disp1=0x%08llx:%llu jit_disp2=0x%08llx:%llu jit_disp3=0x%08llx:%llu jit_dcode0=%08x,%08x,%08x,%08x jit_dcode1=%08x,%08x,%08x,%08x jit_mem_last_r=0x%08x jit_mem_last_w=0x%08x dsp_ticks=%llu dsp_irq=%llu dsp_active_avg=%.1f dsp_active_max=%llu dsp_ms=%.2f dsp_gen_ms=%.2f dsp_out_ms=%.2f timing_advances=%llu timing_events=%llu timing_top=%s timing_top_count=%llu tw_sched=%llu tw_fire=%llu tw_forever=%llu tw_top_id=0x%08x tw_top_core=%u tw_top_name=%s tw_top_status=%s tw_top_count=%llu tw_avg_us=%.1f tw_min_us=%.1f tw_max_us=%.1f tw_le100us=%llu tw_le500us=%llu tw_le1ms=%llu tw_le2ms=%llu tw_le5ms=%llu tw_le16ms=%llu tw_gt16ms=%llu tw_st_sleep=%llu tw_st_any=%llu tw_st_all=%llu tw_st_hle=%llu tw_st_arb=%llu tw_src_generic=%llu tw_src_sleep=%llu tw_src_wait1=%llu tw_src_waitn_all=%llu tw_src_waitn_any=%llu tw_src_hle_sleep=%llu tw_src_hle_async=%llu tw_src_hle_thread=%llu tw_src_arb=%llu tw_src_appmain=%llu tw_src_ipc=%llu timing_slice_avg=%.1f timing_slice_min=%lld timing_slice_max=%lld timing_short_pct=%.1f timing_idle_pct=%.1f gpu_display=%llu gpu_display_sw=%llu gpu_display_mb=%.2f gpu_texcopy=%llu gpu_texcopy_sw=%llu gpu_texcopy_mb=%.2f y2r=%llu y2r_direct=%llu y2r_fallback=%llu y2r_pixels=%llu y2r_direct_pixels=%llu y2r_ms=%.2f y2r_direct_ms=%.2f y2r_fallback_ms=%.2f y2r_flush=%llu y2r_flush_inv=%llu y2r_flush_mb=%.2f y2r_flush_ms=%.2f y2r_dir_fmt=%u/%u y2r_dir_rot=%u y2r_dir_block=%u y2r_dir_size=%ux%u y2r_dir_dst=%u+%u y2r_fb_fmt=%u/%u y2r_fb_rot=%u y2r_fb_block=%u y2r_fb_size=%ux%u y2r_fb_dma=y%u+%u,u%u+%u,v%u+%u,yuyv%u+%u,dst%u+%u powered=%d applet=%d keepalives=%llu",
+            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f svc_ipc=%llu svc_unimpl=%llu svc_last_unimpl=0x%04x mvd_calls=%llu mvd_unimpl=%llu runloop_avg_ms=%.2f runloop_max_ms=%.2f rl_calls=%llu rl_active=%llu rl_idle=%llu rl_delayed=%llu rl_sync=%llu rl_resched=%llu rl_ticks=%llu rl_ticks_avg=%.1f rl_delay_avg=%.1f rl_slice_avg=%.1f rl_epc_samples=%llu rl_epc0=0x%08x/0x%08x:%llu rl_epc1=0x%08x/0x%08x:%llu rl_epc2=0x%08x/0x%08x:%llu rl_epc3=0x%08x/0x%08x:%llu rl_ecode0=%08x,%08x,%08x,%08x rl_ecode1=%08x,%08x,%08x,%08x rl_elrctx0=%08x,%08x,%08x,%08x rl_elrctx1=%08x,%08x,%08x,%08x rl_xpc_samples=%llu rl_xpc0=0x%08x:%llu rl_xpc1=0x%08x:%llu rl_xpc2=0x%08x:%llu rl_xpc3=0x%08x:%llu rl_xcode0=%08x,%08x,%08x,%08x rl_xcode1=%08x,%08x,%08x,%08x pending_compilations=%zu jit_new=%llu jit_icache_clear=%llu jit_inv=%llu jit_inv_kb=%.1f jit_cache_mb=%.1f jit_opt=0x%08x jit_hook_hints=%u jit_little=%u jit_fastmem=%u jit_mem_r=%llu jit_mem_w=%llu jit_mem_x=%llu jit_mem_code=%llu jit_fd_miss=%llu jit_fd_update=%llu jit_fd_clear=%llu jit_fd_false=%llu jit_disp_hit=%llu jit_disp_miss=%llu jit_disp_collision=%llu jit_disp0=0x%08llx:%llu jit_disp1=0x%08llx:%llu jit_disp2=0x%08llx:%llu jit_disp3=0x%08llx:%llu jit_dcode0=%08x,%08x,%08x,%08x jit_dcode1=%08x,%08x,%08x,%08x jit_mem_last_r=0x%08x jit_mem_last_w=0x%08x dsp_ticks=%llu dsp_irq=%llu dsp_active_avg=%.1f dsp_active_max=%llu dsp_ms=%.2f dsp_gen_ms=%.2f dsp_out_ms=%.2f timing_advances=%llu timing_events=%llu timing_top=%s timing_top_count=%llu tw_sched=%llu tw_fire=%llu tw_forever=%llu tw_top_id=0x%08x tw_top_core=%u tw_top_name=%s tw_top_status=%s tw_top_count=%llu tw_avg_us=%.1f tw_min_us=%.1f tw_max_us=%.1f tw_le100us=%llu tw_le500us=%llu tw_le1ms=%llu tw_le2ms=%llu tw_le5ms=%llu tw_le16ms=%llu tw_gt16ms=%llu tw_st_sleep=%llu tw_st_any=%llu tw_st_all=%llu tw_st_hle=%llu tw_st_arb=%llu tw_src_generic=%llu tw_src_sleep=%llu tw_src_wait1=%llu tw_src_waitn_all=%llu tw_src_waitn_any=%llu tw_src_hle_sleep=%llu tw_src_hle_async=%llu tw_src_hle_thread=%llu tw_src_arb=%llu tw_src_appmain=%llu tw_src_ipc=%llu timing_slice_avg=%.1f timing_slice_min=%lld timing_slice_max=%lld timing_short_pct=%.1f timing_idle_pct=%.1f gpu_display=%llu gpu_display_sw=%llu gpu_display_mb=%.2f gpu_texcopy=%llu gpu_texcopy_sw=%llu gpu_texcopy_mb=%.2f y2r=%llu y2r_direct=%llu y2r_fallback=%llu y2r_pixels=%llu y2r_direct_pixels=%llu y2r_ms=%.2f y2r_direct_ms=%.2f y2r_fallback_ms=%.2f y2r_flush=%llu y2r_flush_inv=%llu y2r_flush_mb=%.2f y2r_flush_ms=%.2f y2r_dir_fmt=%u/%u y2r_dir_rot=%u y2r_dir_block=%u y2r_dir_size=%ux%u y2r_dir_dst=%u+%u y2r_fb_fmt=%u/%u y2r_fb_rot=%u y2r_fb_block=%u y2r_fb_size=%ux%u y2r_fb_dma=y%u+%u,u%u+%u,v%u+%u,yuyv%u+%u,dst%u+%u powered=%d applet=%d keepalives=%llu",
                          static_cast<unsigned long long>(loop_count), loops_per_sec,
                          renderer_frame, frame_delta, frontend_fps, stats.system_fps,
                          stats.game_fps, stats.emulation_speed, stats.time_hle_svc * 1000.0,
@@ -2022,6 +2052,7 @@ int Run(int argc, char** argv) {
                          dynarmic_stats.last_optimization_flags,
                          dynarmic_stats.last_hook_hint_instructions,
                          dynarmic_stats.last_always_little_endian,
+                         dynarmic_stats.last_fastmem_enabled,
                          static_cast<unsigned long long>(dynarmic_stats.memory_read_callbacks),
                          static_cast<unsigned long long>(dynarmic_stats.memory_write_callbacks),
                          static_cast<unsigned long long>(

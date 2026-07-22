@@ -25,8 +25,8 @@
 namespace Vulkan::OverlayFont {
 namespace {
 
-constexpr int RuntimeAtlasWidth = 1024;
-constexpr int RuntimeAtlasHeight = 1024;
+constexpr int RuntimeAtlasWidth = 2048;
+constexpr int RuntimeAtlasHeight = 2048;
 constexpr float RuntimeBakePixelHeight = 32.0f;
 constexpr std::array<u32, 7> MaterialIconCodepoints{{
     0xE5C4, // keyboard_return
@@ -65,6 +65,7 @@ struct RuntimeAtlas {
 };
 
 RuntimeAtlas runtime;
+std::vector<u32> dynamic_text_codepoints;
 
 const Glyph& StaticGlyphFor(u32 codepoint) {
     const int index = codepoint < kFirstChar || codepoint > kLastChar
@@ -290,13 +291,23 @@ bool PackCodepoints(stbtt_pack_context& context, const std::vector<unsigned char
         return false;
     }
 
+    stbtt_fontinfo info{};
+    if (!stbtt_InitFont(&info, font_data.data(), stbtt_GetFontOffsetForIndex(font_data.data(), 0))) {
+        return false;
+    }
+
     std::vector<int> stb_codepoints;
     stb_codepoints.reserve(codepoints.size());
     for (u32 cp : codepoints) {
-        stb_codepoints.push_back(static_cast<int>(cp));
+        if (stbtt_FindGlyphIndex(&info, static_cast<int>(cp)) != 0) {
+            stb_codepoints.push_back(static_cast<int>(cp));
+        }
+    }
+    if (stb_codepoints.empty()) {
+        return false;
     }
 
-    std::vector<stbtt_packedchar> chars(codepoints.size());
+    std::vector<stbtt_packedchar> chars(stb_codepoints.size());
     stbtt_pack_range range{};
     range.font_size = RuntimeBakePixelHeight;
     range.array_of_unicode_codepoints = stb_codepoints.data();
@@ -307,8 +318,11 @@ bool PackCodepoints(stbtt_pack_context& context, const std::vector<unsigned char
         return false;
     }
 
-    for (std::size_t i = 0; i < codepoints.size(); ++i) {
+    for (std::size_t i = 0; i < stb_codepoints.size(); ++i) {
         const stbtt_packedchar& ch = chars[i];
+        if (ch.x0 == ch.x1 || ch.y0 == ch.y1) {
+            continue;
+        }
         Glyph glyph{};
         glyph.u0 = static_cast<float>(ch.x0) / RuntimeAtlasWidth;
         glyph.v0 = static_cast<float>(ch.y0) / RuntimeAtlasHeight;
@@ -319,18 +333,14 @@ bool PackCodepoints(stbtt_pack_context& context, const std::vector<unsigned char
         glyph.w = ch.xoff2 - ch.xoff;
         glyph.h = ch.yoff2 - ch.yoff;
         glyph.xadvance = ch.xadvance;
-        out[codepoints[i]] = glyph;
+        out[static_cast<u32>(stb_codepoints[i])] = glyph;
     }
     return true;
 }
 
 } // namespace
 
-bool Initialize() {
-    if (runtime.ready) {
-        return true;
-    }
-
+bool RebuildRuntimeAtlas() {
     std::vector<unsigned char> font_data = LoadSwitchChineseFont();
     if (font_data.empty()) {
         return false;
@@ -363,8 +373,15 @@ bool Initialize() {
     stbtt_PackSetOversampling(&context, 1, 1);
     stbtt_PackSetSkipMissingCodepoints(&context, 1);
 
-    const bool text_ok =
-        PackCodepoints(context, font_data, BuildTextCodepoints(), next.ascent, next.glyphs);
+    std::vector<u32> text_codepoints = BuildTextCodepoints();
+    text_codepoints.insert(text_codepoints.end(), dynamic_text_codepoints.begin(),
+                           dynamic_text_codepoints.end());
+    std::sort(text_codepoints.begin(), text_codepoints.end());
+    text_codepoints.erase(std::unique(text_codepoints.begin(), text_codepoints.end()),
+                          text_codepoints.end());
+
+    const bool text_ok = PackCodepoints(context, font_data, text_codepoints, next.ascent,
+                                        next.glyphs);
 
     std::vector<unsigned char> material_font = LoadMaterialFont();
     if (!material_font.empty()) {
@@ -398,8 +415,42 @@ bool Initialize() {
     return true;
 }
 
+bool Initialize() {
+    if (runtime.ready) {
+        return true;
+    }
+    return RebuildRuntimeAtlas();
+}
+
+bool EnsureCodepoints(const std::vector<u32>& codepoints) {
+    if (!Initialize()) {
+        return false;
+    }
+
+    bool missing = false;
+    for (u32 cp : codepoints) {
+        if (cp < 32) {
+            continue;
+        }
+        if (runtime.glyphs.find(cp) == runtime.glyphs.end()) {
+            dynamic_text_codepoints.push_back(cp);
+            missing = true;
+        }
+    }
+    if (!missing) {
+        return false;
+    }
+
+    std::sort(dynamic_text_codepoints.begin(), dynamic_text_codepoints.end());
+    dynamic_text_codepoints.erase(
+        std::unique(dynamic_text_codepoints.begin(), dynamic_text_codepoints.end()),
+        dynamic_text_codepoints.end());
+    return RebuildRuntimeAtlas();
+}
+
 void Shutdown() {
     runtime = {};
+    dynamic_text_codepoints.clear();
 }
 
 int AtlasWidth() {
