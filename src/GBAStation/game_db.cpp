@@ -11,6 +11,7 @@
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
+#include <vector>
 
 #include <json.hpp>
 
@@ -168,6 +169,19 @@ std::string CurrentTimestamp() {
     return text;
 }
 
+std::string StemFromPath(const std::string& path) {
+    std::string normalized = path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    const std::size_t slash = normalized.find_last_of('/');
+    const std::size_t begin = slash == std::string::npos ? 0 : slash + 1;
+    const std::size_t dot = normalized.find_last_of('.');
+    const std::size_t end = dot == std::string::npos || dot < begin ? normalized.size() : dot;
+    if (end <= begin) {
+        return "game";
+    }
+    return normalized.substr(begin, end - begin);
+}
+
 bool LoadWritableDatabase(nlohmann::json& data, const char*& target_path) {
     data = nlohmann::json::array();
     target_path = DatabasePaths.front();
@@ -228,6 +242,54 @@ bool SaveDisplaySettings(const std::string& rom_path, const std::string& title,
     const bool saved = WriteDatabase(target_path, data);
     LOG_INFO(Frontend, "3DS GameDB display settings save {} path={}", saved ? "ok" : "failed",
              target_path);
+    return saved;
+}
+
+bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& title,
+                             const GBAStationDisplaySettings& settings,
+                             const std::string& logo_path) {
+    const char* target_path = nullptr;
+    nlohmann::json data;
+    LoadWritableDatabase(data, target_path);
+    auto& item = FindOrCreateRecord(data, rom_path, title.empty() ? StemFromPath(rom_path) : title);
+    item["path"] = rom_path;
+    item["title"] = title.empty() ? StemFromPath(rom_path) : title;
+    item["platform"] = 7;
+    if (!logo_path.empty()) {
+        item["logoPath"] = logo_path;
+    } else if (item.value("logoPath", "").empty()) {
+        item["logoPath"] = "romfs:/img/ui/3ds.png";
+    }
+    item["core"] = item.value("core", "");
+    item["playCount"] = item.value("playCount", 0);
+    item["playTime"] = item.value("playTime", 0);
+    item["lastPlayed"] = CurrentTimestamp();
+    item["crc32"] = item.value("crc32", 0);
+    item["favourite"] = item.value("favourite", false);
+    item["screenShotPath"] = item.value("screenShotPath", "");
+    item["cheatPath"] = item.value("cheatPath", "");
+    item["shaderPath"] = item.value("shaderPath", "");
+    item["shaderEnabled"] = item.value("shaderEnabled", false);
+    item["displayMode"] = item.value("displayMode", 0);
+    item["integerAspectRatio"] = item.value("integerAspectRatio", 1.0f);
+    item["customScale"] = item.value("customScale", 1.0f);
+    item["customOffsetX"] = item.value("customOffsetX", 0.0f);
+    item["customOffsetY"] = item.value("customOffsetY", 0.0f);
+    item["NdsShaderType"] = item.value("NdsShaderType", "");
+    item["shaderParaPath"] = item.value("shaderParaPath", "");
+    item["shaderParaNames"] = item.value("shaderParaNames", std::vector<std::string>{});
+    item["shaderParaValues"] = item.value("shaderParaValues", std::vector<float>{});
+    if (item.value("savePath", "").empty()) {
+        const std::string stem = StemFromPath(rom_path);
+        item["savePath"] = "sdmc:/GBAStation/save/3DS/" + stem;
+        mkdir("sdmc:/GBAStation/save", 0777);
+        mkdir("sdmc:/GBAStation/save/3DS", 0777);
+        mkdir(item["savePath"].get<std::string>().c_str(), 0777);
+    }
+    WriteAllDisplaySettings(item, settings);
+    const bool saved = WriteDatabase(target_path, data);
+    LOG_INFO(Frontend, "3DS GameDB installed title save {} path={} title={} db={}",
+             saved ? "ok" : "failed", rom_path, title, target_path);
     return saved;
 }
 

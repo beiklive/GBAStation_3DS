@@ -137,6 +137,7 @@ target_link_libraries(gbastation PRIVATE
     network
     input_common
     json-headers
+    lodepng
     tsl::robin_map
     ${PLATFORM_LIBRARIES}
     Threads::Threads

@@ -15,13 +15,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <exception>
 #include <fcntl.h>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 #include "audio_core/input_details.h"
@@ -40,17 +45,21 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+#include "common/zstd_compression.h"
 #include "core/arm/dynarmic/arm_dynarmic_diagnostics.h"
 #include "core/cheats/cheat_base.h"
 #include "core/cheats/cheats.h"
 #include "core/core.h"
+#include "core/file_sys/cia_container.h"
 #include "core/loader/loader.h"
+#include "core/loader/smdh.h"
 #include "core/memory.h"
 #include "core/movie.h"
 #include "core/savestate.h"
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/image_interface.h"
 #include "core/hle/kernel/thread.h"
+#include "core/hle/service/am/am.h"
 #include "core/hw/y2r.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/service.h"
@@ -59,6 +68,9 @@
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
+
+#include <imstb_truetype.h>
+#include <lodepng.h>
 
 extern "C" {
 u32 __nx_applet_type = AppletType_Application;
@@ -100,6 +112,7 @@ struct LaunchOptions {
     std::string return_nro_path{LauncherPath};
     bool return_to_nro{true};
     bool display_settings_from_game_db{};
+    bool install_cia_mode{};
 };
 #if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
 constexpr bool DiagnosticLogsEnabled = true;
@@ -830,6 +843,838 @@ std::string TitleFromPath(std::string_view path) {
     return std::string{path.substr(begin, end - begin)};
 }
 
+enum class CiaTitleKind {
+    Application,
+    Demo,
+    Update,
+    AddOnContent,
+    System,
+    Other,
+};
+
+struct CiaBrowserEntry {
+    enum class Type {
+        Parent,
+        Directory,
+        Cia,
+    };
+
+    Type type{Type::Cia};
+    std::string name;
+    std::string path;
+    u64 program_id{};
+    u16 version{};
+    u64 size{};
+    CiaTitleKind kind{CiaTitleKind::Other};
+    bool compressed{};
+    bool readable{};
+};
+
+struct CiaInstallState {
+    std::atomic_bool active{false};
+    std::atomic_bool done{false};
+    std::atomic_size_t written{0};
+    std::atomic_size_t total{0};
+    Service::AM::InstallStatus result{Service::AM::InstallStatus::ErrorInvalid};
+    std::string source_path;
+    std::string installed_path;
+    std::string title;
+    std::string message;
+    bool success{};
+};
+
+struct CiaInstallMetadata {
+    std::string title;
+    std::vector<u8> icon_rgba;
+};
+
+std::vector<u32> DecodeUtf8Text(std::string_view text) {
+    std::vector<u32> output;
+    for (std::size_t i = 0; i < text.size();) {
+        const u8 c = static_cast<u8>(text[i]);
+        u32 codepoint = c;
+        std::size_t length = 1;
+        if ((c & 0xE0) == 0xC0 && i + 1 < text.size()) {
+            codepoint = ((c & 0x1F) << 6) | (static_cast<u8>(text[i + 1]) & 0x3F);
+            length = 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < text.size()) {
+            codepoint = ((c & 0x0F) << 12) |
+                        ((static_cast<u8>(text[i + 1]) & 0x3F) << 6) |
+                        (static_cast<u8>(text[i + 2]) & 0x3F);
+            length = 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < text.size()) {
+            codepoint = ((c & 0x07) << 18) |
+                        ((static_cast<u8>(text[i + 1]) & 0x3F) << 12) |
+                        ((static_cast<u8>(text[i + 2]) & 0x3F) << 6) |
+                        (static_cast<u8>(text[i + 3]) & 0x3F);
+            length = 4;
+        }
+        output.push_back(codepoint);
+        i += length;
+    }
+    return output;
+}
+
+std::string CleanSmdhTitle(const std::array<char16_t, 0x80>& raw) {
+    std::size_t length = 0;
+    while (length < raw.size() && raw[length] != 0) {
+        ++length;
+    }
+    std::string title = Common::UTF16ToUTF8(std::u16string{raw.data(), length});
+    for (char& ch : title) {
+        if (ch == '\n' || ch == '\r' || ch == '\t') {
+            ch = ' ';
+        }
+    }
+    while (!title.empty() && title.back() == ' ') {
+        title.pop_back();
+    }
+    return title;
+}
+
+std::string StemFromPath(std::string_view path) {
+    const std::size_t slash = path.find_last_of("/\\");
+    const std::size_t begin = slash == std::string_view::npos ? 0 : slash + 1;
+    const std::size_t dot = path.find_last_of('.');
+    const std::size_t end = dot == std::string_view::npos || dot < begin ? path.size() : dot;
+    return end <= begin ? std::string{"Nintendo 3DS"} : std::string{path.substr(begin, end - begin)};
+}
+
+std::string DefaultInstalledSavePath(const std::string& rom_path) {
+    return "sdmc:/GBAStation/save/3DS/" + StemFromPath(rom_path);
+}
+
+u32 Rgb565ToRgba8888(u16 color) {
+    const u8 r = static_cast<u8>((((color >> 11) & 0x1F) << 3) | (((color >> 11) & 0x1F) >> 2));
+    const u8 g = static_cast<u8>((((color >> 5) & 0x3F) << 2) | (((color >> 5) & 0x3F) >> 4));
+    const u8 b = static_cast<u8>(((color & 0x1F) << 3) | ((color & 0x1F) >> 2));
+    return static_cast<u32>(r) | (static_cast<u32>(g) << 8) | (static_cast<u32>(b) << 16) |
+           (0xFFu << 24);
+}
+
+CiaTitleKind ClassifyCiaTitle(u64 program_id) {
+    constexpr u64 high_mask = 0xFFFFFFFF00000000ULL;
+    switch (program_id & high_mask) {
+    case 0x0004000000000000ULL:
+        return CiaTitleKind::Application;
+    case 0x0004000200000000ULL:
+        return CiaTitleKind::Demo;
+    case 0x0004000E00000000ULL:
+        return CiaTitleKind::Update;
+    case 0x0004008C00000000ULL:
+        return CiaTitleKind::AddOnContent;
+    default:
+        break;
+    }
+    return Service::AM::GetTitleMediaType(program_id) == Service::FS::MediaType::NAND
+               ? CiaTitleKind::System
+               : CiaTitleKind::Other;
+}
+
+const char* CiaTitleKindName(CiaTitleKind kind) {
+    switch (kind) {
+    case CiaTitleKind::Application:
+        return "游戏";
+    case CiaTitleKind::Demo:
+        return "试玩";
+    case CiaTitleKind::Update:
+        return "更新";
+    case CiaTitleKind::AddOnContent:
+        return "DLC";
+    case CiaTitleKind::System:
+        return "系统";
+    default:
+        return "其他";
+    }
+}
+
+bool ShouldAddCiaToGameDb(CiaTitleKind kind) {
+    return kind == CiaTitleKind::Application || kind == CiaTitleKind::Demo;
+}
+
+std::string FormatTitleVersion(u16 version) {
+    char buffer[64]{};
+    std::snprintf(buffer, sizeof(buffer), "v%u.%u.%u (%u)", (version >> 10) & 0x3F,
+                  (version >> 4) & 0x3F, version & 0xF, version);
+    return buffer;
+}
+
+std::string FormatBytes(u64 size) {
+    char buffer[64]{};
+    if (size >= 1024ULL * 1024ULL * 1024ULL) {
+        std::snprintf(buffer, sizeof(buffer), "%.1f GB",
+                      static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0));
+    } else if (size >= 1024ULL * 1024ULL) {
+        std::snprintf(buffer, sizeof(buffer), "%.1f MB",
+                      static_cast<double>(size) / (1024.0 * 1024.0));
+    } else if (size >= 1024ULL) {
+        std::snprintf(buffer, sizeof(buffer), "%.1f KB",
+                      static_cast<double>(size) / 1024.0);
+    } else {
+        std::snprintf(buffer, sizeof(buffer), "%llu B",
+                      static_cast<unsigned long long>(size));
+    }
+    return buffer;
+}
+
+std::string ParentDirectory(std::string directory) {
+    if (directory.empty() || directory == "sdmc:/") {
+        return {};
+    }
+    while (directory.size() > 6 && directory.back() == '/') {
+        directory.pop_back();
+    }
+    const std::size_t slash = directory.find_last_of('/');
+    if (slash == std::string::npos || slash <= 5) {
+        return "sdmc:/";
+    }
+    return directory.substr(0, slash + 1);
+}
+
+bool IsDirectoryPath(const std::string& path) {
+    struct stat st {};
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool EndsWithCiaExtension(std::string_view name) {
+    return EndsWithNoCase(name, ".cia") || EndsWithNoCase(name, ".zcia");
+}
+
+bool ReadCiaEntry(const std::string& path, CiaBrowserEntry& entry) {
+    std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
+    if (!file->IsOpen()) {
+        return false;
+    }
+    entry.compressed = FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file.get()) !=
+                       std::nullopt;
+    if (entry.compressed) {
+        file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(file));
+    }
+
+    std::vector<u8> header(FileSys::CIA_HEADER_SIZE);
+    if (file->ReadBytes(header.data(), header.size()) != header.size()) {
+        return false;
+    }
+    FileSys::CIAContainer container;
+    if (container.LoadHeader(header) != Loader::ResultStatus::Success) {
+        return false;
+    }
+
+    std::vector<u8> tmd(container.GetTitleMetadataSize());
+    if (file->ReadAtBytes(tmd.data(), tmd.size(), container.GetTitleMetadataOffset()) !=
+            tmd.size() ||
+        container.LoadTitleMetadata(tmd) != Loader::ResultStatus::Success) {
+        return false;
+    }
+
+    entry.program_id = container.GetTitleMetadata().GetTitleID();
+    entry.version = container.GetTitleMetadata().GetTitleVersion();
+    entry.kind = ClassifyCiaTitle(entry.program_id);
+    return true;
+}
+
+CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& fallback) {
+    CiaInstallMetadata metadata;
+    metadata.title = fallback;
+    std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
+    if (!file->IsOpen()) {
+        return metadata;
+    }
+    if (FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file.get()) != std::nullopt) {
+        file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(file));
+    }
+    FileSys::CIAContainer container;
+    if (container.Load(file.get()) != Loader::ResultStatus::Success || !container.GetSMDH()) {
+        return metadata;
+    }
+    const Loader::SMDH& smdh = *container.GetSMDH();
+    const auto try_language = [&smdh](Loader::SMDH::TitleLanguage language) {
+        return CleanSmdhTitle(smdh.GetLongTitle(language));
+    };
+    std::string title = try_language(Loader::SMDH::TitleLanguage::SimplifiedChinese);
+    if (title.empty()) {
+        title = try_language(Loader::SMDH::TitleLanguage::English);
+    }
+    if (title.empty()) {
+        title = try_language(Loader::SMDH::TitleLanguage::Japanese);
+    }
+    if (!title.empty()) {
+        metadata.title = title;
+    }
+    const std::vector<u16> icon = smdh.GetIcon(true);
+    if (icon.size() == 48 * 48) {
+        metadata.icon_rgba.resize(icon.size() * 4);
+        for (std::size_t i = 0; i < icon.size(); ++i) {
+            const u32 rgba = Rgb565ToRgba8888(icon[i]);
+            metadata.icon_rgba[i * 4 + 0] = static_cast<u8>(rgba & 0xFF);
+            metadata.icon_rgba[i * 4 + 1] = static_cast<u8>((rgba >> 8) & 0xFF);
+            metadata.icon_rgba[i * 4 + 2] = static_cast<u8>((rgba >> 16) & 0xFF);
+            metadata.icon_rgba[i * 4 + 3] = 0xFF;
+        }
+    }
+    return metadata;
+}
+
+std::string SaveCiaIconPng(const std::string& save_path, const std::vector<u8>& icon_rgba) {
+    if (icon_rgba.size() != 48 * 48 * 4) {
+        return {};
+    }
+    mkdir("sdmc:/GBAStation/save", 0777);
+    mkdir("sdmc:/GBAStation/save/3DS", 0777);
+    mkdir(save_path.c_str(), 0777);
+    const std::string icon_path = save_path + "/icon.png";
+    const unsigned error = lodepng::encode(icon_path, icon_rgba, 48, 48);
+    if (error != 0) {
+        DebugLog("CIA icon png encode failed path=%s error=%u", icon_path.c_str(), error);
+        return {};
+    }
+    return icon_path;
+}
+
+std::vector<CiaBrowserEntry> ListCiaInstallEntries(const std::string& directory) {
+    std::vector<CiaBrowserEntry> dirs;
+    std::vector<CiaBrowserEntry> cias;
+    if (!ParentDirectory(directory).empty()) {
+        dirs.push_back({CiaBrowserEntry::Type::Parent, "返回上一级", ParentDirectory(directory)});
+    }
+
+    DIR* dir = opendir(directory.c_str());
+    if (!dir) {
+        return dirs;
+    }
+    while (dirent* ent = readdir(dir)) {
+        const char* name = ent->d_name;
+        if (!name || std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
+            continue;
+        }
+        const std::string path = directory + name;
+        if (IsDirectoryPath(path)) {
+            dirs.push_back({CiaBrowserEntry::Type::Directory, std::string{name} + "/", path + "/"});
+            continue;
+        }
+        if (!EndsWithCiaExtension(name)) {
+            continue;
+        }
+        CiaBrowserEntry entry;
+        entry.type = CiaBrowserEntry::Type::Cia;
+        entry.name = name;
+        entry.path = path;
+        struct stat st {};
+        if (stat(path.c_str(), &st) == 0) {
+            entry.size = static_cast<u64>(st.st_size);
+        }
+        entry.readable = ReadCiaEntry(path, entry);
+        cias.push_back(std::move(entry));
+    }
+    closedir(dir);
+
+    const auto by_name = [](const CiaBrowserEntry& a, const CiaBrowserEntry& b) {
+        return Common::ToLower(a.name) < Common::ToLower(b.name);
+    };
+    const bool has_parent = !dirs.empty() && dirs.front().type == CiaBrowserEntry::Type::Parent;
+    std::sort(dirs.begin() + (has_parent ? 1 : 0), dirs.end(), by_name);
+    std::sort(cias.begin(), cias.end(), by_name);
+    dirs.insert(dirs.end(), cias.begin(), cias.end());
+    return dirs;
+}
+
+const char* InstallStatusText(Service::AM::InstallStatus status) {
+    switch (status) {
+    case Service::AM::InstallStatus::Success:
+        return "安装完成";
+    case Service::AM::InstallStatus::ErrorFileNotFound:
+        return "文件不存在";
+    case Service::AM::InstallStatus::ErrorFailedToOpenFile:
+        return "无法打开文件";
+    case Service::AM::InstallStatus::ErrorAborted:
+        return "安装被中断";
+    case Service::AM::InstallStatus::ErrorEncrypted:
+        return "CIA已加密，请先解密或补充aes_keys.txt";
+    default:
+        return "不是有效的CIA文件";
+    }
+}
+
+struct Rgba {
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
+};
+
+u32 PackColor(Rgba c) {
+    return static_cast<u32>(c.r) | (static_cast<u32>(c.g) << 8) |
+           (static_cast<u32>(c.b) << 16) | (static_cast<u32>(c.a) << 24);
+}
+
+class CiaInstallerFont {
+public:
+    bool Initialize() {
+        if (plInitialize(PlServiceType_User) != 0) {
+            return false;
+        }
+        PlFontData shared{};
+        LibnxResult rc = plGetSharedFontByType(&shared, PlSharedFontType_ChineseSimplified);
+        if (rc != 0 || !shared.address || shared.size == 0) {
+            rc = plGetSharedFontByType(&shared, PlSharedFontType_ExtChineseSimplified);
+        }
+        if (rc != 0 || !shared.address || shared.size == 0) {
+            rc = plGetSharedFontByType(&shared, PlSharedFontType_Standard);
+        }
+        if (rc != 0 || !shared.address || shared.size == 0) {
+            plExit();
+            return false;
+        }
+        font_data.resize(shared.size);
+        std::memcpy(font_data.data(), shared.address, shared.size);
+        plExit();
+        const int offset = stbtt_GetFontOffsetForIndex(font_data.data(), 0);
+        ready = offset >= 0 && stbtt_InitFont(&font, font_data.data(), offset) != 0;
+        return ready;
+    }
+
+    int Measure(std::string_view text, int size) {
+        if (!ready) {
+            return static_cast<int>(DecodeUtf8Text(text).size()) * size / 2;
+        }
+        const float scale = stbtt_ScaleForPixelHeight(&font, static_cast<float>(size));
+        int width = 0;
+        int previous = 0;
+        for (const u32 cp : DecodeUtf8Text(text)) {
+            const int glyph = stbtt_FindGlyphIndex(&font, static_cast<int>(cp));
+            const int codepoint = glyph == 0 ? '?' : static_cast<int>(cp);
+            int advance = 0;
+            int lsb = 0;
+            stbtt_GetCodepointHMetrics(&font, codepoint, &advance, &lsb);
+            if (previous) {
+                width += static_cast<int>(stbtt_GetCodepointKernAdvance(&font, previous,
+                                                                        codepoint) *
+                                          scale);
+            }
+            width += static_cast<int>(advance * scale);
+            previous = codepoint;
+        }
+        return width;
+    }
+
+    std::string Truncate(std::string_view text, int size, int max_width) {
+        if (Measure(text, size) <= max_width) {
+            return std::string{text};
+        }
+        std::string out;
+        for (std::size_t i = 0; i < text.size();) {
+            const std::size_t begin = i;
+            const u8 c = static_cast<u8>(text[i]);
+            if ((c & 0xE0) == 0xC0) {
+                i += 2;
+            } else if ((c & 0xF0) == 0xE0) {
+                i += 3;
+            } else if ((c & 0xF8) == 0xF0) {
+                i += 4;
+            } else {
+                i += 1;
+            }
+            if (i > text.size()) {
+                break;
+            }
+            std::string candidate = out + std::string{text.substr(begin, i - begin)} + "...";
+            if (Measure(candidate, size) > max_width) {
+                return out.empty() ? std::string{"..."} : out + "...";
+            }
+            out.append(text.substr(begin, i - begin));
+        }
+        return out;
+    }
+
+    void Draw(u32* pixels, u32 stride, int x, int baseline, std::string_view text, int size,
+              Rgba color) {
+        if (!ready) {
+            return;
+        }
+        const float scale = stbtt_ScaleForPixelHeight(&font, static_cast<float>(size));
+        int pen_x = x;
+        int previous = 0;
+        for (const u32 cp : DecodeUtf8Text(text)) {
+            const int glyph = stbtt_FindGlyphIndex(&font, static_cast<int>(cp));
+            const int codepoint = glyph == 0 ? '?' : static_cast<int>(cp);
+            if (previous) {
+                pen_x += static_cast<int>(stbtt_GetCodepointKernAdvance(&font, previous,
+                                                                        codepoint) *
+                                          scale);
+            }
+            int width = 0;
+            int height = 0;
+            int xoff = 0;
+            int yoff = 0;
+            u8* bitmap = stbtt_GetCodepointBitmap(&font, 0, scale, codepoint, &width, &height,
+                                                  &xoff, &yoff);
+            for (int yy = 0; yy < height; ++yy) {
+                const int py = baseline + yoff + yy;
+                if (py < 0 || py >= 720) {
+                    continue;
+                }
+                for (int xx = 0; xx < width; ++xx) {
+                    const int px = pen_x + xoff + xx;
+                    if (px < 0 || px >= 1280) {
+                        continue;
+                    }
+                    const u8 alpha = bitmap[yy * width + xx];
+                    if (alpha == 0) {
+                        continue;
+                    }
+                    u8* dst = reinterpret_cast<u8*>(&pixels[py * stride + px]);
+                    const int a = static_cast<int>(alpha) * color.a / 255;
+                    dst[0] = static_cast<u8>((color.r * a + dst[0] * (255 - a)) / 255);
+                    dst[1] = static_cast<u8>((color.g * a + dst[1] * (255 - a)) / 255);
+                    dst[2] = static_cast<u8>((color.b * a + dst[2] * (255 - a)) / 255);
+                    dst[3] = 255;
+                }
+            }
+            if (bitmap) {
+                stbtt_FreeBitmap(bitmap, nullptr);
+            }
+            int advance = 0;
+            int lsb = 0;
+            stbtt_GetCodepointHMetrics(&font, codepoint, &advance, &lsb);
+            pen_x += static_cast<int>(advance * scale);
+            previous = codepoint;
+        }
+    }
+
+private:
+    std::vector<u8> font_data;
+    stbtt_fontinfo font{};
+    bool ready{};
+};
+
+class CiaInstallerCanvas {
+public:
+    explicit CiaInstallerCanvas(CiaInstallerFont& font_) : font(font_) {}
+
+    bool Initialize() {
+        if (framebufferCreate(&fb, nwindowGetDefault(), 1280, 720, PIXEL_FORMAT_RGBA_8888, 2) !=
+            0) {
+            return false;
+        }
+        if (framebufferMakeLinear(&fb) != 0) {
+            framebufferClose(&fb);
+            return false;
+        }
+        ready = true;
+        return true;
+    }
+
+    ~CiaInstallerCanvas() {
+        if (ready) {
+            framebufferClose(&fb);
+        }
+    }
+
+    void Begin() {
+        u32 stride_bytes = 0;
+        pixels = static_cast<u32*>(framebufferBegin(&fb, &stride_bytes));
+        stride = stride_bytes / sizeof(u32);
+        FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
+    }
+
+    void End() {
+        framebufferEnd(&fb);
+    }
+
+    void FillRect(int x, int y, int w, int h, Rgba color) {
+        const int x0 = std::clamp(x, 0, 1280);
+        const int y0 = std::clamp(y, 0, 720);
+        const int x1 = std::clamp(x + w, 0, 1280);
+        const int y1 = std::clamp(y + h, 0, 720);
+        const u32 packed = PackColor(color);
+        for (int yy = y0; yy < y1; ++yy) {
+            for (int xx = x0; xx < x1; ++xx) {
+                pixels[yy * stride + xx] = packed;
+            }
+        }
+    }
+
+    void Border(int x, int y, int w, int h, Rgba color) {
+        FillRect(x, y, w, 1, color);
+        FillRect(x, y + h - 1, w, 1, color);
+        FillRect(x, y, 1, h, color);
+        FillRect(x + w - 1, y, 1, h, color);
+    }
+
+    void Text(int x, int baseline, std::string_view text, int size, Rgba color) {
+        font.Draw(pixels, stride, x, baseline, text, size, color);
+    }
+
+    int Measure(std::string_view text, int size) {
+        return font.Measure(text, size);
+    }
+
+    std::string Truncate(std::string_view text, int size, int max_width) {
+        return font.Truncate(text, size, max_width);
+    }
+
+private:
+    CiaInstallerFont& font;
+    Framebuffer fb{};
+    u32* pixels{};
+    u32 stride{};
+    bool ready{};
+};
+
+void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
+                      const std::vector<CiaBrowserEntry>& entries, int selected, int scroll,
+                      bool delete_source, const CiaInstallState& install_state,
+                      const std::string& notice) {
+    constexpr Rgba text{238, 243, 250, 255};
+    constexpr Rgba dim{157, 168, 184, 255};
+    constexpr Rgba accent{74, 170, 255, 255};
+    constexpr Rgba panel{26, 31, 42, 245};
+    constexpr Rgba row{38, 46, 61, 255};
+    constexpr Rgba error{255, 102, 126, 255};
+
+    canvas.Begin();
+    canvas.FillRect(0, 0, 1280, 90, {17, 22, 31, 255});
+    canvas.Text(44, 58, "CIA安装", 34, text);
+    const std::string toggle = std::string{"安装完成删除源文件 "} + (delete_source ? "开" : "关");
+    canvas.Text(1280 - 44 - canvas.Measure(toggle, 22), 56, toggle, 22,
+                delete_source ? accent : dim);
+    canvas.Text(44, 116, canvas.Truncate(directory, 20, 960), 20, accent);
+    canvas.Border(34, 130, 1212, 506, {69, 81, 101, 255});
+    canvas.FillRect(35, 131, 1210, 504, panel);
+
+    if (entries.empty()) {
+        canvas.Text(74, 190, "当前目录没有CIA/zCIA文件或子目录", 24, dim);
+    }
+
+    constexpr int row_h = 48;
+    constexpr int rows = 10;
+    for (int i = scroll; i < std::min<int>(entries.size(), scroll + rows); ++i) {
+        const int y = 150 + (i - scroll) * row_h;
+        const auto& entry = entries[i];
+        if (i == selected) {
+            canvas.FillRect(54, y, 1172, row_h - 6, row);
+            canvas.FillRect(54, y + 8, 5, row_h - 22, accent);
+        }
+        Rgba name_color = entry.readable || entry.type != CiaBrowserEntry::Type::Cia ? text : error;
+        std::string name = entry.name;
+        if (entry.type == CiaBrowserEntry::Type::Parent) {
+            name = "..  返回上一级";
+        }
+        canvas.Text(78, y + 30, canvas.Truncate(name, 21, 640), 21, name_color);
+        if (entry.type == CiaBrowserEntry::Type::Directory) {
+            canvas.Text(1080, y + 30, "目录", 18, dim);
+        } else if (entry.type == CiaBrowserEntry::Type::Cia) {
+            const std::string badge = entry.readable ? CiaTitleKindName(entry.kind) : "无效";
+            canvas.Text(790, y + 30, FormatBytes(entry.size), 18, dim);
+            if (entry.readable) {
+                canvas.Text(900, y + 30, FormatTitleVersion(entry.version), 18, dim);
+            }
+            canvas.Text(1110, y + 30, badge, 18, entry.readable ? accent : error);
+        }
+    }
+
+    if (!notice.empty()) {
+        canvas.Text(54, 674, canvas.Truncate(notice, 20, 780), 20, accent);
+    }
+    canvas.Text(890, 674, "A 确认   B 返回/退出   X 删除源文件", 19, dim);
+
+    if (install_state.active.load(std::memory_order_acquire)) {
+        const std::size_t written = install_state.written.load(std::memory_order_acquire);
+        const std::size_t total = install_state.total.load(std::memory_order_acquire);
+        canvas.FillRect(0, 0, 1280, 720, {0, 0, 0, 150});
+        canvas.FillRect(360, 278, 560, 150, {28, 34, 45, 255});
+        canvas.Border(360, 278, 560, 150, {80, 96, 120, 255});
+        canvas.Text(390, 326, canvas.Truncate("正在安装 " + install_state.title, 22, 500), 22,
+                    text);
+        canvas.FillRect(390, 350, 500, 12, {52, 62, 78, 255});
+        const int fill = total == 0 ? 0 : static_cast<int>(500ULL * written / total);
+        canvas.FillRect(390, 350, std::clamp(fill, 0, 500), 12, accent);
+        canvas.Text(390, 396, FormatBytes(written) + " / " + FormatBytes(total), 19, dim);
+    }
+    canvas.End();
+}
+
+void DrawCiaMessage(CiaInstallerCanvas& canvas, const std::string& title,
+                    const std::string& message) {
+    canvas.Begin();
+    canvas.FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
+    canvas.FillRect(320, 250, 640, 210, {28, 34, 45, 255});
+    canvas.Border(320, 250, 640, 210, {80, 96, 120, 255});
+    canvas.Text(360, 310, title, 30, {238, 243, 250, 255});
+    canvas.Text(360, 360, canvas.Truncate(message, 22, 560), 22, {172, 184, 200, 255});
+    canvas.Text(360, 420, "按 A 或 B 返回", 20, {74, 170, 255, 255});
+    canvas.End();
+}
+
+int RunCiaInstaller(const LaunchOptions& options) {
+    DebugLog("CIA installer branch enter return=%s", options.return_nro_path.c_str());
+    CiaInstallerFont font;
+    if (!font.Initialize()) {
+        DebugLog("CIA installer font init failed");
+    }
+    CiaInstallerCanvas canvas(font);
+    if (!canvas.Initialize()) {
+        DebugLog("CIA installer framebuffer init failed");
+        return EXIT_FAILURE;
+    }
+
+    std::string directory = "sdmc:/";
+    std::vector<CiaBrowserEntry> entries = ListCiaInstallEntries(directory);
+    int selected = 0;
+    int scroll = 0;
+    bool delete_source = false;
+    std::string notice;
+    CiaInstallState install_state;
+    std::thread install_thread;
+
+    const auto refresh = [&] {
+        entries = ListCiaInstallEntries(directory);
+        selected = std::clamp(selected, 0, std::max(0, static_cast<int>(entries.size()) - 1));
+        scroll = std::clamp(scroll, 0, std::max(0, selected));
+    };
+
+    const auto start_install = [&](const CiaBrowserEntry& entry) {
+        if (!entry.readable) {
+            notice = entry.name + ": 不是有效的CIA";
+            return;
+        }
+        install_state.source_path = entry.path;
+        CiaInstallMetadata metadata = ReadCiaMetadata(entry.path, StemFromPath(entry.path));
+        install_state.title = metadata.title;
+        install_state.total = static_cast<std::size_t>(entry.size);
+        install_state.written = 0;
+        install_state.done = false;
+        install_state.active = true;
+        notice.clear();
+        install_thread = std::thread([&, entry, metadata = std::move(metadata)] {
+            DebugLog("CIA install begin path=%s tid=%016llx", entry.path.c_str(),
+                     static_cast<unsigned long long>(entry.program_id));
+            install_state.result = Service::AM::InstallCIA(
+                entry.path, [&](std::size_t written, std::size_t total) {
+                    install_state.written = written;
+                    install_state.total = total;
+                });
+            const bool installed_ok =
+                install_state.result == Service::AM::InstallStatus::Success;
+            install_state.success = installed_ok;
+            if (installed_ok) {
+                if (ShouldAddCiaToGameDb(entry.kind)) {
+                    const Service::FS::MediaType media =
+                        Service::AM::GetTitleMediaType(entry.program_id);
+                    install_state.installed_path =
+                        Service::AM::GetTitleContentPath(media, entry.program_id);
+                    const std::string save_path =
+                        DefaultInstalledSavePath(install_state.installed_path);
+                    const std::string logo_path = SaveCiaIconPng(save_path, metadata.icon_rgba);
+                    install_state.success =
+                        !install_state.installed_path.empty() &&
+                        SwitchFrontend::GameDatabase::SaveInstalledGameRecord(
+                            install_state.installed_path, install_state.title,
+                            options.display_settings, logo_path);
+                    install_state.message = install_state.success
+                                                ? "安装成功，已添加到数据库"
+                                                : "安装成功，但写入数据库失败";
+                } else {
+                    install_state.message =
+                        std::string{"安装成功，"} + CiaTitleKindName(entry.kind) +
+                        "类型未添加到数据库";
+                }
+                if (install_state.success && delete_source) {
+                    const int remove_rc = std::remove(entry.path.c_str());
+                    DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(), remove_rc);
+                }
+            }
+            if (!installed_ok) {
+                install_state.message = InstallStatusText(install_state.result);
+            }
+            DebugLog("CIA install end result=%u success=%d installed=%s",
+                     static_cast<unsigned>(install_state.result), install_state.success ? 1 : 0,
+                     install_state.installed_path.c_str());
+            install_state.done = true;
+        });
+    };
+
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        const u64 down = padGetButtonsDown(&pad);
+        if (install_state.active.load(std::memory_order_acquire)) {
+            if (install_state.done.load(std::memory_order_acquire)) {
+                if (install_thread.joinable()) {
+                    install_thread.join();
+                }
+                install_state.active = false;
+                notice = install_state.message;
+                refresh();
+                while (appletMainLoop()) {
+                    padUpdate(&pad);
+                    const u64 msg_down = padGetButtonsDown(&pad);
+                    DrawCiaMessage(canvas,
+                                   install_state.success ? "安装成功" : "安装失败",
+                                   install_state.message);
+                    if (msg_down & (HidNpadButton_A | HidNpadButton_B)) {
+                        break;
+                    }
+                    svcSleepThread(16'000'000);
+                }
+                break;
+            }
+            DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
+                             install_state, notice);
+            svcSleepThread(16'000'000);
+            continue;
+        }
+
+        if (down & HidNpadButton_X) {
+            delete_source = !delete_source;
+        }
+        if (down & HidNpadButton_B) {
+            if (!ParentDirectory(directory).empty()) {
+                directory = ParentDirectory(directory);
+                selected = 0;
+                scroll = 0;
+                refresh();
+            } else {
+                break;
+            }
+        }
+        if (down & HidNpadButton_Up) {
+            selected = std::max(0, selected - 1);
+        }
+        if (down & HidNpadButton_Down) {
+            selected = std::min(std::max(0, static_cast<int>(entries.size()) - 1), selected + 1);
+        }
+        if (down & HidNpadButton_A) {
+            if (!entries.empty()) {
+                const CiaBrowserEntry& entry = entries[selected];
+                if (entry.type == CiaBrowserEntry::Type::Parent ||
+                    entry.type == CiaBrowserEntry::Type::Directory) {
+                    directory = entry.path;
+                    selected = 0;
+                    scroll = 0;
+                    refresh();
+                } else {
+                    start_install(entry);
+                }
+            }
+        }
+        constexpr int visible_rows = 10;
+        if (selected < scroll) {
+            scroll = selected;
+        } else if (selected >= scroll + visible_rows) {
+            scroll = selected - visible_rows + 1;
+        }
+        DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
+                         install_state, notice);
+        svcSleepThread(16'000'000);
+    }
+
+    if (install_thread.joinable()) {
+        install_thread.join();
+    }
+    DebugLog("CIA installer branch exit");
+    return EXIT_SUCCESS;
+}
+
 LaunchOptions ParseLaunchOptions(int argc, char** argv) {
     LaunchOptions options;
     for (int i = 1; i < argc; ++i) {
@@ -845,6 +1690,10 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
             options.return_to_nro = false;
             continue;
         }
+        if (argument == "--install-cia" || argument == "--cia-install") {
+            options.install_cia_mode = true;
+            continue;
+        }
         if (argument.starts_with("--")) {
             StartupLog("ParseLaunchOptions: ignoring unknown option %s", argv[i]);
             continue;
@@ -857,20 +1706,25 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
         }
     }
 
-    if (options.rom_path.empty()) {
+    if (options.rom_path.empty() && !options.install_cia_mode) {
         options.rom_path = FallbackRomPath;
         StartupLog("ParseLaunchOptions: no ROM argument, using fallback %s", FallbackRomPath);
     }
-    options.title = TitleFromPath(options.rom_path);
-    const auto game_record = SwitchFrontend::GameDatabase::LoadGameRecord(options.rom_path);
-    if (game_record.found) {
-        if (!game_record.title.empty()) {
-            options.title = game_record.title;
+    if (options.install_cia_mode) {
+        options.title = "CIA安装";
+    } else {
+        options.title = TitleFromPath(options.rom_path);
+        const auto game_record = SwitchFrontend::GameDatabase::LoadGameRecord(options.rom_path);
+        if (game_record.found) {
+            if (!game_record.title.empty()) {
+                options.title = game_record.title;
+            }
+            options.display_settings = game_record.display;
+            options.display_settings_from_game_db = true;
         }
-        options.display_settings = game_record.display;
-        options.display_settings_from_game_db = true;
     }
-    StartupLog("ParseLaunchOptions: rom=%s title=%s return=%s target=%s",
+    StartupLog("ParseLaunchOptions: mode=%s rom=%s title=%s return=%s target=%s",
+               options.install_cia_mode ? "install-cia" : "run",
                options.rom_path.c_str(), options.title.c_str(),
                options.return_to_nro ? "nro" : "home", options.return_nro_path.c_str());
     return options;
@@ -1305,7 +2159,7 @@ int Run(int argc, char** argv) {
     StartupLog("Run: parsing ROM path");
     LaunchOptions launch_options = ParseLaunchOptions(argc, argv);
     const std::string& rom_path = launch_options.rom_path;
-    if (rom_path.empty()) {
+    if (rom_path.empty() && !launch_options.install_cia_mode) {
         DebugLog("no ROM path supplied");
         ExitLog("early exit: no ROM path");
         thread_core_guard.Restore("no-rom");
@@ -1379,6 +2233,28 @@ int Run(int argc, char** argv) {
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
     Frontend::RegisterDefaultApplets(system);
     system.RegisterSoftwareKeyboard(std::make_shared<SwitchFrontend::SwitchKeyboard>());
+
+    if (launch_options.install_cia_mode) {
+        DebugLog("entering CIA installer mode");
+        const int install_exit_code = RunCiaInstaller(launch_options);
+        DebugLog("CIA installer mode finished code=%d", install_exit_code);
+        DebugLog("shutdown step: InputCommon::Shutdown begin");
+        InputCommon::Shutdown();
+        DebugLog("shutdown step: InputCommon::Shutdown done");
+        if (common_log_started) {
+            Common::Log::Stop();
+            common_log_started = false;
+        }
+        if (romfs_initialized) {
+            romfsExit();
+        }
+        thread_core_guard.Restore("cia-installer");
+        const bool queued_launcher_return = QueueLauncherReturn(launch_options);
+        DebugLog("CIA installer return queued=%d", queued_launcher_return ? 1 : 0);
+        DebugClose();
+        appletUnlockExit();
+        return queued_launcher_return ? install_exit_code : EXIT_FAILURE;
+    }
 
     StartupLog("Run: creating NWindow frontend");
     SwitchFrontend::EmuWindowSwitch window{nwindowGetDefault()};
@@ -2476,7 +3352,9 @@ int main(int argc, char** argv) {
     ExitLogOpen("w");
     ExitLog("main entry argc=%d", argc);
     const int result = Run(argc, argv);
-    StartupLog("main: exit result=%d", result);
-    ExitLog("main exit result=%d", result);
-    return result;
+    StartupLog("main: _Exit result=%d", result);
+    ExitLog("main _Exit result=%d", result);
+    CloseStartupLog();
+    ExitLogClose();
+    std::_Exit(result);
 }
