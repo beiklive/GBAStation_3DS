@@ -78,6 +78,15 @@ void CheatEngine::SaveCheatFile(u64 title_id) const {
     }
 }
 
+void CheatEngine::SaveLoadedCheatFile() const {
+    std::shared_lock lock{cheats_list_mutex};
+    const std::optional<u64> loaded = loaded_title_id;
+    lock.unlock();
+    if (loaded.has_value()) {
+        SaveCheatFile(*loaded);
+    }
+}
+
 void CheatEngine::LoadCheatFile(u64 title_id) {
     {
         std::unique_lock lock{cheats_list_mutex};

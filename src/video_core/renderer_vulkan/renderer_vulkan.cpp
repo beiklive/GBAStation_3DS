@@ -1991,11 +1991,32 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     const float tabs_top = panel_y0 + std::round(pad * 2.6f);
     const float rows_top = panel_y0 + std::round(pad * 3.35f);
     const float footer_y = panel_y1 - std::round(pad * 1.45f);
+    const float rows_bottom = footer_y - std::round(pad * 0.85f);
+    const float header_h = std::round(std::max(34.0f, row_h * 0.68f));
+    const float visible_rows_h = std::max(1.0f, rows_bottom - rows_top);
     const int item_count = static_cast<int>(state.items.size());
     const int tab_count = static_cast<int>(state.tabs.size());
     const int selected_tab = std::clamp(state.selected_tab, 0, std::max(0, tab_count - 1));
     const bool has_selection =
-        item_count > 0 && state.selected >= 0 && state.selected < item_count;
+        item_count > 0 && state.selected >= 0 && state.selected < item_count &&
+        state.items[state.selected].kind != VideoCore::OverlayMenuItemKind::Header &&
+        state.items[state.selected].kind != VideoCore::OverlayMenuItemKind::Disabled;
+
+    std::vector<float> row_tops(item_count + 1, 0.0f);
+    for (int i = 0; i < item_count; ++i) {
+        row_tops[i + 1] = row_tops[i] +
+                          (state.items[i].kind == VideoCore::OverlayMenuItemKind::Header
+                               ? header_h
+                               : row_h);
+    }
+    const float total_rows_h = item_count > 0 ? row_tops[item_count] : 0.0f;
+    float scroll_y = 0.0f;
+    if (has_selection && total_rows_h > visible_rows_h) {
+        const float selected_center =
+            (row_tops[state.selected] + row_tops[state.selected + 1]) * 0.5f;
+        scroll_y = std::clamp(selected_center - visible_rows_h * 0.46f, 0.0f,
+                              total_rows_h - visible_rows_h);
+    }
 
     std::vector<OverlayDraw::Batch> batches;
     const auto emit = [&](const std::array<float, 4>& color, u32 start) {
@@ -2005,16 +2026,18 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         }
     };
 
-    constexpr std::array<float, 4> c_dim = {0.0f, 0.0f, 0.0f, 0.55f};
-    constexpr std::array<float, 4> c_panel = {0.09f, 0.105f, 0.13f, 0.96f};
-    constexpr std::array<float, 4> c_rail = {0.06f, 0.075f, 0.095f, 0.98f};
-    constexpr std::array<float, 4> c_separator = {0.28f, 0.72f, 0.92f, 0.28f};
-    constexpr std::array<float, 4> c_tab_focus = {0.30f, 0.70f, 1.0f, 0.88f};
-    constexpr std::array<float, 4> c_tab_fill = {0.12f, 0.38f, 0.62f, 0.24f};
-    constexpr std::array<float, 4> c_content_highlight = {0.18f, 0.44f, 0.76f, 0.58f};
+    constexpr std::array<float, 4> c_dim = {0.0f, 0.0f, 0.0f, 0.78f};
+    constexpr std::array<float, 4> c_panel = {0.06f, 0.07f, 0.09f, 0.08f};
+    constexpr std::array<float, 4> c_rail = {0.03f, 0.04f, 0.06f, 0.42f};
+    constexpr std::array<float, 4> c_separator = {0.34f, 0.76f, 0.96f, 0.18f};
+    constexpr std::array<float, 4> c_tab_focus = {0.18f, 0.42f, 0.68f, 0.52f};
+    constexpr std::array<float, 4> c_tab_fill = {0.10f, 0.34f, 0.58f, 0.16f};
+    constexpr std::array<float, 4> c_content_highlight = {0.12f, 0.28f, 0.46f, 0.22f};
     constexpr std::array<float, 4> c_title = {1.0f, 1.0f, 1.0f, 1.0f};
     constexpr std::array<float, 4> c_row = {0.82f, 0.85f, 0.92f, 1.0f};
     constexpr std::array<float, 4> c_selected = {1.0f, 1.0f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> c_header = {0.47f, 0.84f, 1.0f, 0.95f};
+    constexpr std::array<float, 4> c_disabled = {0.50f, 0.53f, 0.60f, 0.70f};
     constexpr std::array<float, 4> c_footer = {0.60f, 0.63f, 0.72f, 1.0f};
     constexpr std::array<float, 4> c_icon = {0.44f, 0.80f, 1.0f, 1.0f};
 
@@ -2049,9 +2072,10 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     }
     if (has_selection && !state.tabs_focused) {
         const u32 start = builder.VertexCount();
-        const float top = rows_top + static_cast<float>(state.selected) * row_h;
+        const float top = rows_top + row_tops[state.selected] - scroll_y;
+        const float item_h = row_tops[state.selected + 1] - row_tops[state.selected];
         builder.AddRect(content_x0 - std::round(pad * 0.4f), top + 5.0f,
-                        content_x1 + std::round(pad * 0.15f), top + row_h - 5.0f);
+                        content_x1 + std::round(pad * 0.15f), top + item_h - 5.0f);
         emit(c_content_highlight, start);
     }
 
@@ -2068,10 +2092,10 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         const float top = tabs_top + static_cast<float>(index) * tab_h;
         const float center_y = top + tab_h * 0.5f;
         if (!tab.icon.empty()) {
-            builder.AddText(tab_x0 + std::round(pad * 0.75f), center_y - line_h * 0.35f, tab.icon,
+            builder.AddText(tab_x0 + std::round(pad * 0.75f), center_y - line_h * 0.58f, tab.icon,
                             icon_scale);
         }
-        builder.AddText(tab_x0 + std::round(pad * 2.45f), center_y - line_h * 0.28f, tab.label,
+        builder.AddText(tab_x0 + std::round(pad * 2.45f), center_y - line_h * 0.50f, tab.label,
                         scale);
         if (is_selected) {
             builder.AddRect(tab_x0, top + 10.0f, tab_x0 + 4.0f, top + tab_h - 10.0f);
@@ -2098,7 +2122,7 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         if (!tab.icon.empty()) {
             builder.AddText(tab_x0 + std::round(pad * 0.75f),
                             tabs_top + static_cast<float>(selected_tab) * tab_h +
-                                tab_h * 0.5f - line_h * 0.35f,
+                                tab_h * 0.5f - line_h * 0.58f,
                             tab.icon, icon_scale);
         }
         emit(c_icon, start);
@@ -2107,15 +2131,6 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     std::string section_title = selected_tab >= 0 && selected_tab < tab_count
                                     ? state.tabs[selected_tab].label
                                     : state.title;
-    if (section_title == "画面") {
-        section_title = "画面设置";
-    } else if (section_title == "继续") {
-        section_title = "继续游戏";
-    } else if (section_title == "重置") {
-        section_title = "重置游戏";
-    } else if (section_title == "退出") {
-        section_title = "退出游戏";
-    }
     {
         const u32 start = builder.VertexCount();
         builder.AddText(content_x0, panel_y0 + std::round(pad * 0.82f), section_title,
@@ -2125,23 +2140,53 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
 
     const auto add_row = [&](int index) {
         const auto& item = state.items[index];
-        const float top = rows_top + static_cast<float>(index) * row_h;
-        const float text_y = std::round(top + (row_h - line_h) / 2.0f);
-        builder.AddText(content_x0, text_y, item.label, scale);
+        const float top = rows_top + row_tops[index] - scroll_y;
+        const float item_h = row_tops[index + 1] - row_tops[index];
+        if (top < rows_top || top + item_h > rows_bottom) {
+            return;
+        }
+        const bool header = item.kind == VideoCore::OverlayMenuItemKind::Header;
+        const float row_scale = header ? small_scale : scale;
+        const float row_line_h = OverlayFont::LineHeight() * row_scale;
+        const float text_y = std::round(top + (item_h - row_line_h) * (header ? 0.56f : 0.47f));
+        builder.AddText(content_x0, text_y, item.label, row_scale);
         if (!item.value.empty()) {
-            const float value_x = content_x1 - OverlayBuilder::Measure(item.value, scale);
-            builder.AddText(value_x, text_y, item.value, scale);
+            const std::string value = item.uses_lr
+                                          ? std::string("L  ") + item.value + "  R"
+                                          : item.value;
+            const float value_x = content_x1 - OverlayBuilder::Measure(value, row_scale);
+            builder.AddText(value_x, text_y, value, row_scale);
         }
     };
 
     {
         const u32 start = builder.VertexCount();
         for (int i = 0; i < item_count; ++i) {
-            if (i != state.selected) {
+            if (i != state.selected && state.items[i].kind == VideoCore::OverlayMenuItemKind::Row) {
                 add_row(i);
             }
         }
         emit(c_row, start);
+    }
+    {
+        const u32 start = builder.VertexCount();
+        for (int i = 0; i < item_count; ++i) {
+            if (i != state.selected &&
+                state.items[i].kind == VideoCore::OverlayMenuItemKind::Header) {
+                add_row(i);
+            }
+        }
+        emit(c_header, start);
+    }
+    {
+        const u32 start = builder.VertexCount();
+        for (int i = 0; i < item_count; ++i) {
+            if (i != state.selected &&
+                state.items[i].kind == VideoCore::OverlayMenuItemKind::Disabled) {
+                add_row(i);
+            }
+        }
+        emit(c_disabled, start);
     }
     if (has_selection) {
         const u32 start = builder.VertexCount();

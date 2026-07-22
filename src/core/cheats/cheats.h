@@ -50,6 +50,9 @@ public:
     /// Saves currently active cheats to file for the specified title id.
     void SaveCheatFile(u64 title_id) const;
 
+    /// Saves currently active cheats back to the file loaded for this game.
+    void SaveLoadedCheatFile() const;
+
     u32 GetConnectedPID() const {
         return process_id;
     }

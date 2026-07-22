@@ -22,6 +22,7 @@
 #include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 #include "audio_core/input_details.h"
 #include "audio_core/hle/hle.h"
@@ -40,6 +41,8 @@
 #include "common/string_util.h"
 #include "common/thread.h"
 #include "core/arm/dynarmic/arm_dynarmic_diagnostics.h"
+#include "core/cheats/cheat_base.h"
+#include "core/cheats/cheats.h"
 #include "core/core.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
@@ -1337,6 +1340,27 @@ int Run(int argc, char** argv) {
         [slot_state_cache](int slot) {
             return slot > 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
                    (*slot_state_cache)[slot].load(std::memory_order_acquire);
+        });
+    SwitchFrontend::OverlayUI::SetCheatCallbacks(
+        [&system]() {
+            std::vector<SwitchFrontend::OverlayUI::CheatEntry> entries;
+            const auto cheats = system.CheatEngine().GetCheats();
+            entries.reserve(cheats.size());
+            for (const auto& cheat : cheats) {
+                if (cheat) {
+                    entries.push_back({cheat->GetName(), cheat->IsEnabled()});
+                }
+            }
+            return entries;
+        },
+        [&system](int index) {
+            const auto cheats = system.CheatEngine().GetCheats();
+            if (index < 0 || index >= static_cast<int>(cheats.size()) || !cheats[index]) {
+                return false;
+            }
+            cheats[index]->SetEnabled(!cheats[index]->IsEnabled());
+            system.CheatEngine().SaveLoadedCheatFile();
+            return true;
         });
 
     SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);

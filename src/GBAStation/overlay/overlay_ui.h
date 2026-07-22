@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace SwitchFrontend::OverlayUI {
 
@@ -68,6 +69,17 @@ using SlotOccupiedFn = std::function<bool(int slot)>;
 void SetSlotOccupiedCallback(SlotOccupiedFn callback);
 bool IsSlotOccupied(int slot);
 std::string GetGameTitle();
+
+struct CheatEntry {
+    std::string name;
+    bool enabled{};
+};
+
+using CheatListFn = std::function<std::vector<CheatEntry>()>;
+using CheatToggleFn = std::function<bool(int index)>;
+void SetCheatCallbacks(CheatListFn list_callback, CheatToggleFn toggle_callback);
+std::vector<CheatEntry> GetCheats();
+bool ToggleCheat(int index);
 
 struct NavInput {
     bool up;

@@ -15,6 +15,8 @@ std::string game_title;
 std::string toast_message;
 std::chrono::steady_clock::time_point toast_expiry{};
 SlotOccupiedFn slot_occupied;
+CheatListFn cheat_list;
+CheatToggleFn cheat_toggle;
 
 bool IsActionInRange(Action action, Action first, Action last) {
     return static_cast<int>(action) >= static_cast<int>(first) &&
@@ -84,6 +86,30 @@ bool IsSlotOccupied(int slot) {
 std::string GetGameTitle() {
     std::lock_guard lock{state_mutex};
     return game_title;
+}
+
+void SetCheatCallbacks(CheatListFn list_callback, CheatToggleFn toggle_callback) {
+    std::lock_guard lock{state_mutex};
+    cheat_list = std::move(list_callback);
+    cheat_toggle = std::move(toggle_callback);
+}
+
+std::vector<CheatEntry> GetCheats() {
+    CheatListFn callback;
+    {
+        std::lock_guard lock{state_mutex};
+        callback = cheat_list;
+    }
+    return callback ? callback() : std::vector<CheatEntry>{};
+}
+
+bool ToggleCheat(int index) {
+    CheatToggleFn callback;
+    {
+        std::lock_guard lock{state_mutex};
+        callback = cheat_toggle;
+    }
+    return callback && callback(index);
 }
 
 void FeedNav(const NavInput&) {}

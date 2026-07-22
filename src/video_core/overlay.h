@@ -14,11 +14,19 @@
 // the game.
 namespace VideoCore {
 
+enum class OverlayMenuItemKind {
+    Row,
+    Header,
+    Disabled,
+};
+
 // One line in the overlay. Actions (Resume, Exit, etc.) carry no value.
 struct OverlayMenuItem {
     std::string label;
     std::string value;
     bool is_action{};
+    OverlayMenuItemKind kind{OverlayMenuItemKind::Row};
+    bool uses_lr{};
 };
 
 struct OverlayMenuTab {

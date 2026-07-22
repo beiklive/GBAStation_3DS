@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "GBAStation/input_mapping.h"
@@ -36,17 +37,21 @@ enum class Page {
     Count,
 };
 
-enum class DisplayItem {
-    FastForward,
-    InternalResolution,
-    IntegerScale,
-    Layout,
-    Orientation,
-    Gap,
-    Sync,
-    Back,
-    Count,
+enum class ResumePage {
+    Main,
+    SaveSlots,
+    LoadSlots,
+    Cheats,
 };
+
+constexpr int DisplayFastForwardIndex = 1;
+constexpr int DisplayInternalResolutionIndex = 3;
+constexpr int DisplayLayoutIndex = 4;
+constexpr int DisplayOrientationIndex = 5;
+constexpr int DisplayIntegerScaleIndex = 6;
+constexpr int DisplayGapIndex = 7;
+constexpr int DisplaySyncDisplayIndex = 12;
+constexpr int DisplaySyncOverlayIndex = 13;
 
 struct PreviousNavigation {
     bool up{};
@@ -64,6 +69,7 @@ std::atomic_bool visible{};
 std::atomic_bool exit_requested{};
 std::atomic_int pending_action{};
 Page page = Page::Resume;
+ResumePage resume_page = ResumePage::Main;
 int selected = 0;
 bool tabs_focused = true;
 bool previous_combo{};
@@ -129,9 +135,161 @@ std::string OrientationValue() {
     }
 }
 
+VideoCore::OverlayMenuItem Header(std::string label) {
+    return {std::move(label), "", false, VideoCore::OverlayMenuItemKind::Header, false};
+}
+
+VideoCore::OverlayMenuItem Row(std::string label, std::string value = {}, bool is_action = true) {
+    return {std::move(label), std::move(value), is_action, VideoCore::OverlayMenuItemKind::Row,
+            false};
+}
+
+VideoCore::OverlayMenuItem Selector(std::string label, std::string value) {
+    return {std::move(label), std::move(value), false, VideoCore::OverlayMenuItemKind::Row, true};
+}
+
+VideoCore::OverlayMenuItem Disabled(std::string label, std::string value = "预留") {
+    return {std::move(label), std::move(value), false, VideoCore::OverlayMenuItemKind::Disabled,
+            false};
+}
+
+OverlayUI::Action SaveActionForSlot(int slot) {
+    return static_cast<OverlayUI::Action>(
+        static_cast<int>(OverlayUI::Action::SaveStateSlot1) + std::clamp(slot, 1, 10) - 1);
+}
+
+OverlayUI::Action LoadActionForSlot(int slot) {
+    return static_cast<OverlayUI::Action>(
+        static_cast<int>(OverlayUI::Action::LoadStateSlot1) + std::clamp(slot, 1, 10) - 1);
+}
+
+std::vector<VideoCore::OverlayMenuItem> BuildResumeItems() {
+    if (resume_page == ResumePage::SaveSlots || resume_page == ResumePage::LoadSlots) {
+        std::vector<VideoCore::OverlayMenuItem> items;
+        items.reserve(OverlayUI::StateSlotCount + 1);
+        const bool saving = resume_page == ResumePage::SaveSlots;
+        for (int slot = 1; slot <= OverlayUI::StateSlotCount; ++slot) {
+            const bool occupied = OverlayUI::IsSlotOccupied(slot);
+            char label[32]{};
+            std::snprintf(label, sizeof(label), "状态槽 %d", slot);
+            if (saving || occupied) {
+                items.push_back(Row(label, occupied ? "已有存档" : "空", true));
+            } else {
+                items.push_back(Disabled(label, "空"));
+            }
+        }
+        items.push_back(Row("返回上级"));
+        return items;
+    }
+
+    if (resume_page == ResumePage::Cheats) {
+        std::vector<VideoCore::OverlayMenuItem> items;
+        const auto cheats = OverlayUI::GetCheats();
+        items.reserve(cheats.size() + 2);
+        items.push_back(Header("金手指列表"));
+        if (cheats.empty()) {
+            items.push_back(Disabled("暂无金手指功能", ""));
+        } else {
+            for (const auto& cheat : cheats) {
+                items.push_back(Row(cheat.name.empty() ? "金手指" : cheat.name,
+                                    cheat.enabled ? "开启" : "关闭", true));
+            }
+        }
+        items.push_back(Row("返回上级"));
+        return items;
+    }
+
+    return {
+        Row("返回游戏"),
+        Row("保存状态", "进入"),
+        Row("读取状态", "进入"),
+        Row("金手指", "进入"),
+    };
+}
+
+std::vector<VideoCore::OverlayMenuItem> BuildDisplayItems() {
+    return {
+        Header("快进"),
+        Selector("快进倍率", FastForwardValue()),
+        Header("画面"),
+        Selector("渲染分辨率", std::to_string(display_internal_resolution.load()) + "x"),
+        Selector("屏幕布局", LayoutValue()),
+        Selector("画面旋转", OrientationValue() + "度"),
+        Selector("画面整数倍", display_integer_scale.load() ? "开启" : "关闭"),
+        Selector("屏幕间距", std::to_string(display_gap.load())),
+        Header("扩展"),
+        Disabled("遮罩设置"),
+        Disabled("着色器设置"),
+        Header("同步"),
+        Row("同步画面设置"),
+        Row("同步遮罩设置"),
+        Disabled("同步着色器设置"),
+    };
+}
+
+std::vector<VideoCore::OverlayMenuItem> BuildCurrentItems() {
+    switch (page) {
+    case Page::Resume:
+        return BuildResumeItems();
+    case Page::Display:
+        return BuildDisplayItems();
+    case Page::Reset:
+        return {Row("重置游戏")};
+    case Page::Exit:
+        return {Row("退出游戏")};
+    default:
+        return {};
+    }
+}
+
+bool IsSelectable(const std::vector<VideoCore::OverlayMenuItem>& items, int index) {
+    return index >= 0 && index < static_cast<int>(items.size()) &&
+           items[index].kind != VideoCore::OverlayMenuItemKind::Header &&
+           items[index].kind != VideoCore::OverlayMenuItemKind::Disabled;
+}
+
+int FirstSelectable(const std::vector<VideoCore::OverlayMenuItem>& items) {
+    for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+        if (IsSelectable(items, i)) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+void EnsureSelected(const std::vector<VideoCore::OverlayMenuItem>& items) {
+    if (!items.empty() && !IsSelectable(items, selected)) {
+        selected = FirstSelectable(items);
+    }
+    if (items.empty()) {
+        selected = 0;
+    } else {
+        selected = std::clamp(selected, 0, static_cast<int>(items.size()) - 1);
+    }
+}
+
+void StepContentSelection(int direction) {
+    const auto items = BuildCurrentItems();
+    if (items.empty()) {
+        selected = 0;
+        return;
+    }
+    int next = selected;
+    for (int attempts = 0; attempts < static_cast<int>(items.size()); ++attempts) {
+        next = (next + direction + static_cast<int>(items.size())) % static_cast<int>(items.size());
+        if (IsSelectable(items, next)) {
+            selected = next;
+            return;
+        }
+    }
+    selected = FirstSelectable(items);
+}
+
 void Repaint() {
     VideoCore::OverlayMenuState state;
     state.visible = visible.load(std::memory_order_acquire);
+    const auto items = BuildCurrentItems();
+    EnsureSelected(items);
     state.selected = selected;
     state.selected_tab = static_cast<int>(page);
     state.tabs_focused = tabs_focused;
@@ -143,44 +301,32 @@ void Repaint() {
 
     state.title = "GBAStation 菜单";
     state.tabs = {
-        {"继续", "\xEE\x97\x84"},
-        {"画面", "\xEE\x8C\xB3"},
-        {"重置", "\xEE\x97\x95"},
-        {"退出", "\xEE\xA1\xB9"},
+        {"继续游戏", "\xEE\x97\x84"},
+        {"画面设置", "\xEE\x8C\xB3"},
+        {"重置游戏", "\xEE\x97\x95"},
+        {"退出游戏", "\xEE\xA1\xB9"},
     };
 
     switch (page) {
     case Page::Resume:
-        state.hint = "A 确定   B 关闭菜单   ↑↓ 切换标签";
-        state.items = {
-            {"返回游戏", "", true},
-        };
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
+                                  : "A 确定   B 返回   ↑/↓ 选择";
+        state.items = items;
         break;
     case Page::Display:
-        state.hint = tabs_focused ? "A/→ 进入设置   B 关闭菜单   ↑↓ 切换标签"
-                                  : "←/→ 调整   A 确定   B 返回标签";
-        state.items = {
-            {"快进倍率", FastForwardValue(), false},
-            {"内部渲染", std::to_string(display_internal_resolution.load()) + "x", false},
-            {"整数缩放", display_integer_scale.load() ? "开启" : "关闭", false},
-            {"屏幕布局", LayoutValue(), false},
-            {"画面旋转", OrientationValue() + "度", false},
-            {"屏幕间距", std::to_string(display_gap.load()), false},
-            {"应用设置", "", true},
-            {"返回标签", "", true},
-        };
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
+                                  : "L/R 调整   A 确定   B 返回";
+        state.items = items;
         break;
     case Page::Reset:
-        state.hint = "A 确定   B 关闭菜单   ↑↓ 切换标签";
-        state.items = {
-            {"重置游戏", "", true},
-        };
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
+                                  : "A 确定   B 返回";
+        state.items = items;
         break;
     case Page::Exit:
-        state.hint = "A 确定   B 关闭菜单   ↑↓ 切换标签";
-        state.items = {
-            {"退出游戏", "", true},
-        };
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
+                                  : "A 确定   B 返回";
+        state.items = items;
         break;
     default:
         break;
@@ -190,6 +336,7 @@ void Repaint() {
 
 void OpenMenu() {
     page = Page::Resume;
+    resume_page = ResumePage::Main;
     selected = 0;
     tabs_focused = true;
     visible.store(true, std::memory_order_release);
@@ -228,36 +375,36 @@ void StepFastForward(int direction) {
 }
 
 void StepDisplayValue(int direction) {
-    switch (static_cast<DisplayItem>(selected)) {
-    case DisplayItem::FastForward:
+    switch (selected) {
+    case DisplayFastForwardIndex:
         StepFastForward(direction);
         return;
-    case DisplayItem::InternalResolution:
+    case DisplayInternalResolutionIndex:
         display_internal_resolution.store(
             (display_internal_resolution.load(std::memory_order_relaxed) + direction - 1 + 4) % 4 +
                 1,
             std::memory_order_release);
         PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
         return;
-    case DisplayItem::IntegerScale:
+    case DisplayIntegerScaleIndex:
         display_integer_scale.store(!display_integer_scale.load(std::memory_order_relaxed),
                                     std::memory_order_release);
         PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
         return;
-    case DisplayItem::Layout:
+    case DisplayLayoutIndex:
         display_layout.store((display_layout.load(std::memory_order_relaxed) + direction +
                               static_cast<int>(LayoutIds.size())) %
                                  static_cast<int>(LayoutIds.size()),
                              std::memory_order_release);
         PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
         return;
-    case DisplayItem::Orientation:
+    case DisplayOrientationIndex:
         display_orientation.store(
             (display_orientation.load(std::memory_order_relaxed) + direction + 4) % 4,
             std::memory_order_release);
         PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
         return;
-    case DisplayItem::Gap:
+    case DisplayGapIndex:
         display_gap.store(std::clamp(display_gap.load(std::memory_order_relaxed) + direction, -256,
                                      256),
                           std::memory_order_release);
@@ -270,38 +417,88 @@ void StepDisplayValue(int direction) {
 
 void ActivateCurrent() {
     if (tabs_focused) {
-        if (page == Page::Display) {
-            tabs_focused = false;
-            selected = 0;
-            Repaint();
-        } else if (page == Page::Resume) {
-            PublishAction(OverlayUI::Action::Resume, true);
-        } else if (page == Page::Reset) {
-            PublishAction(OverlayUI::Action::Reset, true);
-        } else if (page == Page::Exit) {
-            PublishAction(OverlayUI::Action::Exit, true);
+        tabs_focused = false;
+        selected = FirstSelectable(BuildCurrentItems());
+        Repaint();
+        return;
+    }
+
+    if (page == Page::Resume) {
+        if (resume_page == ResumePage::Main) {
+            if (selected == 0) {
+                PublishAction(OverlayUI::Action::Resume, true);
+            } else if (selected == 1) {
+                resume_page = ResumePage::SaveSlots;
+                selected = 0;
+                Repaint();
+            } else if (selected == 2) {
+                resume_page = ResumePage::LoadSlots;
+                selected = 0;
+                Repaint();
+            } else if (selected == 3) {
+                resume_page = ResumePage::Cheats;
+                selected = FirstSelectable(BuildCurrentItems());
+                Repaint();
+            }
+            return;
+        }
+
+        if (resume_page == ResumePage::SaveSlots) {
+            if (selected >= 0 && selected < OverlayUI::StateSlotCount) {
+                PublishAction(SaveActionForSlot(selected + 1), true);
+            } else {
+                resume_page = ResumePage::Main;
+                selected = 1;
+                Repaint();
+            }
+            return;
+        }
+
+        if (resume_page == ResumePage::LoadSlots) {
+            if (selected >= 0 && selected < OverlayUI::StateSlotCount) {
+                PublishAction(LoadActionForSlot(selected + 1), true);
+            } else {
+                resume_page = ResumePage::Main;
+                selected = 2;
+                Repaint();
+            }
+            return;
+        }
+
+        const auto cheats = OverlayUI::GetCheats();
+        if (selected > 0 && selected <= static_cast<int>(cheats.size())) {
+            const bool toggled = OverlayUI::ToggleCheat(selected - 1);
+            OverlayUI::ShowToast(toggled ? "金手指设置已保存" : "金手指设置失败");
+        } else {
+            resume_page = ResumePage::Main;
+            selected = 3;
+        }
+        Repaint();
+        return;
+    }
+
+    if (page == Page::Display) {
+        if (selected == DisplaySyncDisplayIndex) {
+            PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
+        } else if (selected == DisplaySyncOverlayIndex) {
+            PublishAction(OverlayUI::Action::SyncOverlaySettings, false);
         }
         return;
     }
 
-    switch (static_cast<DisplayItem>(selected)) {
-    case DisplayItem::Sync:
-        PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
-        return;
-    case DisplayItem::Back:
-        tabs_focused = true;
-        selected = 0;
-        Repaint();
-        return;
-    default:
-        StepDisplayValue(1);
-        Repaint();
-        return;
+    if (page == Page::Reset) {
+        PublishAction(OverlayUI::Action::Reset, true);
+    } else if (page == Page::Exit) {
+        PublishAction(OverlayUI::Action::Exit, true);
     }
 }
 
 void GoBack() {
-    if (!tabs_focused) {
+    if (!tabs_focused && page == Page::Resume && resume_page != ResumePage::Main) {
+        resume_page = ResumePage::Main;
+        selected = 0;
+        Repaint();
+    } else if (!tabs_focused) {
         tabs_focused = true;
         selected = 0;
         Repaint();
@@ -360,11 +557,11 @@ void Update(PadState* pad) {
 
     bool changed = false;
     const int tab_count = static_cast<int>(Page::Count);
-    const int content_count = page == Page::Display ? static_cast<int>(DisplayItem::Count) : 1;
 
     const auto step_tab = [&](int direction) {
         const int next = (static_cast<int>(page) + direction + tab_count) % tab_count;
         page = static_cast<Page>(next);
+        resume_page = ResumePage::Main;
         selected = 0;
         tabs_focused = true;
     };
@@ -378,30 +575,39 @@ void Update(PadState* pad) {
         changed = true;
     }
     if (!tabs_focused && Rising(nav.up, previous_navigation.up)) {
-        selected = (selected - 1 + content_count) % content_count;
+        StepContentSelection(-1);
         changed = true;
     }
     if (!tabs_focused && Rising(nav.down, previous_navigation.down)) {
-        selected = (selected + 1) % content_count;
+        StepContentSelection(1);
         changed = true;
     }
-    if (!tabs_focused && page == Page::Display &&
-        (Rising(nav.left, previous_navigation.left) || Rising(nav.right, previous_navigation.right))) {
-        StepDisplayValue(nav.right ? 1 : -1);
-        changed = true;
-    }
-    if (tabs_focused && page == Page::Display && Rising(nav.right, previous_navigation.right)) {
+    if (tabs_focused && Rising(nav.right, previous_navigation.right)) {
         tabs_focused = false;
+        selected = FirstSelectable(BuildCurrentItems());
+        changed = true;
+    }
+    if (!tabs_focused && Rising(nav.left, previous_navigation.left)) {
+        tabs_focused = true;
         selected = 0;
         changed = true;
     }
-    if (Rising(nav.shoulder_left, previous_navigation.shoulder_left)) {
+    if (tabs_focused && Rising(nav.shoulder_left, previous_navigation.shoulder_left)) {
         step_tab(-1);
         changed = true;
     }
-    if (Rising(nav.shoulder_right, previous_navigation.shoulder_right)) {
+    if (tabs_focused && Rising(nav.shoulder_right, previous_navigation.shoulder_right)) {
         step_tab(1);
         changed = true;
+    }
+    if (!tabs_focused && page == Page::Display &&
+        (Rising(nav.shoulder_left, previous_navigation.shoulder_left) ||
+         Rising(nav.shoulder_right, previous_navigation.shoulder_right))) {
+        const auto items = BuildCurrentItems();
+        if (IsSelectable(items, selected) && items[selected].uses_lr) {
+            StepDisplayValue(nav.shoulder_right ? 1 : -1);
+            changed = true;
+        }
     }
     if (Rising(nav.cancel, previous_navigation.cancel)) {
         GoBack();

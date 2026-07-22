@@ -25,8 +25,8 @@
 namespace Vulkan::OverlayFont {
 namespace {
 
-constexpr int RuntimeAtlasWidth = kAtlasWidth;
-constexpr int RuntimeAtlasHeight = kAtlasHeight;
+constexpr int RuntimeAtlasWidth = 1024;
+constexpr int RuntimeAtlasHeight = 1024;
 constexpr float RuntimeBakePixelHeight = 32.0f;
 constexpr std::array<u32, 4> MaterialIconCodepoints{{
     0xE5C4, // keyboard_return
@@ -34,7 +34,6 @@ constexpr std::array<u32, 4> MaterialIconCodepoints{{
     0xE5D5, // refresh
     0xE879, // exit_to_app
 }};
-
 struct RuntimeAtlas {
     std::vector<unsigned char> pixels;
     std::unordered_map<u32, Glyph> glyphs;
@@ -86,24 +85,40 @@ std::vector<u32> BuildTextCodepoints() {
         codepoints.push_back(cp);
     }
 
-    constexpr std::array<std::string_view, 35> strings{{
+    constexpr std::array<std::string_view, 59> strings{{
         "GBAStation 菜单",
-        "继续",
-        "画面",
-        "重置",
-        "退出",
+        "继续游戏",
         "返回游戏",
         "画面设置",
         "重置游戏",
         "退出游戏",
+        "保存状态",
+        "读取状态",
+        "金手指",
+        "状态槽",
+        "空",
+        "已有存档",
+        "金手指列表",
+        "暂无金手指功能",
+        "金手指设置已保存",
+        "金手指设置失败",
+        "返回上级",
+        "快进",
         "快进倍率",
-        "内部渲染",
-        "整数缩放",
+        "画面",
+        "渲染分辨率",
         "屏幕布局",
         "画面旋转",
+        "画面整数倍",
         "屏幕间距",
-        "应用设置",
-        "返回标签",
+        "扩展",
+        "遮罩设置",
+        "着色器设置",
+        "同步",
+        "同步画面设置",
+        "同步遮罩设置",
+        "同步着色器设置",
+        "预留",
         "开启",
         "关闭",
         "竖排",
@@ -120,6 +135,14 @@ std::vector<u32> BuildTextCodepoints() {
         "进入设置",
         "关闭菜单",
         "返回",
+        "上级",
+        "滚动",
+        "切换",
+        "调整数值",
+        "进入",
+        "槽位",
+        "保存",
+        "读取",
         "度",
         "←→↑↓",
     }};
@@ -197,6 +220,7 @@ std::vector<unsigned char> LoadSwitchChineseFont() {
     }
     return data;
 }
+
 #else
 std::vector<unsigned char> LoadSwitchChineseFont() {
     return {};
