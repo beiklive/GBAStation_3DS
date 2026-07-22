@@ -1881,6 +1881,169 @@ private:
     float inv_w;
     float inv_h;
 };
+
+void AppendUtf8(std::string& out, u32 cp) {
+    if (cp <= 0x7F) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FF) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+std::vector<u32> DecodeUtf8Codepoints(std::string_view text) {
+    std::vector<u32> codepoints;
+    const unsigned char* ptr = reinterpret_cast<const unsigned char*>(text.data());
+    const unsigned char* end = ptr + text.size();
+    while (ptr < end) {
+        u32 cp = 0;
+        const unsigned char c = *ptr;
+        if (c < 0x80) {
+            cp = c;
+            ++ptr;
+        } else if ((c & 0xE0) == 0xC0 && ptr + 1 < end) {
+            cp = ((c & 0x1F) << 6) | (ptr[1] & 0x3F);
+            ptr += 2;
+        } else if ((c & 0xF0) == 0xE0 && ptr + 2 < end) {
+            cp = ((c & 0x0F) << 12) | ((ptr[1] & 0x3F) << 6) | (ptr[2] & 0x3F);
+            ptr += 3;
+        } else if ((c & 0xF8) == 0xF0 && ptr + 3 < end) {
+            cp = ((c & 0x07) << 18) | ((ptr[1] & 0x3F) << 12) |
+                 ((ptr[2] & 0x3F) << 6) | (ptr[3] & 0x3F);
+            ptr += 4;
+        } else {
+            break;
+        }
+        codepoints.push_back(cp);
+    }
+    return codepoints;
+}
+
+std::string EncodeUtf8(const std::vector<u32>& codepoints, std::size_t start, std::size_t count) {
+    std::string out;
+    const std::size_t end = std::min(codepoints.size(), start + count);
+    for (std::size_t i = start; i < end; ++i) {
+        AppendUtf8(out, codepoints[i]);
+    }
+    return out;
+}
+
+float MeasureUtf8Range(const std::vector<u32>& codepoints, std::size_t start, std::size_t count,
+                       float scale) {
+    float width = 0.0f;
+    const std::size_t end = std::min(codepoints.size(), start + count);
+    for (std::size_t i = start; i < end; ++i) {
+        width += OverlayFont::GlyphFor(codepoints[i]).xadvance * scale;
+    }
+    return width;
+}
+
+std::string EllipsizeUtf8(std::string_view text, float max_width, float scale) {
+    if (OverlayBuilder::Measure(text, scale) <= max_width) {
+        return std::string(text);
+    }
+
+    const auto codepoints = DecodeUtf8Codepoints(text);
+    if (codepoints.empty()) {
+        return {};
+    }
+
+    constexpr char kEllipsis[] = "...";
+    if (OverlayBuilder::Measure(kEllipsis, scale) > max_width) {
+        return {};
+    }
+
+    std::size_t low = 0;
+    std::size_t high = codepoints.size();
+    while (low < high) {
+        const std::size_t mid = (low + high + 1) / 2;
+        std::string candidate = EncodeUtf8(codepoints, 0, mid);
+        if (mid < codepoints.size()) {
+            candidate += kEllipsis;
+        }
+        if (OverlayBuilder::Measure(candidate, scale) <= max_width) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    std::string result = EncodeUtf8(codepoints, 0, low);
+    if (low < codepoints.size()) {
+        result += kEllipsis;
+    }
+    return result;
+}
+
+std::string MarqueeUtf8(std::string_view text, float max_width, float scale) {
+    if (OverlayBuilder::Measure(text, scale) <= max_width) {
+        return std::string(text);
+    }
+
+    const auto codepoints = DecodeUtf8Codepoints(text);
+    if (codepoints.empty()) {
+        return {};
+    }
+
+    constexpr char kEllipsis[] = "...";
+    const float ellipsis_w = OverlayBuilder::Measure(kEllipsis, scale);
+    if (ellipsis_w >= max_width) {
+        return EllipsizeUtf8(text, max_width, scale);
+    }
+
+    const float available = std::max(0.0f, max_width - ellipsis_w * 2.0f);
+    if (available <= 0.0f) {
+        return EllipsizeUtf8(text, max_width, scale);
+    }
+
+    std::size_t best_window = 1;
+    for (std::size_t count = 1; count <= codepoints.size(); ++count) {
+        if (MeasureUtf8Range(codepoints, 0, count, scale) <= available) {
+            best_window = count;
+        } else {
+            break;
+        }
+    }
+
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const auto tick = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    const std::size_t cycle = std::max<std::size_t>(1, codepoints.size());
+    const std::size_t start = static_cast<std::size_t>((tick / 140) % cycle);
+    std::size_t slice_start = std::min(start, codepoints.size() - 1);
+    std::size_t window = std::min(best_window, codepoints.size() - slice_start);
+
+    while (window > 0) {
+        std::string candidate;
+        if (slice_start > 0) {
+            candidate += kEllipsis;
+        }
+        candidate += EncodeUtf8(codepoints, slice_start, window);
+        if (slice_start + window < codepoints.size()) {
+            candidate += kEllipsis;
+        }
+        if (OverlayBuilder::Measure(candidate, scale) <= max_width) {
+            return candidate;
+        }
+        --window;
+    }
+
+    return EllipsizeUtf8(text, max_width, scale);
+}
+
+std::string IconUtf8(u32 codepoint) {
+    std::string out;
+    AppendUtf8(out, codepoint);
+    return out;
+}
 } // namespace
 
 RendererVulkan::OverlayDraw RendererVulkan::PrepareFpsOverlay(
@@ -1967,32 +2130,33 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     verts.reserve(4096);
     OverlayBuilder builder{verts, w, h};
 
-    const float em = std::max(18.0f, std::round(h / 30.0f));
+    const float em = std::max(20.0f, std::round(h / 28.0f));
     const float scale = em / OverlayFont::BakePixelHeight();
-    const float small_scale = std::round(em * 0.82f) / OverlayFont::BakePixelHeight();
-    const float title_scale = std::round(em * 1.18f) / OverlayFont::BakePixelHeight();
-    const float icon_scale = std::round(em * 1.45f) / OverlayFont::BakePixelHeight();
+    const float small_scale = std::round(em * 0.86f) / OverlayFont::BakePixelHeight();
+    const float title_scale = std::round(em * 1.12f) / OverlayFont::BakePixelHeight();
+    const float icon_scale = std::round(em * 1.32f) / OverlayFont::BakePixelHeight();
     const float line_h = OverlayFont::LineHeight() * scale;
-    const float row_h = std::round(std::max(48.0f, line_h * 1.45f));
-    const float tab_h = std::round(std::max(56.0f, line_h * 1.62f));
-    const float pad = std::round(em * 1.0f);
-    const float panel_w = std::round(std::clamp(w * 0.76f, 720.0f, w * 0.92f));
-    const float panel_h = std::round(std::clamp(h * 0.72f, 440.0f, h * 0.86f));
-    const float panel_x0 = std::round((w - panel_w) * 0.5f);
-    const float panel_y0 = std::round((h - panel_h) * 0.5f);
-    const float panel_x1 = panel_x0 + panel_w;
-    const float panel_y1 = panel_y0 + panel_h;
-    const float rail_w = std::round(std::clamp(panel_w * 0.28f, 210.0f, 260.0f));
+    const float row_h = std::round(std::max(56.0f, line_h * 1.68f));
+    const float tab_h = std::round(std::max(68.0f, line_h * 1.92f));
+    const float pad = std::round(em * 1.08f);
+    const float panel_margin_x = std::round(std::max(20.0f, w * 0.02f));
+    const float panel_margin_y = std::round(std::max(16.0f, h * 0.025f));
+    const float panel_x0 = panel_margin_x;
+    const float panel_y0 = panel_margin_y;
+    const float panel_x1 = w - panel_margin_x;
+    const float panel_y1 = h - panel_margin_y;
+    const float panel_w = panel_x1 - panel_x0;
+    const float rail_w = std::round(std::clamp(panel_w * 0.29f, 280.0f, 360.0f));
     const float rail_x1 = panel_x0 + rail_w;
     const float content_x0 = rail_x1 + pad;
     const float content_x1 = panel_x1 - pad;
-    const float tab_x0 = panel_x0 + std::round(pad * 0.55f);
-    const float tab_x1 = rail_x1 - std::round(pad * 0.55f);
-    const float tabs_top = panel_y0 + std::round(pad * 2.6f);
-    const float rows_top = panel_y0 + std::round(pad * 3.35f);
-    const float footer_y = panel_y1 - std::round(pad * 1.45f);
-    const float rows_bottom = footer_y - std::round(pad * 0.85f);
-    const float header_h = std::round(std::max(34.0f, row_h * 0.68f));
+    const float tab_x0 = panel_x0 + std::round(pad * 0.62f);
+    const float tab_x1 = rail_x1 - std::round(pad * 0.62f);
+    const float tabs_top = panel_y0 + std::round(pad * 2.35f);
+    const float rows_top = panel_y0 + std::round(pad * 3.05f);
+    const float footer_y = panel_y1 - std::round(pad * 1.05f);
+    const float rows_bottom = footer_y - std::round(pad * 0.75f);
+    const float header_h = std::round(std::max(40.0f, row_h * 0.72f));
     const float visible_rows_h = std::max(1.0f, rows_bottom - rows_top);
     const int item_count = static_cast<int>(state.items.size());
     const int tab_count = static_cast<int>(state.tabs.size());
@@ -2026,13 +2190,13 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         }
     };
 
-    constexpr std::array<float, 4> c_dim = {0.0f, 0.0f, 0.0f, 0.78f};
-    constexpr std::array<float, 4> c_panel = {0.06f, 0.07f, 0.09f, 0.08f};
-    constexpr std::array<float, 4> c_rail = {0.03f, 0.04f, 0.06f, 0.42f};
-    constexpr std::array<float, 4> c_separator = {0.34f, 0.76f, 0.96f, 0.18f};
-    constexpr std::array<float, 4> c_tab_focus = {0.18f, 0.42f, 0.68f, 0.52f};
-    constexpr std::array<float, 4> c_tab_fill = {0.10f, 0.34f, 0.58f, 0.16f};
-    constexpr std::array<float, 4> c_content_highlight = {0.12f, 0.28f, 0.46f, 0.22f};
+    constexpr std::array<float, 4> c_dim = {0.0f, 0.0f, 0.0f, 0.86f};
+    constexpr std::array<float, 4> c_panel = {0.03f, 0.04f, 0.06f, 0.06f};
+    constexpr std::array<float, 4> c_rail = {0.03f, 0.04f, 0.06f, 0.50f};
+    constexpr std::array<float, 4> c_separator = {0.34f, 0.76f, 0.96f, 0.14f};
+    constexpr std::array<float, 4> c_tab_focus = {0.22f, 0.58f, 0.92f, 0.40f};
+    constexpr std::array<float, 4> c_tab_fill = {0.10f, 0.34f, 0.58f, 0.12f};
+    constexpr std::array<float, 4> c_content_highlight = {0.15f, 0.45f, 0.75f, 0.20f};
     constexpr std::array<float, 4> c_title = {1.0f, 1.0f, 1.0f, 1.0f};
     constexpr std::array<float, 4> c_row = {0.82f, 0.85f, 0.92f, 1.0f};
     constexpr std::array<float, 4> c_selected = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -2138,6 +2302,9 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         emit(c_title, start);
     }
 
+    const bool cheats_page = selected_tab == 3;
+    const bool content_focused = !state.tabs_focused;
+
     const auto add_row = [&](int index) {
         const auto& item = state.items[index];
         const float top = rows_top + row_tops[index] - scroll_y;
@@ -2149,7 +2316,14 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         const float row_scale = header ? small_scale : scale;
         const float row_line_h = OverlayFont::LineHeight() * row_scale;
         const float text_y = std::round(top + (item_h - row_line_h) * (header ? 0.56f : 0.47f));
-        builder.AddText(content_x0, text_y, item.label, row_scale);
+        const bool focused_row = content_focused && has_selection && index == state.selected;
+        const float label_max_width =
+            std::max(72.0f, content_x1 - content_x0 - std::round(em * 4.8f));
+        const std::string label_text = cheats_page && item.kind == VideoCore::OverlayMenuItemKind::Row
+                                           ? (focused_row ? MarqueeUtf8(item.label, label_max_width, row_scale)
+                                                         : EllipsizeUtf8(item.label, label_max_width, row_scale))
+                                           : item.label;
+        builder.AddText(content_x0, text_y, label_text, row_scale);
         if (!item.value.empty()) {
             const std::string value = item.uses_lr
                                           ? std::string("L  ") + item.value + "  R"
@@ -2194,11 +2368,54 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         emit(c_selected, start);
     }
 
-    if (!state.hint.empty()) {
-        const u32 start = builder.VertexCount();
-        const float footer_x = std::round(content_x1 - OverlayBuilder::Measure(state.hint, small_scale));
-        builder.AddText(std::max(content_x0, footer_x), footer_y, state.hint, small_scale);
-        emit(c_footer, start);
+    struct FooterPrompt {
+        std::string icon;
+        std::string text;
+    };
+    std::vector<FooterPrompt> prompts;
+    const auto push_prompt = [&](u32 icon, std::string text) {
+        prompts.push_back({IconUtf8(icon), std::move(text)});
+    };
+    if (state.tabs_focused) {
+        push_prompt(0xE5CA, selected_tab == 0 ? "返回游戏" : "进入");
+        push_prompt(0xE5CD, "返回");
+        if (selected_tab == 4) {
+            push_prompt(0xE314, "调整");
+            push_prompt(0xE315, "调整");
+        } else {
+            push_prompt(0xE314, "切换");
+            push_prompt(0xE315, "切换");
+        }
+    } else {
+        push_prompt(0xE5CA,
+                    selected_tab == 1 ? "保存" : (selected_tab == 2 ? "读取"
+                                                                  : (selected_tab == 3 ? "开关" : "确定")));
+        push_prompt(0xE5CD, "返回");
+        push_prompt(0xE316, "上");
+        push_prompt(0xE313, "下");
+        if (selected_tab == 4) {
+            push_prompt(0xE314, "减");
+            push_prompt(0xE315, "增");
+        }
+    }
+
+    if (!prompts.empty()) {
+        const float gap = std::round(em * 0.42f);
+        const float icon_scale_footer = std::round(em * 0.84f) / OverlayFont::BakePixelHeight();
+        const float text_scale_footer = std::round(em * 0.74f) / OverlayFont::BakePixelHeight();
+        float cursor_x = content_x1;
+        for (auto it = prompts.rbegin(); it != prompts.rend(); ++it) {
+            const float icon_w = OverlayBuilder::Measure(it->icon, icon_scale_footer);
+            const float text_w = OverlayBuilder::Measure(it->text, text_scale_footer);
+            const float group_w = icon_w + std::round(em * 0.22f) + text_w + gap;
+            const float x = cursor_x - group_w;
+            const u32 start = builder.VertexCount();
+            builder.AddText(x, footer_y, it->icon, icon_scale_footer);
+            builder.AddText(x + icon_w + std::round(em * 0.22f), footer_y + std::round(em * 0.08f),
+                            it->text, text_scale_footer);
+            emit(c_footer, start);
+            cursor_x = x - gap;
+        }
     }
 
     if (batches.empty()) {

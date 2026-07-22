@@ -28,7 +28,7 @@ namespace {
 constexpr int RuntimeAtlasWidth = 1024;
 constexpr int RuntimeAtlasHeight = 1024;
 constexpr float RuntimeBakePixelHeight = 32.0f;
-constexpr std::array<u32, 7> MaterialIconCodepoints{{
+constexpr std::array<u32, 13> MaterialIconCodepoints{{
     0xE5C4, // keyboard_return
     0xE161, // save
     0xE2C6, // folder_open
@@ -36,6 +36,12 @@ constexpr std::array<u32, 7> MaterialIconCodepoints{{
     0xE333, // settings_overscan
     0xE5D5, // refresh
     0xE879, // exit_to_app
+    0xE5CA, // check
+    0xE5CD, // close
+    0xE313, // keyboard_arrow_down
+    0xE314, // keyboard_arrow_left
+    0xE315, // keyboard_arrow_right
+    0xE316, // keyboard_arrow_up
 }};
 struct RuntimeAtlas {
     std::vector<unsigned char> pixels;
