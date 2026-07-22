@@ -140,6 +140,9 @@ rm -rf "${ROMFS_DIR}"
 mkdir -p "${ROMFS_DIR}"
 if [ -d "${SCRIPT_DIR}/src/GBAStation/rescources" ]; then
     cp -R "${SCRIPT_DIR}/src/GBAStation/rescources" "${ROMFS_DIR}/rescources"
+    if [ -d "${SCRIPT_DIR}/src/GBAStation/rescources/material" ]; then
+        cp -R "${SCRIPT_DIR}/src/GBAStation/rescources/material" "${ROMFS_DIR}/material"
+    fi
 fi
 cp "${ELF_FILE}" "${DEBUG_ELF}"
 cp "${ELF_FILE}" "${STRIPPED_ELF}"

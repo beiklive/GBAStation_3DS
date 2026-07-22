@@ -212,14 +212,22 @@ void PresentWindow::RecreateFrame(Frame* frame, u32 width, u32 height) {
     }
 
     const vk::Format format = swapchain.GetSurfaceFormat().format;
-    const vk::ImageCreateInfo image_info = {
-        .imageType = vk::ImageType::e2D,
-        .format = format,
+    const VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = static_cast<VkFormat>(format),
         .extent = {width, height, 1},
         .mipLevels = 1,
         .arrayLayers = 1,
-        .samples = vk::SampleCountFlagBits::e1,
-        .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
     const VmaAllocationCreateInfo alloc_info = {
@@ -232,9 +240,8 @@ void PresentWindow::RecreateFrame(Frame* frame, u32 width, u32 height) {
     };
 
     VkImage unsafe_image{};
-    VkImageCreateInfo unsafe_image_info = static_cast<VkImageCreateInfo>(image_info);
 
-    VkResult result = vmaCreateImage(instance.GetAllocator(), &unsafe_image_info, &alloc_info,
+    VkResult result = vmaCreateImage(instance.GetAllocator(), &image_info, &alloc_info,
                                      &unsafe_image, &frame->allocation, nullptr);
     if (result != VK_SUCCESS) [[unlikely]] {
         LOG_CRITICAL(Render_Vulkan, "Failed allocating texture with error {}", result);

@@ -4,6 +4,10 @@
 
 #pragma once
 
+#include <array>
+#include <chrono>
+#include <vector>
+
 #include "common/common_types.h"
 #include "common/math_util.h"
 #include "video_core/renderer_base.h"
@@ -105,6 +109,7 @@ public:
 private:
     void ReloadPipeline(Settings::StereoRenderOption render_3d);
     void CompileShaders();
+    void CreateOverlayFont();
     void BuildLayouts();
     void BuildPipelines();
     void ConfigureFramebufferTexture(TextureInfo& texture,
@@ -133,6 +138,20 @@ private:
 
     void DrawCursor(const Layout::FramebufferLayout& layout);
 
+    struct OverlayDraw {
+        struct Batch {
+            std::array<float, 4> color;
+            u32 first;
+            u32 count;
+        };
+        std::vector<Batch> batches;
+        u32 base_vertex{};
+    };
+
+    OverlayDraw PrepareFpsOverlay(const Layout::FramebufferLayout& layout);
+    OverlayDraw PrepareQuickMenu(const Layout::FramebufferLayout& layout);
+    void RecordOverlay(OverlayDraw overlay);
+
     void LoadFBToScreenInfo(const Pica::FramebufferConfig& framebuffer, ScreenInfo& screen_info,
                             bool right_eye);
     void UploadFramebufferToScreenInfo(const Pica::FramebufferConfig& framebuffer,
@@ -153,6 +172,7 @@ private:
     RenderManager renderpass_cache;
     PresentWindow main_present_window;
     StreamBuffer vertex_buffer;
+    StreamBuffer overlay_vertex_buffer;
     StreamBuffer framebuffer_upload_buffer;
     DescriptorUpdateQueue update_queue;
     RasterizerVulkan rasterizer;
@@ -173,6 +193,19 @@ private:
     vk::ShaderModule cursor_fragment_shader{};
     vk::Pipeline cursor_pipeline{};
     vk::UniquePipelineLayout cursor_pipeline_layout{};
+    vk::ShaderModule overlay_vertex_shader{};
+    vk::ShaderModule overlay_fragment_shader{};
+    vk::Pipeline overlay_pipeline{};
+    vk::UniquePipelineLayout overlay_pipeline_layout{};
+    vk::Image overlay_font_image{};
+    VmaAllocation overlay_font_allocation{};
+    vk::ImageView overlay_font_view{};
+    vk::Sampler overlay_font_sampler{};
+    vk::UniqueDescriptorSetLayout overlay_descriptor_layout{};
+    vk::UniqueDescriptorPool overlay_descriptor_pool{};
+    vk::DescriptorSet overlay_descriptor_set{};
+    float overlay_game_fps = 0.0f;
+    std::chrono::steady_clock::time_point overlay_last_update{};
     bool isSecondaryWindow;
     bool secondaryWindowEnabled;
     bool screenRendered;

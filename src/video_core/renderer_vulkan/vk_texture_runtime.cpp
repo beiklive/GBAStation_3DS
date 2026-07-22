@@ -181,25 +181,33 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
     this->levels = levels;
     this->layers = is_cube_map ? 6 : 1;
 
-    const std::array format_list = {
-        vk::Format::eR8G8B8A8Unorm,
-        vk::Format::eR32Uint,
+    const std::array<VkFormat, 2> format_list = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_FORMAT_R32_UINT,
     };
-    const vk::ImageFormatListCreateInfo image_format_list = {
+    const VkImageFormatListCreateInfo image_format_list = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+        .pNext = nullptr,
         .viewFormatCount = static_cast<u32>(format_list.size()),
         .pViewFormats = format_list.data(),
     };
 
-    const vk::ImageCreateInfo image_info = {
+    const VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .pNext = need_format_list ? &image_format_list : nullptr,
-        .flags = flags,
-        .imageType = vk::ImageType::e2D,
-        .format = format,
+        .flags = static_cast<VkImageCreateFlags>(flags),
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = static_cast<VkFormat>(format),
         .extent = {width, height, 1},
         .mipLevels = levels,
         .arrayLayers = layers,
-        .samples = vk::SampleCountFlagBits::e1,
-        .usage = usage,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = static_cast<VkImageUsageFlags>(usage),
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
     const VmaAllocationCreateInfo alloc_info = {
@@ -212,9 +220,8 @@ void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::For
     };
 
     VkImage unsafe_image{};
-    VkImageCreateInfo unsafe_image_info = static_cast<VkImageCreateInfo>(image_info);
 
-    VkResult result = vmaCreateImage(instance.GetAllocator(), &unsafe_image_info, &alloc_info,
+    VkResult result = vmaCreateImage(instance.GetAllocator(), &image_info, &alloc_info,
                                      &unsafe_image, &allocation, nullptr);
     if (result != VK_SUCCESS) [[unlikely]] {
         LOG_CRITICAL(Render_Vulkan, "Failed allocating image with error {}", result);

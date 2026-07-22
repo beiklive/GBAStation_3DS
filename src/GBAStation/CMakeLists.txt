@@ -18,12 +18,6 @@ add_executable(gbastation
     overlay/gbastation_config.h
     overlay/vulkan_overlay.cpp
     overlay/vulkan_overlay.h
-    overlay/vulkan_menu_renderer.cpp
-    overlay/vulkan_menu_renderer.h
-    shaders/menu.vert
-    shaders/menu.frag
-    shaders/menu_vert_spv.h
-    shaders/menu_frag_spv.h
 )
 
 create_target_directory_groups(gbastation)
