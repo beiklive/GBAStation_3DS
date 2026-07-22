@@ -21,6 +21,7 @@ void Update(PadState* pad);
 
 bool IsVisible();
 bool ShouldExit();
+void Close();
 
 // Returns and clears the last queued OverlayUI::Action (0 when none).
 int ConsumeAction();

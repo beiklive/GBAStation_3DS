@@ -2326,7 +2326,8 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         builder.AddText(content_x0, text_y, label_text, row_scale);
         if (!item.value.empty()) {
             const std::string value = item.uses_lr
-                                          ? std::string("L  ") + item.value + "  R"
+                                          ? IconUtf8(0xE0E4) + "  " + item.value + "  " +
+                                                IconUtf8(0xE0E5)
                                           : item.value;
             const float value_x = content_x1 - OverlayBuilder::Measure(value, row_scale);
             builder.AddText(value_x, text_y, value, row_scale);
@@ -2376,28 +2377,8 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     const auto push_prompt = [&](u32 icon, std::string text) {
         prompts.push_back({IconUtf8(icon), std::move(text)});
     };
-    if (state.tabs_focused) {
-        push_prompt(0xE5CA, selected_tab == 0 ? "返回游戏" : "进入");
-        push_prompt(0xE5CD, "返回");
-        if (selected_tab == 4) {
-            push_prompt(0xE314, "调整");
-            push_prompt(0xE315, "调整");
-        } else {
-            push_prompt(0xE314, "切换");
-            push_prompt(0xE315, "切换");
-        }
-    } else {
-        push_prompt(0xE5CA,
-                    selected_tab == 1 ? "保存" : (selected_tab == 2 ? "读取"
-                                                                  : (selected_tab == 3 ? "开关" : "确定")));
-        push_prompt(0xE5CD, "返回");
-        push_prompt(0xE316, "上");
-        push_prompt(0xE313, "下");
-        if (selected_tab == 4) {
-            push_prompt(0xE314, "减");
-            push_prompt(0xE315, "增");
-        }
-    }
+    push_prompt(0xE0E0, "确认");
+    push_prompt(0xE0E1, "取消");
 
     if (!prompts.empty()) {
         const float gap = std::round(em * 0.42f);

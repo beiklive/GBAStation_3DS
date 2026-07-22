@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -60,6 +61,11 @@ struct PreviousNavigation {
     bool shoulder_right{};
 };
 
+struct RepeatButton {
+    bool held{};
+    std::chrono::steady_clock::time_point next{};
+};
+
 std::atomic_bool initialized{};
 std::atomic_bool visible{};
 std::atomic_bool exit_requested{};
@@ -69,6 +75,13 @@ int selected = 0;
 bool tabs_focused = true;
 bool previous_combo{};
 PreviousNavigation previous_navigation{};
+RepeatButton repeat_up;
+RepeatButton repeat_down;
+RepeatButton repeat_shoulder_left;
+RepeatButton repeat_shoulder_right;
+
+void ResetRepeatState();
+bool PressOrRepeat(bool pressed, RepeatButton& repeat);
 
 std::atomic<float> fast_forward_multiplier{4.0f};
 std::atomic_int display_layout{2};
@@ -349,12 +362,14 @@ void OpenMenu() {
     tabs_focused = true;
     visible.store(true, std::memory_order_release);
     previous_navigation = {};
+    ResetRepeatState();
     Repaint();
 }
 
 void CloseMenu() {
     visible.store(false, std::memory_order_release);
     previous_navigation = {};
+    ResetRepeatState();
     tabs_focused = true;
     VideoCore::SetOverlayMenuState({});
 }
@@ -466,7 +481,7 @@ void ActivateCurrent() {
         const auto cheats = OverlayUI::GetCheats();
         if (selected > 0 && selected <= static_cast<int>(cheats.size())) {
             const bool toggled = OverlayUI::ToggleCheat(selected - 1);
-            OverlayUI::ShowToast(toggled ? "金手指设置已保存" : "金手指设置失败");
+            OverlayUI::ShowToast(toggled ? "金手指已切换" : "金手指设置失败");
         }
         Repaint();
         return;
@@ -502,6 +517,32 @@ bool Rising(bool current, bool previous) {
     return current && !previous;
 }
 
+void ResetRepeatState() {
+    repeat_up = {};
+    repeat_down = {};
+    repeat_shoulder_left = {};
+    repeat_shoulder_right = {};
+}
+
+bool PressOrRepeat(bool pressed, RepeatButton& repeat) {
+    using namespace std::chrono_literals;
+    const auto now = std::chrono::steady_clock::now();
+    if (!pressed) {
+        repeat = {};
+        return false;
+    }
+    if (!repeat.held) {
+        repeat.held = true;
+        repeat.next = now + 330ms;
+        return true;
+    }
+    if (now < repeat.next) {
+        return false;
+    }
+    repeat.next = now + 72ms;
+    return true;
+}
+
 } // namespace
 
 bool Init([[maybe_unused]] Vulkan::RendererVulkan& renderer) {
@@ -511,6 +552,7 @@ bool Init([[maybe_unused]] Vulkan::RendererVulkan& renderer) {
     pending_action.store(0, std::memory_order_release);
     previous_combo = false;
     previous_navigation = {};
+    ResetRepeatState();
     VideoCore::SetOverlayMenuState({});
     LOG_INFO(Render_Vulkan, "{} initialized with video_core overlay", Tag);
     return true;
@@ -532,6 +574,7 @@ void Update(PadState* pad) {
 
     if (!visible.load(std::memory_order_acquire)) {
         previous_navigation = {};
+        ResetRepeatState();
         return;
     }
 
@@ -548,6 +591,10 @@ void Update(PadState* pad) {
 
     bool changed = false;
     const int tab_count = static_cast<int>(Page::Count);
+    const bool up_step = PressOrRepeat(nav.up, repeat_up);
+    const bool down_step = PressOrRepeat(nav.down, repeat_down);
+    const bool shoulder_left_step = PressOrRepeat(nav.shoulder_left, repeat_shoulder_left);
+    const bool shoulder_right_step = PressOrRepeat(nav.shoulder_right, repeat_shoulder_right);
 
     const auto step_tab = [&](int direction) {
         const int next = (static_cast<int>(page) + direction + tab_count) % tab_count;
@@ -556,19 +603,19 @@ void Update(PadState* pad) {
         tabs_focused = true;
     };
 
-    if (tabs_focused && Rising(nav.up, previous_navigation.up)) {
+    if (tabs_focused && up_step) {
         step_tab(-1);
         changed = true;
     }
-    if (tabs_focused && Rising(nav.down, previous_navigation.down)) {
+    if (tabs_focused && down_step) {
         step_tab(1);
         changed = true;
     }
-    if (!tabs_focused && Rising(nav.up, previous_navigation.up)) {
+    if (!tabs_focused && up_step) {
         StepContentSelection(-1);
         changed = true;
     }
-    if (!tabs_focused && Rising(nav.down, previous_navigation.down)) {
+    if (!tabs_focused && down_step) {
         StepContentSelection(1);
         changed = true;
     }
@@ -584,20 +631,19 @@ void Update(PadState* pad) {
         selected = 0;
         changed = true;
     }
-    if (tabs_focused && Rising(nav.shoulder_left, previous_navigation.shoulder_left)) {
+    if (tabs_focused && shoulder_left_step) {
         step_tab(-1);
         changed = true;
     }
-    if (tabs_focused && Rising(nav.shoulder_right, previous_navigation.shoulder_right)) {
+    if (tabs_focused && shoulder_right_step) {
         step_tab(1);
         changed = true;
     }
     if (!tabs_focused && page == Page::Display &&
-        (Rising(nav.shoulder_left, previous_navigation.shoulder_left) ||
-         Rising(nav.shoulder_right, previous_navigation.shoulder_right))) {
+        (shoulder_left_step || shoulder_right_step)) {
         const auto items = BuildCurrentItems();
         if (IsSelectable(items, selected) && items[selected].uses_lr) {
-            StepDisplayValue(nav.shoulder_right ? 1 : -1);
+            StepDisplayValue(shoulder_right_step ? 1 : -1);
             changed = true;
         }
     }
@@ -624,6 +670,10 @@ bool IsVisible() {
 
 bool ShouldExit() {
     return exit_requested.load(std::memory_order_acquire);
+}
+
+void Close() {
+    CloseMenu();
 }
 
 int ConsumeAction() {
@@ -698,6 +748,7 @@ void PrepareForShutdown() {
     exit_requested.store(true, std::memory_order_release);
     pending_action.store(0, std::memory_order_release);
     previous_navigation = {};
+    ResetRepeatState();
     VideoCore::SetOverlayMenuState({});
 }
 

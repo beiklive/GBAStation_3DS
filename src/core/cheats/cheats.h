@@ -44,6 +44,9 @@ public:
     /// Updates a cheat at the specified index in the cheats list.
     void UpdateCheat(std::size_t index, std::shared_ptr<CheatBase>&& new_cheat);
 
+    /// Toggles one cheat while holding the cheat list lock.
+    bool ToggleCheat(std::size_t index, bool* enabled = nullptr);
+
     /// Loads the cheat file from disk for the specified title id.
     void LoadCheatFile(u64 title_id);
 

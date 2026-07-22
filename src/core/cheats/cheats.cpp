@@ -61,6 +61,21 @@ void CheatEngine::UpdateCheat(std::size_t index, std::shared_ptr<CheatBase>&& ne
     cheats_list[index] = std::move(new_cheat);
 }
 
+bool CheatEngine::ToggleCheat(std::size_t index, bool* enabled_out) {
+    std::unique_lock lock{cheats_list_mutex};
+    if (index >= cheats_list.size() || !cheats_list[index]) {
+        LOG_ERROR(Core_Cheats, "Invalid index {}", index);
+        return false;
+    }
+
+    const bool enabled = !cheats_list[index]->IsEnabled();
+    cheats_list[index]->SetEnabled(enabled);
+    if (enabled_out) {
+        *enabled_out = enabled;
+    }
+    return true;
+}
+
 void CheatEngine::SaveCheatFile(u64 title_id) const {
     const std::string cheat_dir = FileUtil::GetUserPath(FileUtil::UserPath::CheatsDir);
     const std::string filepath = fmt::format("{}{:016X}.txt", cheat_dir, title_id);
@@ -72,9 +87,11 @@ void CheatEngine::SaveCheatFile(u64 title_id) const {
     }
     FileUtil::IOFile file(filepath, "w");
 
-    auto cheats = GetCheats();
-    for (const auto& cheat : cheats) {
-        file.WriteString(cheat->ToString());
+    std::shared_lock lock{cheats_list_mutex};
+    for (const auto& cheat : cheats_list) {
+        if (cheat) {
+            file.WriteString(cheat->ToString());
+        }
     }
 }
 

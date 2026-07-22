@@ -80,7 +80,7 @@ namespace {
 
 constexpr const char* SystemDir = "sdmc:/GBAStation/3ds";
 constexpr const char* DebugDir = "sdmc:/GBAStation/3ds/debug";
-constexpr const char* BootMarkerPath = "sdmc:/GBAStation/3ds/azahar_boot.txt";
+constexpr const char* BootMarkerPath = "sdmc:/GBAStation/3ds/debug/azahar_boot.txt";
 constexpr const char* StartupLogPath = "sdmc:/GBAStation/3ds/debug/startup.txt";
 constexpr const char* DebugLogPath = "sdmc:/GBAStation/3ds/debug/azahar_switch.txt";
 constexpr const char* HeartbeatLogPath = "sdmc:/GBAStation/3ds/debug/heartbeat.txt";
@@ -125,6 +125,7 @@ void EnsureSystemDirs() {
     mkdir("sdmc:/GBAStation", 0777);
     mkdir("sdmc:/GBAStation/3ds", 0777);
     mkdir(SystemDir, 0777);
+    mkdir(DebugDir, 0777);
 }
 
 void WriteRawBootMarker(const char* message) {
@@ -739,6 +740,69 @@ const char* ResultStatusName(Core::System::ResultStatus status) {
     return "Unknown";
 }
 
+bool DrainAsyncOperationsForSavestate(Core::System& system) {
+    if (!system.KernelRunning() || !system.Kernel().AreAsyncOperationsPending()) {
+        return true;
+    }
+
+    DebugLog("savestate waiting for pending async operations");
+    const auto start = std::chrono::steady_clock::now();
+    while (system.Kernel().AreAsyncOperationsPending()) {
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+            DebugLog("savestate async drain timed out");
+            return false;
+        }
+
+        const Core::System::ResultStatus result = system.RunLoop();
+        if (result != Core::System::ResultStatus::Success) {
+            DebugLog("savestate async drain failed: %s (%u)", ResultStatusName(result),
+                     static_cast<unsigned>(result));
+            return false;
+        }
+    }
+
+    DebugLog("savestate async drain completed");
+    return true;
+}
+
+bool SaveStateFromMenu(Core::System& system, u32 slot) {
+    if (!DrainAsyncOperationsForSavestate(system)) {
+        SwitchFrontend::OverlayUI::ShowToast("状态保存失败：系统繁忙");
+        return false;
+    }
+
+    DebugLog("menu begin direct save state slot=%u", slot);
+    try {
+        system.SaveState(slot);
+        system.frame_limiter.AdvanceFrame();
+        DebugLog("menu direct save state completed slot=%u", slot);
+        return true;
+    } catch (const std::exception& e) {
+        DebugLog("menu direct save state failed slot=%u: %s", slot, e.what());
+        SwitchFrontend::OverlayUI::ShowToast("状态保存失败");
+        return false;
+    }
+}
+
+bool LoadStateFromMenu(Core::System& system, u32 slot) {
+    if (!DrainAsyncOperationsForSavestate(system)) {
+        SwitchFrontend::OverlayUI::ShowToast("状态读取失败：系统繁忙");
+        return false;
+    }
+
+    DebugLog("menu begin direct load state slot=%u", slot);
+    try {
+        system.LoadState(slot);
+        system.frame_limiter.AdvanceFrame();
+        DebugLog("menu direct load state completed slot=%u", slot);
+        return true;
+    } catch (const std::exception& e) {
+        DebugLog("menu direct load state failed slot=%u: %s", slot, e.what());
+        SwitchFrontend::OverlayUI::ShowToast("状态读取失败");
+        return false;
+    }
+}
+
 bool EndsWithNoCase(std::string_view value, std::string_view suffix) {
     if (value.size() < suffix.size()) {
         return false;
@@ -1247,22 +1311,24 @@ int Run(int argc, char** argv) {
     StartupLog("Run: ConfigureSettings");
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
+    SwitchFrontend::GBAStationConfig::ApplyConfig();
     ApplyConfiguredDisplayDefaults(launch_options.display_settings,
                                    !launch_options.display_settings_from_game_db,
                                    !launch_options.display_settings_from_game_db);
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
-    SwitchFrontend::GBAStationConfig::ApplyConfig();
     Settings::values.swap_screen.SetValue(false);
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s effective_res=%u skip_duplicate=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
+             launch_options.display_settings_from_game_db ? 1 : 0,
+             launch_options.display_settings.internal_resolution,
              Settings::values.resolution_factor.GetValue(),
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0);
     StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
@@ -1270,7 +1336,7 @@ int Run(int argc, char** argv) {
     StartupLog("Run: Common::Log init");
     bool common_log_started = false;
     if (EnableCommonLogFile) {
-        Common::Log::Initialize("azahar_common.txt");
+        Common::Log::Initialize("../debug/azahar_common.txt");
         Common::Log::Start();
         common_log_started = true;
     } else {
@@ -1341,6 +1407,7 @@ int Run(int argc, char** argv) {
             return slot > 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
                    (*slot_state_cache)[slot].load(std::memory_order_acquire);
         });
+    auto cheat_settings_dirty = std::make_shared<std::atomic_bool>(false);
     SwitchFrontend::OverlayUI::SetCheatCallbacks(
         [&system]() {
             std::vector<SwitchFrontend::OverlayUI::CheatEntry> entries;
@@ -1353,13 +1420,16 @@ int Run(int argc, char** argv) {
             }
             return entries;
         },
-        [&system](int index) {
-            const auto cheats = system.CheatEngine().GetCheats();
-            if (index < 0 || index >= static_cast<int>(cheats.size()) || !cheats[index]) {
+        [&system, cheat_settings_dirty](int index) {
+            if (index < 0) {
                 return false;
             }
-            cheats[index]->SetEnabled(!cheats[index]->IsEnabled());
-            system.CheatEngine().SaveLoadedCheatFile();
+            bool enabled = false;
+            if (!system.CheatEngine().ToggleCheat(static_cast<std::size_t>(index), &enabled)) {
+                return false;
+            }
+            cheat_settings_dirty->store(true, std::memory_order_release);
+            DebugLog("menu cheat toggled index=%d enabled=%d", index, enabled ? 1 : 0);
             return true;
         });
 
@@ -1406,6 +1476,17 @@ int Run(int argc, char** argv) {
     bool fast_forward_compile_throttled = false;
     bool force_input_suppressed_during_shutdown = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
+    enum class PendingStateOperation {
+        None,
+        Save,
+        Load,
+    };
+    struct PendingStateRequest {
+        PendingStateOperation operation{PendingStateOperation::None};
+        int slot{};
+        int delay_frames{};
+    };
+    PendingStateRequest pending_state_request{};
     u64 diagnostic_runloop_count = 0;
     double diagnostic_runloop_ms_total = 0.0;
     double diagnostic_runloop_ms_max = 0.0;
@@ -1500,6 +1581,11 @@ int Run(int argc, char** argv) {
             DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
             menu_was_visible = menu_visible;
         }
+        if (!menu_visible && cheat_settings_dirty->exchange(false, std::memory_order_acq_rel)) {
+            system.CheatEngine().SaveLoadedCheatFile();
+            SwitchFrontend::OverlayUI::ShowToast("金手指设置已保存");
+            DebugLog("menu cheat settings persisted after close");
+        }
         if (!menu_visible && block_game_input_until_release && padGetButtons(&pad) == 0) {
             block_game_input_until_release = false;
         }
@@ -1535,22 +1621,20 @@ int Run(int argc, char** argv) {
             SwitchFrontend::OverlayUI::IsLoadStateAction(menu_action)) {
             const int slot = SwitchFrontend::OverlayUI::GetStateSlotForAction(menu_action);
             const bool saving = SwitchFrontend::OverlayUI::IsSaveStateAction(menu_action);
-            const bool accepted = system.SendSignal(
-                saving ? Core::System::Signal::Save : Core::System::Signal::Load,
-                static_cast<u32>(slot));
-            if (accepted) {
-                if (saving) {
-                    (*slot_state_cache)[slot].store(true, std::memory_order_release);
-                } else {
-                    pause_frame_ready = false;
-                    pause_frame_baseline = renderer.GetCurrentFrame();
+            if (pending_state_request.operation == PendingStateOperation::None) {
+                pending_state_request.operation =
+                    saving ? PendingStateOperation::Save : PendingStateOperation::Load;
+                pending_state_request.slot = slot;
+                pending_state_request.delay_frames = 1;
+                if (menu_initialized) {
+                    SwitchFrontend::VulkanOverlay::Close();
                 }
                 char message[64]{};
-                std::snprintf(message, sizeof(message), saving ? "正在保存到存档位 %d"
-                                                              : "正在读取存档位 %d",
+                std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
+                                                              : "准备读取存档位 %d",
                               slot);
                 SwitchFrontend::OverlayUI::ShowToast(message);
-                DebugLog("menu %s state slot=%d", saving ? "save" : "load", slot);
+                DebugLog("menu queued %s state slot=%d", saving ? "save" : "load", slot);
             } else {
                 SwitchFrontend::OverlayUI::ShowToast("已有状态操作正在进行");
             }
@@ -1668,6 +1752,35 @@ int Run(int argc, char** argv) {
             break;
         }
 
+        if (pending_state_request.operation != PendingStateOperation::None &&
+            !SwitchFrontend::VulkanOverlay::IsVisible()) {
+            if (pending_state_request.delay_frames > 0) {
+                --pending_state_request.delay_frames;
+            } else {
+                const PendingStateOperation operation = pending_state_request.operation;
+                const int slot = pending_state_request.slot;
+                pending_state_request = {};
+
+                const bool saving = operation == PendingStateOperation::Save;
+                const bool ok = saving ? SaveStateFromMenu(system, static_cast<u32>(slot))
+                                       : LoadStateFromMenu(system, static_cast<u32>(slot));
+                if (ok) {
+                    if (saving) {
+                        (*slot_state_cache)[slot].store(true, std::memory_order_release);
+                    } else {
+                        pause_frame_ready = false;
+                        pause_frame_baseline = renderer.GetCurrentFrame();
+                    }
+                    char message[64]{};
+                    std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
+                                                                  : "已读取存档位 %d",
+                                  slot);
+                    SwitchFrontend::OverlayUI::ShowToast(message);
+                }
+                block_game_input_until_release = true;
+            }
+        }
+
         if (!menu_initialized && ExitComboPressed()) {
             exit_reason = "ZL+ZR fallback exit";
             DebugLog("menu unavailable; fallback exit combo after %llu iterations",
@@ -1683,7 +1796,8 @@ int Run(int argc, char** argv) {
             break;
         }
 
-        const bool pause_for_menu = menu_visible && pause_frame_ready;
+        const bool pause_for_menu =
+            menu_initialized && SwitchFrontend::VulkanOverlay::IsVisible() && pause_frame_ready;
         if (pause_for_menu) {
             static_cast<Vulkan::RendererVulkan&>(renderer).PresentLastFrame();
             ++loop_count;

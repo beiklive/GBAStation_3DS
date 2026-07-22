@@ -28,7 +28,7 @@ namespace {
 constexpr int RuntimeAtlasWidth = 1024;
 constexpr int RuntimeAtlasHeight = 1024;
 constexpr float RuntimeBakePixelHeight = 32.0f;
-constexpr std::array<u32, 13> MaterialIconCodepoints{{
+constexpr std::array<u32, 7> MaterialIconCodepoints{{
     0xE5C4, // keyboard_return
     0xE161, // save
     0xE2C6, // folder_open
@@ -36,12 +36,24 @@ constexpr std::array<u32, 13> MaterialIconCodepoints{{
     0xE333, // settings_overscan
     0xE5D5, // refresh
     0xE879, // exit_to_app
-    0xE5CA, // check
-    0xE5CD, // close
-    0xE313, // keyboard_arrow_down
-    0xE314, // keyboard_arrow_left
-    0xE315, // keyboard_arrow_right
-    0xE316, // keyboard_arrow_up
+}};
+constexpr std::array<u32, 16> SwitchButtonIconCodepoints{{
+    0xE0E0, // BUTTON_A
+    0xE0E1, // BUTTON_B
+    0xE0E2, // BUTTON_X
+    0xE0E3, // BUTTON_Y
+    0xE104, // BUTTON_LSB
+    0xE105, // BUTTON_RSB
+    0xE0E6, // BUTTON_LT
+    0xE0E7, // BUTTON_RT
+    0xE0E4, // BUTTON_LB
+    0xE0E5, // BUTTON_RB
+    0xE0EF, // BUTTON_START
+    0xE0F0, // BUTTON_BACK
+    0xE0ED, // BUTTON_LEFT
+    0xE0EB, // BUTTON_UP
+    0xE0EE, // BUTTON_RIGHT
+    0xE0EC, // BUTTON_DOWN
 }};
 struct RuntimeAtlas {
     std::vector<unsigned char> pixels;
@@ -94,7 +106,7 @@ std::vector<u32> BuildTextCodepoints() {
         codepoints.push_back(cp);
     }
 
-    constexpr std::array<std::string_view, 59> strings{{
+    constexpr std::array<std::string_view, 62> strings{{
         "GBAStation 菜单",
         "继续游戏",
         "返回游戏",
@@ -110,6 +122,7 @@ std::vector<u32> BuildTextCodepoints() {
         "金手指列表",
         "暂无金手指功能",
         "金手指设置已保存",
+        "金手指已切换",
         "金手指设置失败",
         "返回上级",
         "快进",
@@ -138,6 +151,8 @@ std::vector<u32> BuildTextCodepoints() {
         "下屏",
         "自定义",
         "确定",
+        "确认",
+        "取消",
         "调整",
         "选择",
         "切换标签",
@@ -230,8 +245,25 @@ std::vector<unsigned char> LoadSwitchChineseFont() {
     return data;
 }
 
+std::vector<unsigned char> LoadSwitchNintendoExtFont() {
+    std::vector<unsigned char> data;
+    if (plInitialize(PlServiceType_User) == 0) {
+        data = CopySharedFont(PlSharedFontType_NintendoExt);
+        plExit();
+    }
+    if (data.empty()) {
+        LOG_WARNING(Render_Vulkan,
+                    "Overlay Switch NintendoExt font unavailable; button icons will be hidden");
+    }
+    return data;
+}
+
 #else
 std::vector<unsigned char> LoadSwitchChineseFont() {
+    return {};
+}
+
+std::vector<unsigned char> LoadSwitchNintendoExtFont() {
     return {};
 }
 #endif
@@ -339,6 +371,15 @@ bool Initialize() {
         std::vector<u32> icon_codepoints(MaterialIconCodepoints.begin(), MaterialIconCodepoints.end());
         PackCodepoints(context, material_font, icon_codepoints,
                        FontAscentForPixelHeight(material_font, RuntimeBakePixelHeight),
+                       next.glyphs);
+    }
+
+    std::vector<unsigned char> nintendo_font = LoadSwitchNintendoExtFont();
+    if (!nintendo_font.empty()) {
+        std::vector<u32> button_codepoints(SwitchButtonIconCodepoints.begin(),
+                                           SwitchButtonIconCodepoints.end());
+        PackCodepoints(context, nintendo_font, button_codepoints,
+                       FontAscentForPixelHeight(nintendo_font, RuntimeBakePixelHeight),
                        next.glyphs);
     }
 
