@@ -50,6 +50,9 @@ public:
     /// Loads the cheat file from disk for the specified title id.
     void LoadCheatFile(u64 title_id);
 
+    /// Disables every loaded cheat without changing the loaded cheat list.
+    void DisableAllCheats();
+
     /// Saves currently active cheats to file for the specified title id.
     void SaveCheatFile(u64 title_id) const;
 

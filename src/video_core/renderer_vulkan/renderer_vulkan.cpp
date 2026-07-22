@@ -2204,6 +2204,8 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     constexpr std::array<float, 4> c_disabled = {0.50f, 0.53f, 0.60f, 0.70f};
     constexpr std::array<float, 4> c_footer = {0.60f, 0.63f, 0.72f, 1.0f};
     constexpr std::array<float, 4> c_icon = {0.44f, 0.80f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> c_cheat_enabled = {0.38f, 0.76f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> c_cheat_enabled_selected = {0.58f, 0.88f, 1.0f, 1.0f};
 
     {
         const u32 start = builder.VertexCount();
@@ -2255,12 +2257,13 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         const bool is_selected = index == selected_tab;
         const float top = tabs_top + static_cast<float>(index) * tab_h;
         const float center_y = top + tab_h * 0.5f;
+        const float icon_line_h = OverlayFont::LineHeight() * icon_scale;
+        const float icon_y = std::round(center_y - icon_line_h * 0.5f);
+        const float label_y = std::round(center_y - line_h * 0.5f + em * 0.055f);
         if (!tab.icon.empty()) {
-            builder.AddText(tab_x0 + std::round(pad * 0.75f), center_y - line_h * 0.58f, tab.icon,
-                            icon_scale);
+            builder.AddText(tab_x0 + std::round(pad * 0.75f), icon_y, tab.icon, icon_scale);
         }
-        builder.AddText(tab_x0 + std::round(pad * 2.45f), center_y - line_h * 0.50f, tab.label,
-                        scale);
+        builder.AddText(tab_x0 + std::round(pad * 2.45f), label_y, tab.label, scale);
         if (is_selected) {
             builder.AddRect(tab_x0, top + 10.0f, tab_x0 + 4.0f, top + tab_h - 10.0f);
         }
@@ -2284,10 +2287,11 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         const u32 start = builder.VertexCount();
         const auto& tab = state.tabs[selected_tab];
         if (!tab.icon.empty()) {
+            const float top = tabs_top + static_cast<float>(selected_tab) * tab_h;
+            const float center_y = top + tab_h * 0.5f;
+            const float icon_line_h = OverlayFont::LineHeight() * icon_scale;
             builder.AddText(tab_x0 + std::round(pad * 0.75f),
-                            tabs_top + static_cast<float>(selected_tab) * tab_h +
-                                tab_h * 0.5f - line_h * 0.58f,
-                            tab.icon, icon_scale);
+                            std::round(center_y - icon_line_h * 0.5f), tab.icon, icon_scale);
         }
         emit(c_icon, start);
     }
@@ -2304,6 +2308,11 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
 
     const bool cheats_page = selected_tab == 3;
     const bool content_focused = !state.tabs_focused;
+    const auto is_enabled_cheat_row = [&](int index) {
+        return cheats_page && index >= 0 && index < item_count &&
+               state.items[index].kind == VideoCore::OverlayMenuItemKind::Row &&
+               state.items[index].value == "开启";
+    };
 
     const auto add_row = [&](int index) {
         const auto& item = state.items[index];
@@ -2337,11 +2346,21 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     {
         const u32 start = builder.VertexCount();
         for (int i = 0; i < item_count; ++i) {
-            if (i != state.selected && state.items[i].kind == VideoCore::OverlayMenuItemKind::Row) {
+            if (i != state.selected && state.items[i].kind == VideoCore::OverlayMenuItemKind::Row &&
+                !is_enabled_cheat_row(i)) {
                 add_row(i);
             }
         }
         emit(c_row, start);
+    }
+    {
+        const u32 start = builder.VertexCount();
+        for (int i = 0; i < item_count; ++i) {
+            if (i != state.selected && is_enabled_cheat_row(i)) {
+                add_row(i);
+            }
+        }
+        emit(c_cheat_enabled, start);
     }
     {
         const u32 start = builder.VertexCount();
@@ -2366,7 +2385,7 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     if (has_selection) {
         const u32 start = builder.VertexCount();
         add_row(state.selected);
-        emit(c_selected, start);
+        emit(is_enabled_cheat_row(state.selected) ? c_cheat_enabled_selected : c_selected, start);
     }
 
     struct FooterPrompt {

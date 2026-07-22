@@ -1376,6 +1376,8 @@ int Run(int argc, char** argv) {
         ExitLog("early exit load-failed: appletUnlockExit done");
         return queued_launcher_return ? EXIT_SUCCESS : EXIT_FAILURE;
     }
+    system.CheatEngine().DisableAllCheats();
+    DebugLog("cheats loaded but left disabled on startup; enable manually from menu");
     ApplyConfiguredSystemLanguage(system);
     ApplyConfiguredUsername(system);
     DebugLog("renderer resolution scale factor=%u",
@@ -1762,6 +1764,10 @@ int Run(int argc, char** argv) {
                 pending_state_request = {};
 
                 const bool saving = operation == PendingStateOperation::Save;
+                if (!saving) {
+                    static_cast<Vulkan::RendererVulkan&>(renderer).PresentLastFrame();
+                    DebugLog("menu load state pre-present last frame slot=%d", slot);
+                }
                 const bool ok = saving ? SaveStateFromMenu(system, static_cast<u32>(slot))
                                        : LoadStateFromMenu(system, static_cast<u32>(slot));
                 if (ok) {
@@ -1769,7 +1775,7 @@ int Run(int argc, char** argv) {
                         (*slot_state_cache)[slot].store(true, std::memory_order_release);
                     } else {
                         pause_frame_ready = false;
-                        pause_frame_baseline = renderer.GetCurrentFrame();
+                        pause_frame_baseline = 0;
                     }
                     char message[64]{};
                     std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
@@ -1778,6 +1784,11 @@ int Run(int argc, char** argv) {
                     SwitchFrontend::OverlayUI::ShowToast(message);
                 }
                 block_game_input_until_release = true;
+                if (!saving) {
+                    // LoadState can recreate renderer/system internals.  Do not touch references
+                    // captured before the load; restart the loop and reacquire them.
+                    continue;
+                }
             }
         }
 

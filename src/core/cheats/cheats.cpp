@@ -129,6 +129,15 @@ void CheatEngine::LoadCheatFile(u64 title_id) {
     }
 }
 
+void CheatEngine::DisableAllCheats() {
+    std::unique_lock lock{cheats_list_mutex};
+    for (const auto& cheat : cheats_list) {
+        if (cheat && cheat->IsEnabled()) {
+            cheat->SetEnabled(false);
+        }
+    }
+}
+
 void CheatEngine::RunCallback([[maybe_unused]] std::uintptr_t user_data, s64 cycles_late) {
     {
         std::shared_lock lock{cheats_list_mutex};
