@@ -1764,10 +1764,6 @@ int Run(int argc, char** argv) {
                 pending_state_request = {};
 
                 const bool saving = operation == PendingStateOperation::Save;
-                if (!saving) {
-                    static_cast<Vulkan::RendererVulkan&>(renderer).PresentLastFrame();
-                    DebugLog("menu load state pre-present last frame slot=%d", slot);
-                }
                 const bool ok = saving ? SaveStateFromMenu(system, static_cast<u32>(slot))
                                        : LoadStateFromMenu(system, static_cast<u32>(slot));
                 if (ok) {

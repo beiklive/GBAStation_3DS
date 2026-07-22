@@ -51,6 +51,9 @@ static_assert(sizeof(CSTHeader) == 256, "CSTHeader should be 256 bytes");
 
 constexpr std::array<u8, 4> header_magic_bytes{{'C', 'S', 'T', 0x1B}};
 constexpr int save_state_compression_level = 1;
+#ifdef __SWITCH__
+constexpr std::size_t switch_save_state_stream_buffer_size = 256 * 1024;
+#endif
 
 static std::vector<u8> CompressSaveStateData(std::span<const u8> data) {
 #ifdef __SWITCH__
@@ -192,8 +195,8 @@ private:
 
     FileUtil::IOFile& file;
     ZSTD_CStream* stream{};
-    std::array<char, 64 * 1024> input_buffer{};
-    std::array<u8, 64 * 1024> output_buffer{};
+    std::array<char, switch_save_state_stream_buffer_size> input_buffer{};
+    std::array<u8, switch_save_state_stream_buffer_size> output_buffer{};
     std::size_t input_bytes{};
     bool finished{};
 };
@@ -279,8 +282,8 @@ protected:
 private:
     FileUtil::IOFile& file;
     ZSTD_DStream* stream{};
-    std::array<u8, 64 * 1024> input_buffer{};
-    std::array<char, 64 * 1024> output_buffer{};
+    std::array<u8, switch_save_state_stream_buffer_size> input_buffer{};
+    std::array<char, switch_save_state_stream_buffer_size> output_buffer{};
     ZSTD_inBuffer input{input_buffer.data(), 0, 0};
     std::size_t compressed_remaining{};
     bool frame_finished{};
@@ -449,6 +452,7 @@ void System::SaveState(u32 slot) const {
     }
 
 #ifdef __SWITCH__
+    const auto save_start_time = std::chrono::steady_clock::now();
     const u64 movie_id = movie.GetCurrentMovieID();
     const auto path = GetSaveStatePath(title_id, movie_id, slot);
     const auto temp_path = path + ".tmp";
@@ -517,6 +521,10 @@ void System::SaveState(u32 slot) const {
     if (backup_created) {
         FileUtil::Delete(backup_path);
     }
+    const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - save_start_time)
+                             .count();
+    LOG_INFO(Core, "Switch save state slot {} completed in {} ms", slot, save_ms);
 #else
     std::ostringstream sstream{std::ios_base::binary};
     // Serialize
@@ -563,6 +571,7 @@ void System::LoadState(u32 slot) {
     const auto path = GetSaveStatePath(title_id, movie_id, slot);
 
 #ifdef __SWITCH__
+    const auto load_start_time = std::chrono::steady_clock::now();
     const u64 file_size = FileUtil::GetSize(path);
     if (file_size < sizeof(CSTHeader)) {
         throw std::runtime_error("Save state too small");
@@ -584,10 +593,24 @@ void System::LoadState(u32 slot) {
         throw std::runtime_error("Invalid savestate");
     }
 
-    ZstdSaveStateInputStreamBuf decompressed_stream{
-        file, static_cast<std::size_t>(file_size - sizeof(CSTHeader))};
-    iarchive ia{decompressed_stream};
+    std::vector<u8> compressed(static_cast<std::size_t>(file_size - sizeof(CSTHeader)));
+    if (file.ReadBytes(compressed.data(), compressed.size()) != compressed.size()) {
+        throw std::runtime_error("Could not read from file at " + path);
+    }
+    file.Close();
+
+    std::string decompressed = DecompressSaveStateData(compressed);
+    compressed.clear();
+    compressed.shrink_to_fit();
+
+    std::istringstream sstream{std::move(decompressed), std::ios_base::binary};
+    iarchive ia{sstream};
     ia&* this;
+    const auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - load_start_time)
+                             .count();
+    LOG_INFO(Core, "Switch load state slot {} completed in {} ms file_size={}", slot, load_ms,
+             file_size);
 #else
     std::vector<u8> decompressed;
     {
