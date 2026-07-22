@@ -31,17 +31,13 @@ constexpr std::array<const char*, 7> LayoutIds{{
 
 enum class Page {
     Resume,
+    SaveState,
+    LoadState,
+    Cheats,
     Display,
     Reset,
     Exit,
     Count,
-};
-
-enum class ResumePage {
-    Main,
-    SaveSlots,
-    LoadSlots,
-    Cheats,
 };
 
 constexpr int DisplayFastForwardIndex = 1;
@@ -69,7 +65,6 @@ std::atomic_bool visible{};
 std::atomic_bool exit_requested{};
 std::atomic_int pending_action{};
 Page page = Page::Resume;
-ResumePage resume_page = ResumePage::Main;
 int selected = 0;
 bool tabs_focused = true;
 bool previous_combo{};
@@ -94,6 +89,11 @@ std::string display_overlay_path;
 int LayoutIndex(const std::string& layout) {
     const auto it = std::find(LayoutIds.begin(), LayoutIds.end(), layout);
     return it == LayoutIds.end() ? 2 : static_cast<int>(std::distance(LayoutIds.begin(), it));
+}
+
+bool PageHasContent(Page target) {
+    return target == Page::SaveState || target == Page::LoadState || target == Page::Cheats ||
+           target == Page::Display;
 }
 
 void PublishAction(OverlayUI::Action action, bool close_menu) {
@@ -163,48 +163,36 @@ OverlayUI::Action LoadActionForSlot(int slot) {
         static_cast<int>(OverlayUI::Action::LoadStateSlot1) + std::clamp(slot, 1, 10) - 1);
 }
 
-std::vector<VideoCore::OverlayMenuItem> BuildResumeItems() {
-    if (resume_page == ResumePage::SaveSlots || resume_page == ResumePage::LoadSlots) {
-        std::vector<VideoCore::OverlayMenuItem> items;
-        items.reserve(OverlayUI::StateSlotCount + 1);
-        const bool saving = resume_page == ResumePage::SaveSlots;
-        for (int slot = 1; slot <= OverlayUI::StateSlotCount; ++slot) {
-            const bool occupied = OverlayUI::IsSlotOccupied(slot);
-            char label[32]{};
-            std::snprintf(label, sizeof(label), "状态槽 %d", slot);
-            if (saving || occupied) {
-                items.push_back(Row(label, occupied ? "已有存档" : "空", true));
-            } else {
-                items.push_back(Disabled(label, "空"));
-            }
-        }
-        items.push_back(Row("返回上级"));
-        return items;
-    }
-
-    if (resume_page == ResumePage::Cheats) {
-        std::vector<VideoCore::OverlayMenuItem> items;
-        const auto cheats = OverlayUI::GetCheats();
-        items.reserve(cheats.size() + 2);
-        items.push_back(Header("金手指列表"));
-        if (cheats.empty()) {
-            items.push_back(Disabled("暂无金手指功能", ""));
+std::vector<VideoCore::OverlayMenuItem> BuildStateItems(bool saving) {
+    std::vector<VideoCore::OverlayMenuItem> items;
+    items.reserve(OverlayUI::StateSlotCount);
+    for (int slot = 1; slot <= OverlayUI::StateSlotCount; ++slot) {
+        const bool occupied = OverlayUI::IsSlotOccupied(slot);
+        char label[32]{};
+        std::snprintf(label, sizeof(label), "状态槽 %d", slot);
+        if (saving || occupied) {
+            items.push_back(Row(label, occupied ? "已有存档" : "空", true));
         } else {
-            for (const auto& cheat : cheats) {
-                items.push_back(Row(cheat.name.empty() ? "金手指" : cheat.name,
-                                    cheat.enabled ? "开启" : "关闭", true));
-            }
+            items.push_back(Disabled(label, "空"));
         }
-        items.push_back(Row("返回上级"));
-        return items;
     }
+    return items;
+}
 
-    return {
-        Row("返回游戏"),
-        Row("保存状态", "进入"),
-        Row("读取状态", "进入"),
-        Row("金手指", "进入"),
-    };
+std::vector<VideoCore::OverlayMenuItem> BuildCheatItems() {
+    std::vector<VideoCore::OverlayMenuItem> items;
+    const auto cheats = OverlayUI::GetCheats();
+    items.reserve(cheats.size() + 1);
+    items.push_back(Header("金手指列表"));
+    if (cheats.empty()) {
+        items.push_back(Disabled("暂无金手指功能", ""));
+    } else {
+        for (const auto& cheat : cheats) {
+            items.push_back(Row(cheat.name.empty() ? "金手指" : cheat.name,
+                                cheat.enabled ? "开启" : "关闭", true));
+        }
+    }
+    return items;
 }
 
 std::vector<VideoCore::OverlayMenuItem> BuildDisplayItems() {
@@ -230,13 +218,19 @@ std::vector<VideoCore::OverlayMenuItem> BuildDisplayItems() {
 std::vector<VideoCore::OverlayMenuItem> BuildCurrentItems() {
     switch (page) {
     case Page::Resume:
-        return BuildResumeItems();
+        return {};
+    case Page::SaveState:
+        return BuildStateItems(true);
+    case Page::LoadState:
+        return BuildStateItems(false);
+    case Page::Cheats:
+        return BuildCheatItems();
     case Page::Display:
         return BuildDisplayItems();
     case Page::Reset:
-        return {Row("重置游戏")};
+        return {};
     case Page::Exit:
-        return {Row("退出游戏")};
+        return {};
     default:
         return {};
     }
@@ -301,7 +295,10 @@ void Repaint() {
 
     state.title = "GBAStation 菜单";
     state.tabs = {
-        {"继续游戏", "\xEE\x97\x84"},
+        {"返回游戏", "\xEE\x97\x84"},
+        {"保存状态", "\xEE\x85\xA1"},
+        {"读取状态", "\xEE\x8B\x86"},
+        {"金手指设置", "\xEE\x8E\xAE"},
         {"画面设置", "\xEE\x8C\xB3"},
         {"重置游戏", "\xEE\x97\x95"},
         {"退出游戏", "\xEE\xA1\xB9"},
@@ -309,23 +306,35 @@ void Repaint() {
 
     switch (page) {
     case Page::Resume:
-        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
-                                  : "A 确定   B 返回   ↑/↓ 选择";
+        state.hint = "A/B 返回游戏   L/R 切换";
+        state.items = items;
+        break;
+    case Page::SaveState:
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换"
+                                  : "A 保存   B 返回   ↑/↓ 选择";
+        state.items = items;
+        break;
+    case Page::LoadState:
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换"
+                                  : "A 读取   B 返回   ↑/↓ 选择";
+        state.items = items;
+        break;
+    case Page::Cheats:
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换"
+                                  : "A 开关   B 返回   ↑/↓ 选择";
         state.items = items;
         break;
     case Page::Display:
-        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
+        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换"
                                   : "L/R 调整   A 确定   B 返回";
         state.items = items;
         break;
     case Page::Reset:
-        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
-                                  : "A 确定   B 返回";
+        state.hint = "A 重置游戏   B 返回   L/R 切换";
         state.items = items;
         break;
     case Page::Exit:
-        state.hint = tabs_focused ? "A 进入   B 关闭   L/R 切换标签"
-                                  : "A 确定   B 返回";
+        state.hint = "A 退出游戏   B 返回   L/R 切换";
         state.items = items;
         break;
     default:
@@ -336,7 +345,6 @@ void Repaint() {
 
 void OpenMenu() {
     page = Page::Resume;
-    resume_page = ResumePage::Main;
     selected = 0;
     tabs_focused = true;
     visible.store(true, std::memory_order_release);
@@ -417,61 +425,48 @@ void StepDisplayValue(int direction) {
 
 void ActivateCurrent() {
     if (tabs_focused) {
+        if (page == Page::Resume) {
+            PublishAction(OverlayUI::Action::Resume, true);
+            return;
+        }
+        if (page == Page::Reset) {
+            PublishAction(OverlayUI::Action::Reset, true);
+            return;
+        }
+        if (page == Page::Exit) {
+            PublishAction(OverlayUI::Action::Exit, true);
+            return;
+        }
+        if (!PageHasContent(page)) {
+            return;
+        }
         tabs_focused = false;
         selected = FirstSelectable(BuildCurrentItems());
         Repaint();
         return;
     }
 
-    if (page == Page::Resume) {
-        if (resume_page == ResumePage::Main) {
-            if (selected == 0) {
-                PublishAction(OverlayUI::Action::Resume, true);
-            } else if (selected == 1) {
-                resume_page = ResumePage::SaveSlots;
-                selected = 0;
-                Repaint();
-            } else if (selected == 2) {
-                resume_page = ResumePage::LoadSlots;
-                selected = 0;
-                Repaint();
-            } else if (selected == 3) {
-                resume_page = ResumePage::Cheats;
-                selected = FirstSelectable(BuildCurrentItems());
-                Repaint();
-            }
-            return;
+    if (page == Page::SaveState) {
+        const auto items = BuildCurrentItems();
+        if (selected >= 0 && selected < OverlayUI::StateSlotCount && IsSelectable(items, selected)) {
+            PublishAction(SaveActionForSlot(selected + 1), true);
         }
+        return;
+    }
 
-        if (resume_page == ResumePage::SaveSlots) {
-            if (selected >= 0 && selected < OverlayUI::StateSlotCount) {
-                PublishAction(SaveActionForSlot(selected + 1), true);
-            } else {
-                resume_page = ResumePage::Main;
-                selected = 1;
-                Repaint();
-            }
-            return;
+    if (page == Page::LoadState) {
+        const auto items = BuildCurrentItems();
+        if (selected >= 0 && selected < OverlayUI::StateSlotCount && IsSelectable(items, selected)) {
+            PublishAction(LoadActionForSlot(selected + 1), true);
         }
+        return;
+    }
 
-        if (resume_page == ResumePage::LoadSlots) {
-            if (selected >= 0 && selected < OverlayUI::StateSlotCount) {
-                PublishAction(LoadActionForSlot(selected + 1), true);
-            } else {
-                resume_page = ResumePage::Main;
-                selected = 2;
-                Repaint();
-            }
-            return;
-        }
-
+    if (page == Page::Cheats) {
         const auto cheats = OverlayUI::GetCheats();
         if (selected > 0 && selected <= static_cast<int>(cheats.size())) {
             const bool toggled = OverlayUI::ToggleCheat(selected - 1);
             OverlayUI::ShowToast(toggled ? "金手指设置已保存" : "金手指设置失败");
-        } else {
-            resume_page = ResumePage::Main;
-            selected = 3;
         }
         Repaint();
         return;
@@ -494,11 +489,7 @@ void ActivateCurrent() {
 }
 
 void GoBack() {
-    if (!tabs_focused && page == Page::Resume && resume_page != ResumePage::Main) {
-        resume_page = ResumePage::Main;
-        selected = 0;
-        Repaint();
-    } else if (!tabs_focused) {
+    if (!tabs_focused) {
         tabs_focused = true;
         selected = 0;
         Repaint();
@@ -561,7 +552,6 @@ void Update(PadState* pad) {
     const auto step_tab = [&](int direction) {
         const int next = (static_cast<int>(page) + direction + tab_count) % tab_count;
         page = static_cast<Page>(next);
-        resume_page = ResumePage::Main;
         selected = 0;
         tabs_focused = true;
     };
@@ -583,9 +573,11 @@ void Update(PadState* pad) {
         changed = true;
     }
     if (tabs_focused && Rising(nav.right, previous_navigation.right)) {
-        tabs_focused = false;
-        selected = FirstSelectable(BuildCurrentItems());
-        changed = true;
+        if (PageHasContent(page)) {
+            tabs_focused = false;
+            selected = FirstSelectable(BuildCurrentItems());
+            changed = true;
+        }
     }
     if (!tabs_focused && Rising(nav.left, previous_navigation.left)) {
         tabs_focused = true;

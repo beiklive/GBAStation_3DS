@@ -28,8 +28,11 @@ namespace {
 constexpr int RuntimeAtlasWidth = 1024;
 constexpr int RuntimeAtlasHeight = 1024;
 constexpr float RuntimeBakePixelHeight = 32.0f;
-constexpr std::array<u32, 4> MaterialIconCodepoints{{
+constexpr std::array<u32, 7> MaterialIconCodepoints{{
     0xE5C4, // keyboard_return
+    0xE161, // save
+    0xE2C6, // folder_open
+    0xE3AE, // extension
     0xE333, // settings_overscan
     0xE5D5, // refresh
     0xE879, // exit_to_app
