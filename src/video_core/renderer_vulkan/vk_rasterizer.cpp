@@ -41,13 +41,8 @@ constexpr vk::BufferUsageFlags BUFFER_USAGE =
 
 bool ShouldWaitForPipelineBuild(bool async_shaders, u32 num_vertices) {
 #ifdef __SWITCH__
-    // Fast-forward can run into scene transitions before the async pipeline workers catch up.
-    // On NVK this may snowball into thousands of skipped draws and eventually device loss, so
-    // prefer a short stall over an unstable command stream while the temporary frame limit is on.
-    if (Settings::is_temporary_frame_limit) {
-        return true;
-    }
-    // During normal speed, keep async shader compilation non-blocking to avoid visible stalls.
+    // On Switch, small draws are common during video/UI transitions. Blocking these defeats
+    // async shader compilation and shows up as multi-hundred millisecond frame stalls.
     return !async_shaders;
 #else
     return !async_shaders || num_vertices <= 6;

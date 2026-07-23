@@ -35,32 +35,25 @@ extern "C" std::uint32_t svcGetThreadCoreMask(std::int32_t* out_preferred_core,
 constexpr std::uint32_t CurrentThreadHandle = 0xFFFF8000;
 
 inline std::int32_t SelectWorkerCore(std::string_view name, std::size_t index) {
-    // The standalone frontend pins emulation to core 2. Keep all compilation work on application
-    // cores 0/1 and leave core 3 to Horizon and background sysmodules.
-    if (name.find("Pipeline") != std::string_view::npos) {
-        return 1;
-    }
     std::size_t offset = 0;
     if (name.find("Shader") != std::string_view::npos) {
         offset = 0;
+    } else if (name.find("Pipeline") != std::string_view::npos) {
+        offset = 1;
     }
     return static_cast<std::int32_t>((index + offset) % 2);
 }
 
 inline void PinWorkerThread(std::string_view name, std::size_t index) {
-    const std::int32_t preferred_core = SelectWorkerCore(name, index);
-    const bool is_pipeline_worker = name.find("Pipeline") != std::string_view::npos;
-    const std::uint32_t mask = is_pipeline_worker
-                                   ? 0x3u
-                                   : 1u << static_cast<std::uint32_t>(preferred_core);
-    const std::uint32_t set_rc =
-        svcSetThreadCoreMask(CurrentThreadHandle, preferred_core, mask);
+    const std::int32_t core = SelectWorkerCore(name, index);
+    const std::uint32_t mask = 1u << static_cast<std::uint32_t>(core);
+    const std::uint32_t set_rc = svcSetThreadCoreMask(CurrentThreadHandle, core, mask);
     std::int32_t preferred = -1;
     std::uint64_t affinity = 0;
     const std::uint32_t get_rc = svcGetThreadCoreMask(&preferred, &affinity, CurrentThreadHandle);
     LOG_INFO(Common,
-             "Switch worker affinity {}[{}]: requested_core={} mask=0x{:x} rc=0x{:x} get_rc=0x{:x} preferred={} affinity=0x{:x}",
-             name, index, preferred_core, mask, set_rc, get_rc, preferred, affinity);
+             "Switch worker affinity {}[{}]: set core={} mask=0x{:x} rc=0x{:x} get_rc=0x{:x} preferred={} affinity=0x{:x}",
+             name, index, core, mask, set_rc, get_rc, preferred, affinity);
 }
 } // namespace SwitchThreadWorker
 #endif

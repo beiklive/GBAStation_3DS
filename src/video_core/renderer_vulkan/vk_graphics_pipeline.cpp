@@ -73,12 +73,11 @@ Shader::~Shader() {
 }
 
 GraphicsPipeline::GraphicsPipeline(const Instance& instance_, RenderManager& renderpass_cache_,
-                                    const PipelineInfo& info_, vk::PipelineCache pipeline_cache_,
-                                    vk::PipelineLayout layout_, std::array<Shader*, 3> stages_,
-                                    Common::ThreadWorker* worker_, std::mutex* build_mutex_)
+                                   const PipelineInfo& info_, vk::PipelineCache pipeline_cache_,
+                                   vk::PipelineLayout layout_, std::array<Shader*, 3> stages_,
+                                   Common::ThreadWorker* worker_)
     : instance{instance_}, renderpass_cache{renderpass_cache_}, worker{worker_},
-      build_mutex{build_mutex_}, pipeline_layout{layout_}, pipeline_cache{pipeline_cache_},
-      info{info_}, stages{stages_} {}
+      pipeline_layout{layout_}, pipeline_cache{pipeline_cache_}, info{info_}, stages{stages_} {}
 
 GraphicsPipeline::~GraphicsPipeline() = default;
 
@@ -97,11 +96,9 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     }
 
     // Ask the driver if it can give us the pipeline quickly.
-#ifndef __SWITCH__
     if (!shaders_pending && instance.IsPipelineCreationCacheControlSupported() && Build(true)) {
         return true;
     }
-#endif
 
     // Fallback to (a)synchronous compilation
     worker->QueueWork([this] { Build(); });
@@ -265,14 +262,6 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         };
     }
 
-    const vk::RenderPass renderpass = renderpass_cache.GetRenderpass(
-        info.state.attachments.color, info.state.attachments.depth, false);
-#ifdef __SWITCH__
-    // NVK's Switch winsys modifies GPU mappings while creating a pipeline. Serialize that work
-    // with graphics/present queue submissions to keep scene-transition shader uploads from racing
-    // command execution on the same channel.
-    std::scoped_lock build_lock{*build_mutex};
-#endif
     vk::GraphicsPipelineCreateInfo pipeline_info = {
         .stageCount = shader_count,
         .pStages = shader_stages.data(),
@@ -285,7 +274,8 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_info,
         .layout = pipeline_layout,
-        .renderPass = renderpass,
+        .renderPass = renderpass_cache.GetRenderpass(info.state.attachments.color,
+                                                     info.state.attachments.depth, false),
     };
 
     if (fail_on_compile_required) {

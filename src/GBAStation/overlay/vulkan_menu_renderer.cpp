@@ -24,10 +24,11 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-#include "GBAStation/switch_libnx.h"
 #include "GBAStation/shaders/menu_frag_spv.h"
 #include "GBAStation/shaders/menu_vert_spv.h"
+#include "GBAStation/switch_libnx.h"
 #include "common/logging/log.h"
+#include "video_core/overlay.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_memory_util.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -236,7 +237,7 @@ bool BuildFontAtlas() {
         "游戏菜单返回游戏保存状态读取状态金手指画面设置重置退出"
         "档位已有状态空存档槽继续按确定返回列表不可用"
         "暂无金手指功能将在后续版本提供屏幕布局画面方向整数倍缩放屏幕间距"
-        "自定义画面布局调整当前项上屏布局下屏布局缩放偏移"
+        "自定义画面布局调整当前项上屏布局下屏布局大小缩放偏移"
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
         "同步遮罩同步画面设置执行已同步到个游戏失败"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
@@ -1117,12 +1118,18 @@ void DrawFpsIndicator(const State& state) {
 }
 
 const char* DisplayLayoutLabel(std::string_view layout) {
-    if (layout == "vertical") return "竖向";
-    if (layout == "horizontal") return "横向";
-    if (layout == "hybrid") return "混合";
-    if (layout == "top") return "仅上屏";
-    if (layout == "bottom") return "仅下屏";
-    if (layout == "custom") return "自定义";
+    if (layout == "vertical")
+        return "竖向";
+    if (layout == "horizontal")
+        return "横向";
+    if (layout == "hybrid")
+        return "混合";
+    if (layout == "top")
+        return "仅上屏";
+    if (layout == "bottom")
+        return "仅下屏";
+    if (layout == "custom")
+        return "自定义";
     return "上屏优先";
 }
 
@@ -1136,11 +1143,12 @@ void DrawCustomLayoutSidebar(const State& state) {
     constexpr float RowW = 420.0f;
     constexpr float RowH = 52.0f;
 
-    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.04f});
+    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.16f});
     Rect(PanelX, 0, PanelW, 720, {0.015f, 0.020f, 0.030f, 0.52f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
-    Text(830, 54, 27, White, "自定义画面布局");
-    Text(830, 87, 16, Muted, "B 返回   A 重置当前项");
+    IconCentered(850, 47, 27, Cyan, 0xE3C9);
+    Text(878, 54, 27, White, "自定义画面布局");
+    Text(830, 87, 16, Muted, "L/R 调整   A 重置当前项   B 保存返回");
 
     auto section = [&](float y, const char* label) {
         Rect(830, y + 12, 72, 1, {1.0f, 1.0f, 1.0f, 0.13f});
@@ -1177,14 +1185,30 @@ void DrawCustomLayoutSidebar(const State& state) {
     };
 
     section(116, "上屏布局");
-    row(0, 150, "缩放", scaleValue(state.display.top_scale));
+    row(0, 150, "大小", scaleValue(state.display.top_scale));
     row(1, 210, "X 偏移", offsetValue(state.display.top_offset_x));
     row(2, 270, "Y 偏移", offsetValue(state.display.top_offset_y));
     section(350, "下屏布局");
-    row(3, 384, "缩放", scaleValue(state.display.bottom_scale));
+    row(3, 384, "大小", scaleValue(state.display.bottom_scale));
     row(4, 444, "X 偏移", offsetValue(state.display.bottom_offset_x));
     row(5, 504, "Y 偏移", offsetValue(state.display.bottom_offset_y));
     row(6, 564, "透明度", opacityValue(state.display.bottom_opacity));
+}
+
+void DrawShaderCompileIndicator(const State& state) {
+    if (!VideoCore::GetShaderCompileNoticeState()) {
+        return;
+    }
+    const u32 pending = VideoCore::GetPendingShaderCompiles();
+    if (pending == 0) {
+        return;
+    }
+    char value[64]{};
+    std::snprintf(value, sizeof(value), "正在编译着色器 %u", pending);
+    const float width = std::min(330.0f, MeasureText(value, 18.0f) + 34.0f);
+    Rect(12, 42, width, 38, {0.0f, 0.0f, 0.0f, 0.64f});
+    Border(12, 42, width, 38, 1.0f, {0.31f, 0.70f, 1.0f, 0.44f});
+    Text(28, 68, 18, {0.72f, 0.88f, 1.0f, 0.98f}, value);
 }
 
 std::string CompactPathForWidth(std::string_view path, float max_width, float size) {
@@ -1230,12 +1254,14 @@ void DrawOverlaySidebar(const State& state) {
         Rect(RowX, y, RowW, 54,
              focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
                      : std::array<float, 4>{1, 1, 1, 0.045f});
-        if (focused) FlowBorder(RowX, y, RowW, 54, 3.0f);
-        else Border(RowX, y, RowW, 54, 1.0f, {1, 1, 1, 0.10f});
+        if (focused)
+            FlowBorder(RowX, y, RowW, 54, 3.0f);
+        else
+            Border(RowX, y, RowW, 54, 1.0f, {1, 1, 1, 0.10f});
         Text(RowX + 18, y + 35, 20, White, labels[row]);
-        TextRight(RowX + RowW - (row == 1 ? 48.0f : 18.0f), y + 34, 17, Cyan,
-                  values[row]);
-        if (row == 1) IconCentered(RowX + RowW - 20, y + 27, 23, Cyan, 0xE5CC);
+        TextRight(RowX + RowW - (row == 1 ? 48.0f : 18.0f), y + 34, 17, Cyan, values[row]);
+        if (row == 1)
+            IconCentered(RowX + RowW - 20, y + 27, 23, Cyan, 0xE5CC);
     }
     IconCentered(1030, 672, 27, Muted, NintendoIconB);
     Text(1052, 681, 18, Muted, "返回并保存");
@@ -1351,8 +1377,7 @@ void DrawFilePicker(const State& state) {
     Rect(0, footer_y, 1280, FooterH, {0.0f, 0.0f, 0.0f, 0.34f});
     Rect(0, footer_y, 1280, 1, {1, 1, 1, 0.12f});
     float right = 1244.0f;
-    auto hint = [&](int icon, const char* label, const std::array<float, 4>& color,
-                    float width) {
+    auto hint = [&](int icon, const char* label, const std::array<float, 4>& color, float width) {
         right -= width;
         IconCentered(right + 19, footer_y + 48, 34, {1, 1, 1, 0.92f}, icon);
         Text(right + 44, footer_y + 57, 26, color, label);
@@ -1385,40 +1410,42 @@ void BuildMenu(const State& state) {
     constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.78f};
     constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
 
-    for (int strip = 0; strip < 8; ++strip) {
-        const float t = static_cast<float>(strip) / 7.0f;
-        Rect(0, strip * 90.0f, 1280, 90,
-             {0.08f - t * 0.03f, 0.10f - t * 0.04f, 0.13f - t * 0.05f, 0.94f});
-    }
-    Text(64, 58, 26, White, "游戏菜单");
-    Rect(56, 92, 1168, 1, {1, 1, 1, 0.18f});
+    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.16f});
+    Rect(0, 0, 408, 720, {0.015f, 0.020f, 0.030f, 0.58f});
+    Rect(408, 0, 872, 720, {0.015f, 0.020f, 0.030f, 0.46f});
+    Rect(408, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
+    IconCentered(68, 47, 27, Cyan, 0xE5D2);
+    Text(94, 56, 27, White, "游戏菜单");
+    Rect(48, 92, 336, 1, {1, 1, 1, 0.14f});
 
     constexpr float LeftX = 48.0f;
     constexpr float LeftY = 116.0f;
     constexpr float MenuW = 336.0f;
     constexpr float ItemH = 70.0f;
     constexpr float Step = 80.0f;
-    const int selected = std::clamp(static_cast<int>(state.item), 0,
-                                    static_cast<int>(Item::Count) - 1);
+    const int selected =
+        std::clamp(static_cast<int>(state.item), 0, static_cast<int>(Item::Count) - 1);
     for (int i = 0; i < static_cast<int>(Item::Count); ++i) {
         const float y = LeftY + i * Step;
         const bool focused = i == selected;
+        Rect(LeftX, y, MenuW, ItemH,
+             focused ? (state.content_focused ? std::array<float, 4>{0.13f, 0.42f, 0.70f, 0.20f}
+                                              : std::array<float, 4>{0.00f, 0.30f, 0.50f, 0.52f})
+                     : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.035f});
         if (focused) {
-            Rect(LeftX, y, MenuW, ItemH,
-                 state.content_focused ? std::array<float, 4>{0.13f, 0.42f, 0.70f, 0.20f}
-                                       : std::array<float, 4>{0.00f, 0.30f, 0.50f, 0.52f});
             if (state.content_focused) {
                 Border(LeftX, y, MenuW, ItemH, 1.0f, {0.31f, 0.70f, 1.0f, 0.50f});
             } else {
                 FlowBorder(LeftX, y, MenuW, ItemH, 3.0f);
             }
+        } else {
+            Border(LeftX, y, MenuW, ItemH, 1.0f, {1.0f, 1.0f, 1.0f, 0.08f});
         }
-        IconCentered(LeftX + 34, y + ItemH * 0.5f, 25,
-                     focused ? White : Muted, ItemIcons[i]);
+        IconCentered(LeftX + 34, y + ItemH * 0.5f, 25, focused ? White : Muted, ItemIcons[i]);
         Text(LeftX + 64, y + 44, 22, focused ? White : Muted, ItemLabels[i]);
     }
     Rect(LeftX + 18, LeftY + 5 * Step - 14, MenuW - 36, 1, {1, 1, 1, 0.14f});
-    Rect(404, 110, 1, 500, {1, 1, 1, 0.08f});
+    Rect(408, 92, 872, 1, {1, 1, 1, 0.14f});
 
     constexpr float ContentX = 432.0f;
     constexpr float ContentY = 110.0f;
@@ -1435,31 +1462,45 @@ void BuildMenu(const State& state) {
             const bool focused = state.content_focused && state.content_focus == slot;
             Rect(ContentX, y, 520, row_h,
                  focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
-                         : std::array<float, 4>{0.176f, 0.176f, 0.188f, 0.58f});
+                         : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.045f});
             if (focused) {
                 FlowBorder(ContentX, y, 520, row_h, 3.0f);
             } else {
-                Border(ContentX, y, 520, row_h, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
+                Border(ContentX, y, 520, row_h, 1.0f, {1.0f, 1.0f, 1.0f, 0.10f});
             }
             char slot_name[32]{};
             std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
             Text(ContentX + 16, y + 28, 20, White, slot_name);
             const char* status = state.occupied[slot] ? "已有状态" : "空存档槽";
-            TextRight(ContentX + 500, y + 27, 16,
-                      state.occupied[slot] ? Cyan : Muted, status);
+            TextRight(ContentX + 500, y + 27, 16, state.occupied[slot] ? Cyan : Muted, status);
         }
-        Rect(986, 176, 220, 420, {0.05f, 0.05f, 0.055f, 0.68f});
-        Border(976, 166, 240, 440, 1, {0.0f, 0.48f, 0.80f, 0.40f});
+        Rect(986, 176, 220, 420, {1.0f, 1.0f, 1.0f, 0.035f});
+        Border(976, 166, 240, 440, 1, {1.0f, 1.0f, 1.0f, 0.10f});
         Text(1020, 380, 24, Muted, "NO THUMB");
     } else if (item == Item::Display) {
         const std::array<const char*, 10> labels{{
-            "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局",
-            "自定义画面布局", "画面方向", "屏幕间距", "遮罩选择",
-            "同步遮罩", "同步画面设置",
+            "快进倍率",
+            "3D分辨率",
+            "整数倍缩放",
+            "屏幕布局",
+            "自定义画面布局",
+            "画面方向",
+            "屏幕间距",
+            "遮罩选择",
+            "同步遮罩",
+            "同步画面设置",
         }};
         const std::array<int, 10> icons{{
-            0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
-            0xE873, 0xE873,
+            0xE01F,
+            0xE433,
+            0xE3F4,
+            0xE8F1,
+            0xE3C9,
+            0xE41A,
+            0xE8D4,
+            0xE53B,
+            0xE873,
+            0xE873,
         }};
         const bool custom_enabled = state.display.screen_layout == "custom";
         std::array<std::string, 10> values{};
@@ -1490,23 +1531,21 @@ void BuildMenu(const State& state) {
             const bool focused = state.content_focused && state.content_focus == row;
             const bool enabled = row != 4 || custom_enabled;
             Rect(ContentX, y, ContentW, RowH,
-                  focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
-                          : std::array<float, 4>{1, 1, 1, 0.045f});
+                 focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                         : std::array<float, 4>{1, 1, 1, 0.045f});
             if (focused) {
                 FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
             } else {
                 Border(ContentX, y, ContentW, RowH, 1.0f, {1, 1, 1, 0.10f});
             }
-            IconCentered(ContentX + 24, y + RowH * 0.5f, 20,
-                         enabled ? Cyan : Muted, icons[row]);
+            IconCentered(ContentX + 24, y + RowH * 0.5f, 20, enabled ? Cyan : Muted, icons[row]);
             Text(ContentX + 46, y + 30, 18, enabled ? White : Muted, labels[row]);
             if (row == 0 || row == 1 || row == 3 || row == 5 || row == 6) {
-                SelectorValue(ContentX, y, ContentW, RowH, values[row],
-                              enabled ? Cyan : Muted);
+                SelectorValue(ContentX, y, ContentW, RowH, values[row], enabled ? Cyan : Muted);
             } else {
                 const bool is_button = row == 4 || row == 7 || row == 8 || row == 9;
-                TextRight(ContentX + ContentW - (is_button ? 46.0f : 18.0f),
-                          y + 29, 17, enabled ? Cyan : Muted, values[row]);
+                TextRight(ContentX + ContentW - (is_button ? 46.0f : 18.0f), y + 29, 17,
+                          enabled ? Cyan : Muted, values[row]);
                 if (is_button) {
                     IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
                                  enabled ? Cyan : Muted, 0xE5CC);
@@ -1586,10 +1625,9 @@ bool Init(const Vulkan::Instance& instance) {
     return true;
 }
 
-void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent,
-          vk::Format format, const State& state) {
-    if (!initialized || extent.width == 0 || extent.height == 0 ||
-        !EnsureRenderObjects(format)) {
+void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent, vk::Format format,
+          const State& state) {
+    if (!initialized || extent.width == 0 || extent.height == 0 || !EnsureRenderObjects(format)) {
         return;
     }
     EnsureOverlayTexture(state);
@@ -1608,7 +1646,10 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     } else {
         DrawToast(state);
     }
-    DrawFpsIndicator(state);
+    if (overlay_active) {
+        DrawFpsIndicator(state);
+        DrawShaderCompileIndicator(state);
+    }
     DrawFastForwardIndicator(state);
     TransformVertices(extent);
     const vk::Framebuffer framebuffer = GetFramebuffer(image, extent);

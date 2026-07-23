@@ -3,7 +3,6 @@
 
 #include <limits>
 #include <mutex>
-#include "common/logging/log.h"
 #include "common/thread.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
@@ -105,7 +104,7 @@ void MasterSemaphoreTimeline::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore
     }
 }
 
-constexpr u64 FENCE_RESERVE = 2;
+constexpr u64 FENCE_RESERVE = 8;
 
 MasterSemaphoreFence::MasterSemaphoreFence(const Instance& instance_) : instance{instance_} {
     const vk::Device device{instance.GetDevice()};
@@ -174,7 +173,7 @@ void MasterSemaphoreFence::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wa
 
 void MasterSemaphoreFence::WaitThread(std::stop_token token) {
     Common::SetCurrentThreadName("VulkanFenceWait");
-    Common::SetCurrentThreadAffinityMask(0, 1ULL << 0);
+    Common::SetCurrentThreadAffinityMask(1, (1ULL << 0) | (1ULL << 1));
 
     const vk::Device device{instance.GetDevice()};
     while (!token.stop_requested()) {
@@ -205,22 +204,9 @@ void MasterSemaphoreFence::WaitThread(std::stop_token token) {
 }
 
 vk::Fence MasterSemaphoreFence::GetFreeFence() {
-    std::unique_lock lock{free_mutex};
+    std::scoped_lock lock{free_mutex};
     if (free_queue.empty()) {
-#ifdef __SWITCH__
-        static std::atomic<u64> backpressure_count{};
-        const u64 count = ++backpressure_count;
-        if ((count & (count - 1)) == 0) {
-            LOG_INFO(Render_Vulkan,
-                     "Switch Vulkan submission backpressure count={} cpu_tick={} gpu_tick={}",
-                     count, CurrentTick(), KnownGpuTick());
-        }
-        // NVK becomes unstable if fast-forward can enqueue an unbounded number of submissions
-        // while a complex scene is compiling. Two reusable fences form a hard in-flight limit.
-        free_cv.wait(lock, [this] { return !free_queue.empty(); });
-#else
         return instance.GetDevice().createFence({});
-#endif
     }
 
     const vk::Fence fence = free_queue.front();

@@ -385,6 +385,13 @@ public:
         return save_state_status;
     }
 
+    // Returns the request currently being processed by RunLoop. Unlike
+    // GetSaveStateStatus(), this also covers the period while RunLoop is
+    // waiting for pending asynchronous kernel operations.
+    SaveStateStatus GetSaveStateRequestStatus() const {
+        return save_state_request_status;
+    }
+
     void SaveState(u32 slot) const;
 
     void LoadState(u32 slot);

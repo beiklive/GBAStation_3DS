@@ -152,6 +152,7 @@ private:
     };
 
     OverlayDraw PrepareFpsOverlay(const Layout::FramebufferLayout& layout);
+    OverlayDraw PrepareShaderNotice(const Layout::FramebufferLayout& layout);
     OverlayDraw PrepareQuickMenu(const Layout::FramebufferLayout& layout);
     void RecordOverlay(OverlayDraw overlay);
 
@@ -209,6 +210,8 @@ private:
     vk::DescriptorSet overlay_descriptor_set{};
     float overlay_game_fps = 0.0f;
     std::chrono::steady_clock::time_point overlay_last_update{};
+    std::chrono::steady_clock::time_point shader_notice_until{};
+    u64 shader_notice_generation{};
     bool isSecondaryWindow;
     bool secondaryWindowEnabled;
     bool screenRendered;

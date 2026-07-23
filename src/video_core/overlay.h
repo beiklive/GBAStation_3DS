@@ -57,9 +57,13 @@ bool IsOverlayMenuVisible();
 void SetFpsOverlayState(bool visible, float fps);
 bool GetFpsOverlayState(float& fps);
 
+void SetShaderCompileNoticeState(bool visible);
+bool GetShaderCompileNoticeState();
+
 // Shader-compilation activity.
 void NotifyShaderCompileBegin();
 void NotifyShaderCompileEnd();
 u32 GetPendingShaderCompiles();
+u64 GetShaderCompileGeneration();
 
 } // namespace VideoCore

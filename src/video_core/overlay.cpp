@@ -15,7 +15,9 @@ OverlayMenuState s_state;
 std::atomic<bool> s_visible{false};
 std::atomic<bool> s_fps_visible{false};
 std::atomic<float> s_fps{0.0f};
+std::atomic<bool> s_shader_compile_notice_visible{true};
 std::atomic<u32> s_pending_shader_compiles{0};
+std::atomic<u64> s_shader_compile_generation{0};
 } // namespace
 
 void SetOverlayMenuState(const OverlayMenuState& state) {
@@ -45,8 +47,17 @@ bool GetFpsOverlayState(float& fps) {
     return s_fps_visible.load(std::memory_order_acquire);
 }
 
+void SetShaderCompileNoticeState(bool visible) {
+    s_shader_compile_notice_visible.store(visible, std::memory_order_release);
+}
+
+bool GetShaderCompileNoticeState() {
+    return s_shader_compile_notice_visible.load(std::memory_order_acquire);
+}
+
 void NotifyShaderCompileBegin() {
     s_pending_shader_compiles.fetch_add(1, std::memory_order_acq_rel);
+    s_shader_compile_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void NotifyShaderCompileEnd() {
@@ -55,6 +66,10 @@ void NotifyShaderCompileEnd() {
 
 u32 GetPendingShaderCompiles() {
     return s_pending_shader_compiles.load(std::memory_order_acquire);
+}
+
+u64 GetShaderCompileGeneration() {
+    return s_shader_compile_generation.load(std::memory_order_acquire);
 }
 
 } // namespace VideoCore

@@ -121,20 +121,7 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
         layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
                                            Core::kScreenBottomHeight, settings.integer_scale);
     } else if (settings.screen_layout == "hybrid") {
-        const float right_width = std::max(1.0f, (w - positive_gap) / 3.0f);
-        const float right_x = w - right_width;
-        const float row_height = std::max(1.0f, (h - positive_gap) * 0.5f);
-        layout.top_screen = PlaceScreen({0.0f, 0.0f, right_x - positive_gap, h},
-                                        Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
-        layout.additional_screen_enabled = true;
-        layout.additional_screen_is_bottom = false;
-        layout.additional_screen = PlaceScreen({right_x, 0.0f, right_width, row_height},
-                                               Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                               settings.integer_scale);
-        layout.bottom_screen = PlaceScreen(
-            {right_x, row_height + positive_gap, right_width, row_height},
-            Core::kScreenBottomWidth, Core::kScreenBottomHeight, settings.integer_scale);
+        layout = Layout::HybridScreenLayout(width, height, false, false);
     } else if (settings.screen_layout == "top") {
         layout.top_screen = PlaceScreen(full, Core::kScreenTopWidth, Core::kScreenTopHeight,
                                         settings.integer_scale);

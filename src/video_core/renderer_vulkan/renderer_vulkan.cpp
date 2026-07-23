@@ -1660,6 +1660,7 @@ void RendererVulkan::DrawScreens(Frame* frame, const Layout::FramebufferLayout& 
 
     renderpass_cache.EndRendering();
     OverlayDraw fps_overlay = PrepareFpsOverlay(layout);
+    OverlayDraw shader_notice = PrepareShaderNotice(layout);
     OverlayDraw quick_menu = PrepareQuickMenu(layout);
 
     PrepareDraw(frame, layout);
@@ -1700,6 +1701,7 @@ void RendererVulkan::DrawScreens(Frame* frame, const Layout::FramebufferLayout& 
 
     DrawCursor(layout);
     RecordOverlay(std::move(fps_overlay));
+    RecordOverlay(std::move(shader_notice));
     RecordOverlay(std::move(quick_menu));
 
     scheduler.Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRenderPass(); });
@@ -2156,6 +2158,79 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareFpsOverlay(
     return overlay;
 }
 
+RendererVulkan::OverlayDraw RendererVulkan::PrepareShaderNotice(
+    const Layout::FramebufferLayout& layout) {
+    if (!VideoCore::GetShaderCompileNoticeState()) {
+        return {};
+    }
+    const std::size_t pending = rasterizer.PendingCompilationCount();
+    const u64 generation = VideoCore::GetShaderCompileGeneration();
+    const auto now = std::chrono::steady_clock::now();
+    if (pending > 0 || generation != shader_notice_generation) {
+        shader_notice_generation = generation;
+        shader_notice_until = now + std::chrono::milliseconds(650);
+    }
+    if (now >= shader_notice_until) {
+        return {};
+    }
+
+    char text[64];
+    if (pending > 0) {
+        std::snprintf(text, sizeof(text), "正在编译着色器 %zu", pending);
+    } else {
+        std::snprintf(text, sizeof(text), "正在编译着色器");
+    }
+
+    const float w = static_cast<float>(layout.width);
+    const float h = static_cast<float>(layout.height);
+    if (w <= 0.0f || h <= 0.0f) {
+        return {};
+    }
+
+    const float em = std::max(14.0f, std::round(h / 32.0f));
+    const float scale = em / OverlayFont::BakePixelHeight();
+    const float margin = std::round(em * 0.6f);
+    const float pad = std::round(em * 0.35f);
+
+    float ink_top = OverlayFont::Ascent();
+    float ink_bottom = 0.0f;
+    for (u32 codepoint : DecodeUtf8Codepoints(text)) {
+        const OverlayFont::Glyph& glyph = OverlayFont::GlyphFor(codepoint);
+        if (glyph.h > 0.0f) {
+            ink_top = std::min(ink_top, glyph.yoff);
+            ink_bottom = std::max(ink_bottom, glyph.yoff + glyph.h);
+        }
+    }
+
+    std::vector<float> verts;
+    verts.reserve(256);
+    OverlayBuilder builder{verts, w, h};
+    const float text_w = OverlayBuilder::Measure(text, scale);
+    const float origin_x = margin;
+    const float origin_y = h - margin - pad - ink_bottom * scale;
+
+    builder.AddRect(origin_x - pad, origin_y + ink_top * scale - pad, origin_x + text_w + pad,
+                    origin_y + ink_bottom * scale + pad);
+    const u32 box_vertices = builder.VertexCount();
+    builder.AddText(origin_x, origin_y, text, scale);
+    const u32 glyph_vertices = builder.VertexCount() - box_vertices;
+
+    const u64 size = verts.size() * sizeof(float);
+    auto [data, offset, invalidate] = overlay_vertex_buffer.Map(size, 16);
+    std::memcpy(data, verts.data(), size);
+    overlay_vertex_buffer.Commit(size);
+
+    constexpr std::array<float, 4> box_color = {0.0f, 0.0f, 0.0f, 0.62f};
+    constexpr std::array<float, 4> text_color = {1.0f, 0.82f, 0.35f, 1.0f};
+    OverlayDraw overlay;
+    overlay.base_vertex = static_cast<u32>(offset) / (sizeof(float) * 4);
+    overlay.batches.push_back({box_color, 0, box_vertices});
+    if (glyph_vertices > 0) {
+        overlay.batches.push_back({text_color, box_vertices, glyph_vertices});
+    }
+    return overlay;
+}
+
 RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     const Layout::FramebufferLayout& layout) {
     if (!VideoCore::IsOverlayMenuVisible()) {
@@ -2186,22 +2261,20 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     const float row_h = std::round(std::max(56.0f, line_h * 1.68f));
     const float tab_h = std::round(std::max(68.0f, line_h * 1.92f));
     const float pad = std::round(em * 1.08f);
-    const float panel_margin_x = std::round(std::max(20.0f, w * 0.02f));
-    const float panel_margin_y = std::round(std::max(16.0f, h * 0.025f));
-    const float panel_x0 = panel_margin_x;
-    const float panel_y0 = panel_margin_y;
-    const float panel_x1 = w - panel_margin_x;
-    const float panel_y1 = h - panel_margin_y;
-    const float panel_w = panel_x1 - panel_x0;
+    const float panel_w = w;
+    const float panel_x0 = 0.0f;
+    const float panel_y0 = 0.0f;
+    const float panel_x1 = w;
+    const float panel_y1 = h;
     const float rail_w = std::round(std::clamp(panel_w * 0.29f, 280.0f, 360.0f));
     const float rail_x1 = panel_x0 + rail_w;
     const float content_x0 = rail_x1 + pad;
     const float content_x1 = panel_x1 - pad;
-    const float tab_x0 = panel_x0 + std::round(pad * 0.62f);
-    const float tab_x1 = rail_x1 - std::round(pad * 0.62f);
-    const float tabs_top = panel_y0 + std::round(pad * 2.35f);
-    const float rows_top = panel_y0 + std::round(pad * 3.05f);
-    const float footer_y = panel_y1 - std::round(pad * 1.05f);
+    const float tab_x0 = panel_x0 + pad;
+    const float tab_x1 = rail_x1 - pad;
+    const float tabs_top = panel_y0 + std::round(pad * 3.25f);
+    const float rows_top = panel_y0 + std::round(pad * 3.25f);
+    const float footer_y = panel_y1 - std::round(pad * 1.18f);
     const float rows_bottom = footer_y - std::round(pad * 0.75f);
     const float header_h = std::round(std::max(40.0f, row_h * 0.72f));
     const float visible_rows_h = std::max(1.0f, rows_bottom - rows_top);
@@ -2215,10 +2288,9 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
 
     std::vector<float> row_tops(item_count + 1, 0.0f);
     for (int i = 0; i < item_count; ++i) {
-        row_tops[i + 1] = row_tops[i] +
-                          (state.items[i].kind == VideoCore::OverlayMenuItemKind::Header
-                               ? header_h
-                               : row_h);
+        row_tops[i + 1] =
+            row_tops[i] +
+            (state.items[i].kind == VideoCore::OverlayMenuItemKind::Header ? header_h : row_h);
     }
     const float total_rows_h = item_count > 0 ? row_tops[item_count] : 0.0f;
     float scroll_y = 0.0f;
@@ -2237,13 +2309,16 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
         }
     };
 
-    constexpr std::array<float, 4> c_dim = {0.0f, 0.0f, 0.0f, 0.86f};
-    constexpr std::array<float, 4> c_panel = {0.03f, 0.04f, 0.06f, 0.06f};
-    constexpr std::array<float, 4> c_rail = {0.03f, 0.04f, 0.06f, 0.50f};
-    constexpr std::array<float, 4> c_separator = {0.34f, 0.76f, 0.96f, 0.14f};
-    constexpr std::array<float, 4> c_tab_focus = {0.22f, 0.58f, 0.92f, 0.40f};
-    constexpr std::array<float, 4> c_tab_fill = {0.10f, 0.34f, 0.58f, 0.12f};
-    constexpr std::array<float, 4> c_content_highlight = {0.15f, 0.45f, 0.75f, 0.20f};
+    constexpr std::array<float, 4> c_dim = {0.0f, 0.0f, 0.0f, 0.16f};
+    constexpr std::array<float, 4> c_panel = {0.015f, 0.020f, 0.030f, 0.52f};
+    constexpr std::array<float, 4> c_rail = {0.015f, 0.020f, 0.030f, 0.12f};
+    constexpr std::array<float, 4> c_separator = {1.0f, 1.0f, 1.0f, 0.14f};
+    constexpr std::array<float, 4> c_tab_focus = {0.0f, 0.30f, 0.50f, 0.52f};
+    constexpr std::array<float, 4> c_tab_fill = {1.0f, 1.0f, 1.0f, 0.035f};
+    constexpr std::array<float, 4> c_content_highlight = {0.0f, 0.30f, 0.50f, 0.52f};
+    constexpr std::array<float, 4> c_row_fill = {1.0f, 1.0f, 1.0f, 0.045f};
+    constexpr std::array<float, 4> c_row_border = {1.0f, 1.0f, 1.0f, 0.10f};
+    constexpr std::array<float, 4> c_focus_border = {0.31f, 0.70f, 1.0f, 0.76f};
     constexpr std::array<float, 4> c_title = {1.0f, 1.0f, 1.0f, 1.0f};
     constexpr std::array<float, 4> c_row = {0.82f, 0.85f, 0.92f, 1.0f};
     constexpr std::array<float, 4> c_selected = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -2271,10 +2346,62 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
     }
     {
         const u32 start = builder.VertexCount();
-        builder.AddRect(rail_x1, panel_y0 + pad, rail_x1 + 1.0f, panel_y1 - pad);
+        builder.AddRect(panel_x0, panel_y0, panel_x0 + 1.0f, panel_y1);
+        builder.AddRect(rail_x1, panel_y0, rail_x1 + 1.0f, panel_y1);
         builder.AddRect(content_x0, footer_y - std::round(pad * 0.55f), content_x1,
                         footer_y - std::round(pad * 0.55f) + 1.0f);
         emit(c_separator, start);
+    }
+
+    if (tab_count > 0) {
+        const u32 start = builder.VertexCount();
+        for (int i = 0; i < tab_count; ++i) {
+            const float top = tabs_top + static_cast<float>(i) * tab_h;
+            builder.AddRect(tab_x0, top + 4.0f, tab_x1, top + tab_h - 4.0f);
+        }
+        emit(c_tab_fill, start);
+    }
+    if (item_count > 0) {
+        const u32 start = builder.VertexCount();
+        for (int i = 0; i < item_count; ++i) {
+            if (state.items[i].kind == VideoCore::OverlayMenuItemKind::Header) {
+                continue;
+            }
+            const float top = rows_top + row_tops[i] - scroll_y;
+            const float item_h = row_tops[i + 1] - row_tops[i];
+            if (top < rows_top || top + item_h > rows_bottom) {
+                continue;
+            }
+            builder.AddRect(content_x0 - std::round(pad * 0.4f), top + 5.0f,
+                            content_x1 + std::round(pad * 0.15f), top + item_h - 5.0f);
+        }
+        emit(c_row_fill, start);
+    }
+    {
+        const auto add_border = [&](float x0, float y0, float x1, float y1) {
+            builder.AddRect(x0, y0, x1, y0 + 1.0f);
+            builder.AddRect(x0, y1 - 1.0f, x1, y1);
+            builder.AddRect(x0, y0, x0 + 1.0f, y1);
+            builder.AddRect(x1 - 1.0f, y0, x1, y1);
+        };
+        const u32 start = builder.VertexCount();
+        for (int i = 0; i < tab_count; ++i) {
+            const float top = tabs_top + static_cast<float>(i) * tab_h;
+            add_border(tab_x0, top + 4.0f, tab_x1, top + tab_h - 4.0f);
+        }
+        for (int i = 0; i < item_count; ++i) {
+            if (state.items[i].kind == VideoCore::OverlayMenuItemKind::Header) {
+                continue;
+            }
+            const float top = rows_top + row_tops[i] - scroll_y;
+            const float item_h = row_tops[i + 1] - row_tops[i];
+            if (top < rows_top || top + item_h > rows_bottom) {
+                continue;
+            }
+            add_border(content_x0 - std::round(pad * 0.4f), top + 5.0f,
+                       content_x1 + std::round(pad * 0.15f), top + item_h - 5.0f);
+        }
+        emit(c_row_border, start);
     }
 
     if (tab_count > 0) {
@@ -2291,17 +2418,37 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
                         content_x1 + std::round(pad * 0.15f), top + item_h - 5.0f);
         emit(c_content_highlight, start);
     }
+    {
+        const u32 start = builder.VertexCount();
+        if (tab_count > 0 && state.tabs_focused) {
+            const float top = tabs_top + static_cast<float>(selected_tab) * tab_h + 4.0f;
+            const float bottom = top + tab_h - 8.0f;
+            builder.AddRect(tab_x0, top, tab_x1, top + 1.0f);
+            builder.AddRect(tab_x0, bottom - 1.0f, tab_x1, bottom);
+            builder.AddRect(tab_x0, top, tab_x0 + 3.0f, bottom);
+            builder.AddRect(tab_x1 - 1.0f, top, tab_x1, bottom);
+        } else if (has_selection && !state.tabs_focused) {
+            const float top = rows_top + row_tops[state.selected] - scroll_y + 5.0f;
+            const float item_h = row_tops[state.selected + 1] - row_tops[state.selected] - 10.0f;
+            const float x0 = content_x0 - std::round(pad * 0.4f);
+            const float x1 = content_x1 + std::round(pad * 0.15f);
+            builder.AddRect(x0, top, x1, top + 1.0f);
+            builder.AddRect(x0, top + item_h - 1.0f, x1, top + item_h);
+            builder.AddRect(x0, top, x0 + 3.0f, top + item_h);
+            builder.AddRect(x1 - 1.0f, top, x1, top + item_h);
+        }
+        emit(c_focus_border, start);
+    }
 
     {
         const u32 start = builder.VertexCount();
-        builder.AddText(panel_x0 + pad, panel_y0 + std::round(pad * 0.82f), state.title,
+        builder.AddText(panel_x0 + pad, panel_y0 + std::round(pad * 1.05f), state.title,
                         title_scale);
         emit(c_title, start);
     }
 
     const auto add_tab = [&](int index) {
         const auto& tab = state.tabs[index];
-        const bool is_selected = index == selected_tab;
         const float top = tabs_top + static_cast<float>(index) * tab_h;
         const float center_y = top + tab_h * 0.5f;
         const float icon_line_h = OverlayFont::LineHeight() * icon_scale;
@@ -2311,9 +2458,6 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
             builder.AddText(tab_x0 + std::round(pad * 0.75f), icon_y, tab.icon, icon_scale);
         }
         builder.AddText(tab_x0 + std::round(pad * 2.45f), label_y, tab.label, scale);
-        if (is_selected) {
-            builder.AddRect(tab_x0, top + 10.0f, tab_x0 + 4.0f, top + tab_h - 10.0f);
-        }
     };
 
     {
@@ -2348,7 +2492,7 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareQuickMenu(
                                     : state.title;
     {
         const u32 start = builder.VertexCount();
-        builder.AddText(content_x0, panel_y0 + std::round(pad * 0.82f), section_title,
+        builder.AddText(content_x0, panel_y0 + std::round(pad * 1.05f), section_title,
                         title_scale);
         emit(c_title, start);
     }

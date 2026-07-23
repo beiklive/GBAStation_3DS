@@ -66,6 +66,7 @@
 #include "input_common/main.h"
 #include "input_common/switch_hid.h"
 #include "video_core/gpu.h"
+#include "video_core/overlay.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
@@ -733,6 +734,126 @@ private:
     bool restored = false;
 };
 
+class SwitchClockGuard {
+public:
+    SwitchClockGuard() {
+        use_pcv = hosversionBefore(8, 0, 0);
+        const LibnxResult rc = use_pcv ? pcvInitialize() : clkrstInitialize();
+        initialized = rc == 0;
+        DebugLog("clock service initialize: backend=%s rc=0x%x", use_pcv ? "pcv" : "clkrst",
+                 rc);
+        StartupLog("clock service initialize: backend=%s rc=0x%x",
+                   use_pcv ? "pcv" : "clkrst", rc);
+        if (!initialized) {
+            return;
+        }
+
+        for (std::size_t index = 0; index < TargetRates.size(); ++index) {
+            Apply(index);
+        }
+    }
+
+    ~SwitchClockGuard() {
+        Restore("destructor");
+    }
+
+    void Restore(const char* tag) {
+        if (!initialized || restored) {
+            return;
+        }
+
+        for (std::size_t index = TargetRates.size(); index-- > 0;) {
+            if (!original_rate_valid[index]) {
+                continue;
+            }
+            SetRate(index, original_rates[index], "restore");
+        }
+
+        if (use_pcv) {
+            pcvExit();
+        } else {
+            clkrstExit();
+        }
+        restored = true;
+        DebugLog("clock service exit: tag=%s backend=%s", tag, use_pcv ? "pcv" : "clkrst");
+        ExitLog("clock service exit: tag=%s backend=%s", tag, use_pcv ? "pcv" : "clkrst");
+    }
+
+private:
+    static constexpr std::array<const char*, 3> ClockNames{{"cpu", "gpu", "memory"}};
+    static constexpr std::array<u32, 3> TargetRates{{1'785'000'000, 921'600'000,
+                                                     1'600'000'000}};
+    static constexpr std::array<PcvModule, 3> PcvModules{{
+        PcvModule_CpuBus,
+        PcvModule_GPU,
+        PcvModule_EMC,
+    }};
+    static constexpr std::array<PcvModuleId, 3> ClkrstModules{{
+        PcvModuleId_CpuBus,
+        PcvModuleId_GPU,
+        PcvModuleId_EMC,
+    }};
+
+    void Apply(std::size_t index) {
+        u32 original_rate = 0;
+        const LibnxResult get_rc = GetRate(index, original_rate);
+        if (get_rc != 0) {
+            DebugLog("clock apply skipped: module=%s get_rc=0x%x target_hz=%u",
+                     ClockNames[index], get_rc, TargetRates[index]);
+            return;
+        }
+
+        original_rates[index] = original_rate;
+        original_rate_valid[index] = true;
+        SetRate(index, TargetRates[index], "apply");
+    }
+
+    LibnxResult GetRate(std::size_t index, u32& rate) {
+        if (use_pcv) {
+            return pcvGetClockRate(PcvModules[index], &rate);
+        }
+
+        ClkrstSession session{};
+        const LibnxResult open_rc = clkrstOpenSession(&session, ClkrstModules[index], 3);
+        if (open_rc != 0) {
+            return open_rc;
+        }
+        const LibnxResult get_rc = clkrstGetClockRate(&session, &rate);
+        clkrstCloseSession(&session);
+        return get_rc;
+    }
+
+    void SetRate(std::size_t index, u32 requested_rate, const char* operation) {
+        LibnxResult set_rc = 0;
+        if (use_pcv) {
+            set_rc = pcvSetClockRate(PcvModules[index], requested_rate);
+        } else {
+            ClkrstSession session{};
+            const LibnxResult open_rc = clkrstOpenSession(&session, ClkrstModules[index], 3);
+            if (open_rc != 0) {
+                DebugLog("clock %s failed: module=%s open_rc=0x%x requested_hz=%u", operation,
+                         ClockNames[index], open_rc, requested_rate);
+                return;
+            }
+            set_rc = clkrstSetClockRate(&session, requested_rate);
+            clkrstCloseSession(&session);
+        }
+
+        u32 actual_rate = 0;
+        const LibnxResult get_rc = GetRate(index, actual_rate);
+        DebugLog("clock %s: module=%s requested_hz=%u set_rc=0x%x get_rc=0x%x actual_hz=%u",
+                 operation, ClockNames[index], requested_rate, set_rc, get_rc, actual_rate);
+        ExitLog("clock %s: module=%s requested_hz=%u set_rc=0x%x get_rc=0x%x actual_hz=%u",
+                operation, ClockNames[index], requested_rate, set_rc, get_rc, actual_rate);
+    }
+
+    std::array<u32, 3> original_rates{};
+    std::array<bool, 3> original_rate_valid{};
+    bool use_pcv = false;
+    bool initialized = false;
+    bool restored = false;
+};
+
 void InstallFatalHandlers() {
     StartupLog("InstallFatalHandlers");
     std::set_terminate([] {
@@ -843,69 +964,6 @@ void LogEnabledCheatsAtFailure(Core::System& system) {
     }
     DebugLog("active cheats at failure total=%zu", enabled_count);
     ExitLog("active cheats at failure total=%zu", enabled_count);
-}
-
-bool DrainAsyncOperationsForSavestate(Core::System& system) {
-    if (!system.KernelRunning() || !system.Kernel().AreAsyncOperationsPending()) {
-        return true;
-    }
-
-    DebugLog("savestate waiting for pending async operations");
-    const auto start = std::chrono::steady_clock::now();
-    while (system.Kernel().AreAsyncOperationsPending()) {
-        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
-            DebugLog("savestate async drain timed out");
-            return false;
-        }
-
-        const Core::System::ResultStatus result = system.RunLoop();
-        if (result != Core::System::ResultStatus::Success) {
-            DebugLog("savestate async drain failed: %s (%u)", ResultStatusName(result),
-                     static_cast<unsigned>(result));
-            return false;
-        }
-    }
-
-    DebugLog("savestate async drain completed");
-    return true;
-}
-
-bool SaveStateFromMenu(Core::System& system, u32 slot) {
-    if (!DrainAsyncOperationsForSavestate(system)) {
-        SwitchFrontend::OverlayUI::ShowToast("状态保存失败：系统繁忙");
-        return false;
-    }
-
-    DebugLog("menu begin direct save state slot=%u", slot);
-    try {
-        system.SaveState(slot);
-        system.frame_limiter.AdvanceFrame();
-        DebugLog("menu direct save state completed slot=%u", slot);
-        return true;
-    } catch (const std::exception& e) {
-        DebugLog("menu direct save state failed slot=%u: %s", slot, e.what());
-        SwitchFrontend::OverlayUI::ShowToast("状态保存失败");
-        return false;
-    }
-}
-
-bool LoadStateFromMenu(Core::System& system, u32 slot) {
-    if (!DrainAsyncOperationsForSavestate(system)) {
-        SwitchFrontend::OverlayUI::ShowToast("状态读取失败：系统繁忙");
-        return false;
-    }
-
-    DebugLog("menu begin direct load state slot=%u", slot);
-    try {
-        system.LoadState(slot);
-        system.frame_limiter.AdvanceFrame();
-        DebugLog("menu direct load state completed slot=%u", slot);
-        return true;
-    } catch (const std::exception& e) {
-        DebugLog("menu direct load state failed slot=%u: %s", slot, e.what());
-        SwitchFrontend::OverlayUI::ShowToast("状态读取失败");
-        return false;
-    }
 }
 
 bool EndsWithNoCase(std::string_view value, std::string_view suffix) {
@@ -1646,6 +1704,19 @@ int RunCiaInstaller(const LaunchOptions& options) {
     std::string notice;
     CiaInstallState install_state;
     std::thread install_thread;
+    bool install_keep_awake = false;
+
+    const auto set_install_keep_awake = [&](bool enabled, const char* reason) {
+        if (install_keep_awake == enabled) {
+            return;
+        }
+        const LibnxResult rc = appletSetMediaPlaybackState(enabled);
+        DebugLog("CIA installer keep-awake enabled=%d reason=%s rc=0x%x", enabled ? 1 : 0, reason,
+                 static_cast<unsigned>(rc));
+        if (R_SUCCEEDED(rc)) {
+            install_keep_awake = enabled;
+        }
+    };
 
     const auto join_install_thread = [&](const char* reason) {
         if (!install_thread.joinable()) {
@@ -1656,6 +1727,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                  install_state.done.load(std::memory_order_acquire) ? 1 : 0);
         install_thread.join();
         DebugLog("CIA installer install thread joined reason=%s", reason);
+        set_install_keep_awake(false, reason);
     };
 
     const auto refresh = [&] {
@@ -1672,6 +1744,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
         if (install_thread.joinable()) {
             join_install_thread("start-new-install");
         }
+        set_install_keep_awake(true, "install-start");
         install_state.source_path = entry.path;
         CiaInstallMetadata metadata = ReadCiaMetadata(entry.path, StemFromPath(entry.path));
         install_state.title = metadata.title;
@@ -1685,11 +1758,14 @@ int RunCiaInstaller(const LaunchOptions& options) {
         install_state.active = true;
         notice.clear();
         const bool delete_after_install = delete_source;
-        install_thread = std::thread([&, entry, metadata = std::move(metadata), delete_after_install] {
+        install_thread = std::thread([&, entry, metadata = std::move(metadata),
+                                      delete_after_install] {
+            PinCurrentThreadToCore(0, "cia-install-worker");
             DebugLog("CIA install begin path=%s tid=%016llx", entry.path.c_str(),
                      static_cast<unsigned long long>(entry.program_id));
             install_state.result = Service::AM::InstallCIA(
-                entry.path, [&](std::size_t written, std::size_t total) {
+                entry.path,
+                [&](std::size_t written, std::size_t total) {
                     install_state.written = written;
                     install_state.total = total;
                 },
@@ -1804,12 +1880,13 @@ int RunCiaInstaller(const LaunchOptions& options) {
         } else if (selected >= scroll + visible_rows) {
             scroll = selected - visible_rows + 1;
         }
-        DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
-                         install_state, notice);
+        DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source, install_state,
+                         notice);
         svcSleepThread(16'000'000);
     }
 
     join_install_thread("installer-exit");
+    set_install_keep_awake(false, "installer-exit-finalize");
     DebugLog("CIA installer branch exit");
     return EXIT_SUCCESS;
 }
@@ -2322,25 +2399,6 @@ void ApplyConfiguredUsername(Core::System& system) {
 
 int Run(int argc, char** argv) {
     ApplyDiagnosticLogSwitchFromEnv();
-#if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
-    // Raw NVK normally submits asynchronously.  Near the known scene-change
-    // fault, serialize individual submits so the backend captures the exact
-    // faulting pushbuffer rather than a later submit observing channel reset.
-    setenv("NVK_SWITCH_DIAGNOSTIC_SYNC_AFTER", "9000", 1);
-    // A/B test the raw backend completion fence.  The normal sequence waits
-    // for ROP writes before signaling; this diagnostic sequence explicitly
-    // idles both graphics and compute first so resources cannot be reclaimed
-    // while either engine still references them.
-    setenv("NVK_SWITCH_DIAGNOSTIC_FULL_IDLE_COMPLETION", "1", 1);
-    // The scene-change fault is now isolated to one 0x235c-byte graphics
-    // push.  Split that push after its existing WAIT_FOR_IDLE packets and
-    // check the channel after each segment to locate the first bad draw.
-    setenv("NVK_SWITCH_DIAGNOSTIC_SPLIT_EXEC_BYTES", "0x235c", 1);
-    // Segments 0-10 pass; the fault is inside the final 0x8cf..0x8d7 tail.
-    // Split every packet in that tail to distinguish MME accounting from the
-    // compute QMD launch and its wait.
-    setenv("NVK_SWITCH_DIAGNOSTIC_FINE_SPLIT_FROM_DW", "0x8cf", 1);
-#endif
     OpenStartupLogIfNeeded("a");
     StartupLog("Run: entry argc=%d", argc);
     StartupLog("Run: appletLockExit");
@@ -2351,6 +2409,7 @@ int Run(int argc, char** argv) {
     ExitLog("Run entry argc=%d appletLockExit=0x%x", argc, lock_exit_rc);
     InstallFatalHandlers();
     ThreadCoreMaskGuard thread_core_guard;
+    SwitchClockGuard clock_guard;
 
     DebugLog("argc=%d", argc);
     for (int i = 0; i < argc; i++) {
@@ -2365,6 +2424,7 @@ int Run(int argc, char** argv) {
         !launch_options.uninstall_title_mode) {
         DebugLog("no ROM path supplied");
         ExitLog("early exit: no ROM path");
+        clock_guard.Restore("no-rom");
         thread_core_guard.Restore("no-rom");
         DebugClose();
         const bool queued_launcher_return = QueueLauncherReturn(launch_options);
@@ -2451,6 +2511,7 @@ int Run(int argc, char** argv) {
         if (romfs_initialized) {
             romfsExit();
         }
+        clock_guard.Restore("cia-installer");
         thread_core_guard.Restore("cia-installer");
         const bool queued_launcher_return = QueueLauncherReturn(launch_options);
         DebugLog("CIA installer return queued=%d", queued_launcher_return ? 1 : 0);
@@ -2470,6 +2531,7 @@ int Run(int argc, char** argv) {
         if (romfs_initialized) {
             romfsExit();
         }
+        clock_guard.Restore("3ds-uninstaller");
         thread_core_guard.Restore("3ds-uninstaller");
         const bool queued_launcher_return = QueueLauncherReturn(launch_options);
         DebugLog("3DS title uninstall return queued=%d", queued_launcher_return ? 1 : 0);
@@ -2495,6 +2557,7 @@ int Run(int argc, char** argv) {
         if (romfs_initialized) {
             romfsExit();
         }
+        clock_guard.Restore("load-failed");
         thread_core_guard.Restore("load-failed");
         DebugClose();
         const bool queued_launcher_return = QueueLauncherReturn(launch_options);
@@ -2582,6 +2645,10 @@ int Run(int argc, char** argv) {
     bool show_fps_overlay = ParseConfigBool(
         SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
     SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
+    const bool show_shader_compile_notice = ParseConfigBool(
+        SwitchFrontend::GBAStationConfig::GetConfigValue("show_shader_compile_notice", "1"), true);
+    VideoCore::SetShaderCompileNoticeState(show_shader_compile_notice);
+    DebugLog("shader compile notice visible=%d", show_shader_compile_notice ? 1 : 0);
     DebugLog("GBAStation menu init=%d hotkey=ZL+ZR return=%s target=%s", menu_initialized ? 1 : 0,
              launch_options.return_to_nro ? "nro" : "home", launch_options.return_nro_path.c_str());
 
@@ -2609,8 +2676,6 @@ int Run(int argc, char** argv) {
     bool block_game_input_until_release = false;
     bool menu_audio_muted = false;
     float menu_restore_volume = Settings::values.volume.GetValue();
-    constexpr std::size_t FastForwardCompileThrottleThreshold = 1;
-    constexpr auto FastForwardCompileResumeDelay = std::chrono::milliseconds{750};
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
     bool previous_mic_input_combo = false;
@@ -2618,9 +2683,8 @@ int Run(int argc, char** argv) {
     AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
     bool last_fast_forward_active = false;
     bool fast_forward_compile_throttled = false;
-    auto fast_forward_compile_resume_at = Clock::time_point::min();
     bool force_input_suppressed_during_shutdown = false;
-    [[maybe_unused]] const bool normal_vsync = Settings::values.use_vsync.GetValue();
+    const bool normal_vsync = Settings::values.use_vsync.GetValue();
     enum class PendingStateOperation {
         None,
         Save,
@@ -2630,6 +2694,9 @@ int Run(int argc, char** argv) {
         PendingStateOperation operation{PendingStateOperation::None};
         int slot{};
         int delay_frames{};
+        bool signal_sent{};
+        bool core_accepted{};
+        Clock::time_point signal_time{};
     };
     PendingStateRequest pending_state_request{};
     u64 diagnostic_runloop_count = 0;
@@ -2689,50 +2756,28 @@ int Run(int argc, char** argv) {
         const std::size_t pending_compilations = vulkan_renderer.PendingCompilationCount();
         if (!fast_forward_requested) {
             fast_forward_compile_throttled = false;
-            fast_forward_compile_resume_at = Clock::time_point::min();
-        } else if (pending_compilations >= FastForwardCompileThrottleThreshold) {
-            if (!fast_forward_compile_throttled) {
-                DebugLog("fast forward throttled: pending shader/pipeline work=%zu",
-                         pending_compilations);
-            }
+        } else if (!fast_forward_compile_throttled && pending_compilations >= 4) {
             fast_forward_compile_throttled = true;
-            fast_forward_compile_resume_at = now + FastForwardCompileResumeDelay;
-        } else if (fast_forward_compile_throttled &&
-                   now >= fast_forward_compile_resume_at) {
+            DebugLog("fast forward throttled: pending shader/pipeline work=%zu",
+                     pending_compilations);
+        } else if (fast_forward_compile_throttled && pending_compilations == 0) {
             fast_forward_compile_throttled = false;
-            DebugLog("fast forward resumed: shader/pipeline queue drained and guard elapsed");
+            DebugLog("fast forward resumed: shader/pipeline queue drained");
         }
-        const bool fast_forward_active = fast_forward_requested;
-        const float requested_fast_forward_multiplier =
-            SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
+        const bool fast_forward_active =
+            fast_forward_requested && !fast_forward_compile_throttled;
         const float fast_forward_multiplier =
-            std::clamp(requested_fast_forward_multiplier,
-                       SwitchFrontend::MinFastForwardMultiplier,
-                       SwitchFrontend::MaxFastForwardMultiplier);
-        // Keep the temporary limit active while compilation is throttling. The Vulkan rasterizer
-        // uses this state to wait for scene-critical pipelines instead of dropping their draws.
-        Settings::is_temporary_frame_limit = fast_forward_requested;
-        Settings::temporary_frame_limit = fast_forward_requested
-                                              ? (fast_forward_compile_throttled
-                                                     ? 100.0
-                                                     : static_cast<double>(
-                                                           fast_forward_multiplier) *
-                                                           100.0)
-                                              : 0.0;
+            SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
+        Settings::is_temporary_frame_limit = fast_forward_active;
+        Settings::temporary_frame_limit =
+            fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
         if (fast_forward_active != last_fast_forward_active) {
-#ifdef __SWITCH__
-            // NVK on Switch exposes only FIFO presentation in this frontend. Toggling vsync while
-            // fast-forward is repeatedly throttled just recreates the swapchain during heavy scene
-            // transitions, which has shown up as device-lost crashes in large 3DS titles.
-#else
             Settings::values.use_vsync.SetValue(fast_forward_active ? false : normal_vsync);
-#endif
             SwitchFrontend::VulkanOverlay::SetFastForwardActive(fast_forward_active);
             vulkan_renderer.SetFastForward(fast_forward_active, fast_forward_multiplier);
-            DebugLog("fast forward %s requested=%.2f effective=%.2f limit=%.1f pending=%zu",
-                     fast_forward_active ? "on" : "off", requested_fast_forward_multiplier,
-                     fast_forward_multiplier, Settings::temporary_frame_limit,
-                     pending_compilations);
+            DebugLog("fast forward %s multiplier=%.2f limit=%.1f",
+                     fast_forward_active ? "on" : "off", fast_forward_multiplier,
+                     Settings::temporary_frame_limit);
             last_fast_forward_active = fast_forward_active;
         }
         if (menu_visible != menu_was_visible) {
@@ -2793,8 +2838,21 @@ int Run(int argc, char** argv) {
                     saving ? PendingStateOperation::Save : PendingStateOperation::Load;
                 pending_state_request.slot = slot;
                 pending_state_request.delay_frames = 1;
+                pending_state_request.signal_sent = false;
+                pending_state_request.core_accepted = false;
+                pending_state_request.signal_time = Clock::time_point{};
                 if (menu_initialized) {
-                    SwitchFrontend::VulkanOverlay::Close();
+                    if (saving) {
+                        SwitchFrontend::VulkanOverlay::Close();
+                    } else {
+                        // Core::System::LoadState() recreates GPU and its Vulkan renderer while
+                        // deserializing. Destroy the menu's renderer-bound resources first, then
+                        // rebuild the menu after RunLoop returns.
+                        DebugLog("menu load: shutting down overlay before renderer replacement");
+                        SwitchFrontend::VulkanOverlay::Shutdown();
+                        menu_initialized = false;
+                        pending_overlay_reinit = true;
+                    }
                 }
                 char message[64]{};
                 std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
@@ -2867,14 +2925,19 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncOverlaySettings) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            const bool current_saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
+                launch_options.rom_path, launch_options.title, display);
             int count = 0;
             const bool db_saved = SwitchFrontend::GameDatabase::SyncDisplaySettings(
                 display, false, true, count);
             const bool config_saved = SaveGlobalOverlayDefaults(display);
+            const bool saved = current_saved && db_saved && config_saved;
+            DebugLog("menu sync overlay: current=%d database=%d config=%d count=%d enabled=%d path=%s",
+                     current_saved ? 1 : 0, db_saved ? 1 : 0, config_saved ? 1 : 0, count,
+                     display.overlay_enabled ? 1 : 0, display.overlay_path.c_str());
             char message[96]{};
-            std::snprintf(message, sizeof(message),
-                          db_saved && config_saved ? "遮罩已同步到 %d 个游戏"
-                                                   : "遮罩同步失败",
+            std::snprintf(message, sizeof(message), saved ? "遮罩已同步到 %d 个游戏"
+                                                          : "遮罩同步失败",
                           count);
             SwitchFrontend::OverlayUI::ShowToast(message);
             block_game_input_until_release = true;
@@ -2887,14 +2950,21 @@ int Run(int argc, char** argv) {
                     static_cast<u16>(display.internal_resolution));
                 system.ApplySettings();
             }
+            const bool current_saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
+                launch_options.rom_path, launch_options.title, display);
             int count = 0;
             const bool db_saved = SwitchFrontend::GameDatabase::SyncDisplaySettings(
                 display, true, false, count);
             const bool config_saved = SaveGlobalScreenDefaults(display);
+            const bool saved = current_saved && db_saved && config_saved;
+            DebugLog("menu sync display: current=%d database=%d config=%d count=%d layout=%s "
+                     "orientation=%d resolution=%d integer=%d",
+                     current_saved ? 1 : 0, db_saved ? 1 : 0, config_saved ? 1 : 0, count,
+                     display.screen_layout.c_str(), display.screen_orientation,
+                     display.internal_resolution, display.integer_scale ? 1 : 0);
             char message[96]{};
-            std::snprintf(message, sizeof(message),
-                          db_saved && config_saved ? "画面设置已同步到 %d 个游戏"
-                                                   : "画面设置同步失败",
+            std::snprintf(message, sizeof(message), saved ? "画面设置已同步到 %d 个游戏"
+                                                          : "画面设置同步失败",
                           count);
             SwitchFrontend::OverlayUI::ShowToast(message);
             block_game_input_until_release = true;
@@ -2923,33 +2993,26 @@ int Run(int argc, char** argv) {
             !SwitchFrontend::VulkanOverlay::IsVisible()) {
             if (pending_state_request.delay_frames > 0) {
                 --pending_state_request.delay_frames;
-            } else {
+            } else if (!pending_state_request.signal_sent) {
                 const PendingStateOperation operation = pending_state_request.operation;
                 const int slot = pending_state_request.slot;
-                pending_state_request = {};
-
                 const bool saving = operation == PendingStateOperation::Save;
-                const bool ok = saving ? SaveStateFromMenu(system, static_cast<u32>(slot))
-                                       : LoadStateFromMenu(system, static_cast<u32>(slot));
-                if (ok) {
-                    if (saving) {
-                        (*slot_state_cache)[slot].store(true, std::memory_order_release);
-                    } else {
-                        pause_frame_ready = false;
-                        pause_frame_baseline = 0;
-                    }
-                    char message[64]{};
-                    std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
-                                                                  : "已读取存档位 %d",
-                                  slot);
-                    SwitchFrontend::OverlayUI::ShowToast(message);
+                const auto signal = saving ? Core::System::Signal::Save
+                                           : Core::System::Signal::Load;
+                if (!system.SendSignal(signal, static_cast<u32>(slot))) {
+                    DebugLog("menu state signal rejected operation=%s slot=%d",
+                             saving ? "save" : "load", slot);
+                    SwitchFrontend::OverlayUI::ShowToast(saving ? "状态保存失败"
+                                                                   : "状态读取失败");
+                    pending_state_request = {};
+                } else {
+                    pending_state_request.signal_sent = true;
+                    pending_state_request.signal_time = Clock::now();
+                    system.frame_limiter.AdvanceFrame();
+                    DebugLog("menu state signal queued operation=%s slot=%d",
+                             saving ? "save" : "load", slot);
                 }
                 block_game_input_until_release = true;
-                if (!saving) {
-                    // LoadState can recreate renderer/system internals.  Do not touch references
-                    // captured before the load; restart the loop and reacquire them.
-                    continue;
-                }
             }
         }
 
@@ -2985,7 +3048,57 @@ int Run(int argc, char** argv) {
         diagnostic_runloop_ms_max = std::max(diagnostic_runloop_ms_max, runloop_ms);
         diagnostic_runloop_count++;
         loop_count++;
-        if (pending_overlay_reinit && run_result == Core::System::ResultStatus::Success &&
+
+        bool menu_state_error_handled = false;
+        if (pending_state_request.operation != PendingStateOperation::None &&
+            pending_state_request.signal_sent) {
+            const bool saving = pending_state_request.operation == PendingStateOperation::Save;
+            const int slot = pending_state_request.slot;
+            const auto request_status = system.GetSaveStateRequestStatus();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        Clock::now() - pending_state_request.signal_time)
+                                        .count();
+            if (run_result == Core::System::ResultStatus::ErrorSavestate) {
+                const std::string details = MakeSingleLineLogText(system.GetStatusDetails());
+                DebugLog("menu state failed operation=%s slot=%d elapsed_ms=%lld details=\"%s\"",
+                         saving ? "save" : "load", slot,
+                         static_cast<long long>(elapsed_ms),
+                         details.empty() ? "unknown" : details.c_str());
+                SwitchFrontend::OverlayUI::ShowToast(saving ? "状态保存失败" : "状态读取失败");
+                pending_state_request = {};
+                menu_state_error_handled = true;
+            } else if (run_result == Core::System::ResultStatus::Success &&
+                       request_status == Core::System::SaveStateStatus::NONE) {
+                DebugLog("menu state completed operation=%s slot=%d elapsed_ms=%lld",
+                         saving ? "save" : "load", slot,
+                         static_cast<long long>(elapsed_ms));
+                if (saving) {
+                    (*slot_state_cache)[slot].store(true, std::memory_order_release);
+                } else {
+                    pause_frame_ready = false;
+                    pause_frame_baseline = system.GPU().Renderer().GetCurrentFrame();
+                    last_logged_frame = pause_frame_baseline;
+                    last_heartbeat_frame = pause_frame_baseline;
+                }
+                char message[64]{};
+                std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
+                                                                  : "已读取存档位 %d", slot);
+                SwitchFrontend::OverlayUI::ShowToast(message);
+                pending_state_request = {};
+            } else if (request_status != Core::System::SaveStateStatus::NONE &&
+                       !pending_state_request.core_accepted) {
+                pending_state_request.core_accepted = true;
+                DebugLog("menu state accepted operation=%s slot=%d request_status=%s elapsed_ms=%lld",
+                         saving ? "save" : "load", slot,
+                         request_status == Core::System::SaveStateStatus::SAVING ? "saving"
+                                                                                 : "loading",
+                         static_cast<long long>(elapsed_ms));
+            }
+        }
+
+        if (pending_overlay_reinit &&
+            (run_result == Core::System::ResultStatus::Success ||
+             run_result == Core::System::ResultStatus::ErrorSavestate) &&
             system.IsPoweredOn()) {
             auto& reset_renderer = system.GPU().Renderer();
             SwitchFrontend::VulkanOverlay::SetDisplaySettings(
@@ -2997,8 +3110,8 @@ int Run(int argc, char** argv) {
             pause_frame_baseline = reset_renderer.GetCurrentFrame();
             last_logged_frame = pause_frame_baseline;
             last_heartbeat_frame = pause_frame_baseline;
-            DebugLog("GBAStation menu reinit after reset=%d frame=%d",
-                     menu_initialized ? 1 : 0, pause_frame_baseline);
+            DebugLog("GBAStation menu reinit after renderer replacement=%d result=%s frame=%d",
+                     menu_initialized ? 1 : 0, ResultStatusName(run_result), pause_frame_baseline);
         }
         const s32 renderer_frame =
             system.IsPoweredOn() ? system.GPU().Renderer().GetCurrentFrame() : last_logged_frame;
@@ -3357,6 +3470,9 @@ int Run(int argc, char** argv) {
             break;
         }
         if (run_result == Core::System::ResultStatus::ErrorSavestate) {
+            if (menu_state_error_handled) {
+                continue;
+            }
             const std::string details = system.GetStatusDetails();
             DebugLog("savestate operation failed after %llu iterations: %s",
                      static_cast<unsigned long long>(loop_count),
@@ -3470,6 +3586,9 @@ int Run(int argc, char** argv) {
         DebugLog("shutdown step: romfsExit done");
         ExitLog("shutdown step: romfsExit done");
     }
+    ExitLog("shutdown step: clock_guard.Restore begin");
+    clock_guard.Restore("normal-shutdown");
+    ExitLog("shutdown step: clock_guard.Restore done");
     ExitLog("shutdown step: thread_core_guard.Restore begin");
     thread_core_guard.Restore("normal-shutdown");
     ExitLog("shutdown step: thread_core_guard.Restore done");

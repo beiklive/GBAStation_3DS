@@ -107,7 +107,7 @@ std::vector<u32> BuildTextCodepoints() {
         codepoints.push_back(cp);
     }
 
-    constexpr std::array<std::string_view, 62> strings{{
+    constexpr std::array<std::string_view, 63> strings{{
         "GBAStation 菜单",
         "继续游戏",
         "返回游戏",
@@ -168,6 +168,7 @@ std::vector<u32> BuildTextCodepoints() {
         "槽位",
         "保存",
         "读取",
+        "正在编译着色器",
         "度",
         "←→↑↓",
     }};

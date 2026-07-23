@@ -150,8 +150,7 @@ private:
     Pica::Shader::Profile profile{};
     vk::UniquePipelineCache driver_pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
-    std::size_t num_pipeline_worker_threads;
-    std::size_t num_shader_worker_threads;
+    std::size_t num_worker_threads;
     Common::ThreadWorker pipeline_workers;
     Common::ThreadWorker shader_workers;
     PipelineInfo current_info{};

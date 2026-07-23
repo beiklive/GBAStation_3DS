@@ -53,12 +53,13 @@ enum class Page {
 constexpr int DisplayFastForwardIndex = 1;
 constexpr int DisplayInternalResolutionIndex = 3;
 constexpr int DisplayLayoutIndex = 4;
-constexpr int DisplayOrientationIndex = 5;
-constexpr int DisplayIntegerScaleIndex = 6;
-constexpr int DisplayGapIndex = 7;
-constexpr int DisplayOverlaySettingsIndex = 9;
-constexpr int DisplaySyncDisplayIndex = 12;
-constexpr int DisplaySyncOverlayIndex = 13;
+constexpr int DisplayCustomLayoutIndex = 5;
+constexpr int DisplayOrientationIndex = 6;
+constexpr int DisplayIntegerScaleIndex = 7;
+constexpr int DisplayGapIndex = 8;
+constexpr int DisplayOverlaySettingsIndex = 10;
+constexpr int DisplaySyncDisplayIndex = 13;
+constexpr int DisplaySyncOverlayIndex = 14;
 constexpr const char* OverlayDefaultDirectory = "sdmc:/GBAStation/overlays/3DS";
 
 struct PreviousNavigation {
@@ -81,6 +82,7 @@ struct RepeatButton {
 enum class OverlayMode {
     Normal,
     Sidebar,
+    CustomLayoutSidebar,
     FilePicker,
 };
 
@@ -102,6 +104,7 @@ SwitchFrontend::VulkanMenuRenderer::State rich_state;
 bool rich_renderer_ready{};
 OverlayMode overlay_mode{OverlayMode::Normal};
 int overlay_focus{};
+int custom_layout_focus{};
 std::string file_picker_directory;
 std::vector<SwitchFrontend::VulkanMenuRenderer::FileEntry> file_picker_entries;
 int file_picker_focus{};
@@ -219,6 +222,7 @@ void DrawRichOverlayCallback(vk::CommandBuffer command_buffer, vk::Image image,
         std::scoped_lock lock{rich_state_mutex};
         snapshot = rich_state;
     }
+    snapshot.toast = OverlayUI::GetToast();
     SwitchFrontend::VulkanMenuRenderer::Draw(command_buffer, image, extent, format, snapshot);
 }
 
@@ -316,10 +320,15 @@ void SyncRichState() {
     }
 
     std::scoped_lock lock{rich_state_mutex};
+    float fps = 0.0f;
+    rich_state.show_fps = VideoCore::GetFpsOverlayState(fps);
+    rich_state.current_fps = fps;
     rich_state.menu_visible =
         visible.load(std::memory_order_acquire) && overlay_mode != OverlayMode::Normal;
     rich_state.overlay_sidebar = overlay_mode == OverlayMode::Sidebar;
     rich_state.overlay_focus = overlay_focus;
+    rich_state.custom_layout_sidebar = overlay_mode == OverlayMode::CustomLayoutSidebar;
+    rich_state.custom_layout_focus = custom_layout_focus;
     rich_state.file_picker = overlay_mode == OverlayMode::FilePicker;
     rich_state.file_picker_focus = file_picker_focus;
     rich_state.file_picker_path = file_picker_directory;
@@ -357,23 +366,35 @@ std::string FastForwardValue() {
 
 std::string LayoutValue() {
     switch (display_layout.load(std::memory_order_acquire)) {
-    case 0: return "竖排";
-    case 1: return "横排";
-    case 2: return "主屏优先";
-    case 3: return "混合";
-    case 4: return "上屏";
-    case 5: return "下屏";
-    case 6: return "自定义";
-    default: return "主屏优先";
+    case 0:
+        return "竖排";
+    case 1:
+        return "横排";
+    case 2:
+        return "主屏优先";
+    case 3:
+        return "混合";
+    case 4:
+        return "上屏";
+    case 5:
+        return "下屏";
+    case 6:
+        return "自定义";
+    default:
+        return "主屏优先";
     }
 }
 
 std::string OrientationValue() {
     switch (display_orientation.load(std::memory_order_acquire)) {
-    case 1: return "90";
-    case 2: return "180";
-    case 3: return "270";
-    default: return "0";
+    case 1:
+        return "90";
+    case 2:
+        return "180";
+    case 3:
+        return "270";
+    default:
+        return "0";
     }
 }
 
@@ -396,13 +417,13 @@ VideoCore::OverlayMenuItem Disabled(std::string label, std::string value = "预�
 }
 
 OverlayUI::Action SaveActionForSlot(int slot) {
-    return static_cast<OverlayUI::Action>(
-        static_cast<int>(OverlayUI::Action::SaveStateSlot1) + std::clamp(slot, 1, 10) - 1);
+    return static_cast<OverlayUI::Action>(static_cast<int>(OverlayUI::Action::SaveStateSlot1) +
+                                          std::clamp(slot, 1, 10) - 1);
 }
 
 OverlayUI::Action LoadActionForSlot(int slot) {
-    return static_cast<OverlayUI::Action>(
-        static_cast<int>(OverlayUI::Action::LoadStateSlot1) + std::clamp(slot, 1, 10) - 1);
+    return static_cast<OverlayUI::Action>(static_cast<int>(OverlayUI::Action::LoadStateSlot1) +
+                                          std::clamp(slot, 1, 10) - 1);
 }
 
 std::vector<VideoCore::OverlayMenuItem> BuildStateItems(bool saving) {
@@ -444,12 +465,15 @@ std::vector<VideoCore::OverlayMenuItem> BuildDisplayItems() {
         Header("画面"),
         Selector("渲染分辨率", std::to_string(display_internal_resolution.load()) + "x"),
         Selector("屏幕布局", LayoutValue()),
+        display_layout.load(std::memory_order_acquire) == 6
+            ? Row("自定义布局", "调整")
+            : Disabled("自定义布局", "仅自定义模式可用"),
         Selector("画面旋转", OrientationValue() + "度"),
         Selector("画面整数倍", display_integer_scale.load() ? "开启" : "关闭"),
         Selector("屏幕间距", std::to_string(display_gap.load())),
         Header("扩展"),
-        Row("遮罩设置", display_overlay_enabled.load(std::memory_order_acquire) ? "已开启"
-                                                                                 : "设置"),
+        Row("遮罩设置",
+            display_overlay_enabled.load(std::memory_order_acquire) ? "已开启" : "设置"),
         Disabled("着色器设置"),
         Header("同步"),
         Row("同步画面设置"),
@@ -597,6 +621,7 @@ void OpenMenu() {
     tabs_focused = true;
     overlay_mode = OverlayMode::Normal;
     overlay_focus = 0;
+    custom_layout_focus = 0;
     file_preview = false;
     file_preview_path.clear();
     visible.store(true, std::memory_order_release);
@@ -609,6 +634,7 @@ void CloseMenu() {
     visible.store(false, std::memory_order_release);
     overlay_mode = OverlayMode::Normal;
     overlay_focus = 0;
+    custom_layout_focus = 0;
     file_preview = false;
     file_preview_path.clear();
     previous_navigation = {};
@@ -672,9 +698,9 @@ void StepDisplayValue(int direction) {
         PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
         return;
     case DisplayGapIndex:
-        display_gap.store(std::clamp(display_gap.load(std::memory_order_relaxed) + direction, -256,
-                                     256),
-                          std::memory_order_release);
+        display_gap.store(
+            std::clamp(display_gap.load(std::memory_order_relaxed) + direction, -256, 256),
+            std::memory_order_release);
         PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
         return;
     default:
@@ -691,25 +717,116 @@ void OpenOverlaySidebar() {
     SyncRichState();
 }
 
+void OpenCustomLayoutSidebar() {
+    if (display_layout.load(std::memory_order_acquire) != 6) {
+        return;
+    }
+    overlay_mode = OverlayMode::CustomLayoutSidebar;
+    custom_layout_focus = 0;
+    VideoCore::SetOverlayMenuState({});
+    SyncRichState();
+}
+
 void OpenOverlayFilePicker() {
     overlay_mode = OverlayMode::FilePicker;
     const std::string selected_path = display_overlay_path;
-    const std::string directory = selected_path.empty() ? OverlayDefaultDirectory
-                                                        : ParentPath(selected_path);
+    const std::string directory =
+        selected_path.empty() ? OverlayDefaultDirectory : ParentPath(selected_path);
     RefreshFilePicker(directory, selected_path);
     VideoCore::SetOverlayMenuState({});
     SyncRichState();
 }
 
-void ReturnToDisplayMenu() {
+void ReturnToDisplayMenu(int focus) {
     overlay_mode = OverlayMode::Normal;
     file_preview = false;
     file_preview_path.clear();
     tabs_focused = false;
     page = Page::Display;
-    selected = DisplayOverlaySettingsIndex;
+    selected = focus;
     SyncRichState();
     Repaint();
+}
+
+void StepCustomLayoutValue(int direction) {
+    switch (custom_layout_focus) {
+    case 0:
+        display_top_scale.store(
+            std::clamp(display_top_scale.load(std::memory_order_relaxed) + direction * 0.1f, 1.0f,
+                       10.0f),
+            std::memory_order_release);
+        break;
+    case 1:
+        display_top_offset_x.store(
+            std::clamp(display_top_offset_x.load(std::memory_order_relaxed) + direction * 8.0f,
+                       -1024.0f, 1024.0f),
+            std::memory_order_release);
+        break;
+    case 2:
+        display_top_offset_y.store(
+            std::clamp(display_top_offset_y.load(std::memory_order_relaxed) + direction * 8.0f,
+                       -1024.0f, 1024.0f),
+            std::memory_order_release);
+        break;
+    case 3:
+        display_bottom_scale.store(
+            std::clamp(display_bottom_scale.load(std::memory_order_relaxed) + direction * 0.1f,
+                       1.0f, 10.0f),
+            std::memory_order_release);
+        break;
+    case 4:
+        display_bottom_offset_x.store(
+            std::clamp(display_bottom_offset_x.load(std::memory_order_relaxed) + direction * 8.0f,
+                       -1024.0f, 1024.0f),
+            std::memory_order_release);
+        break;
+    case 5:
+        display_bottom_offset_y.store(
+            std::clamp(display_bottom_offset_y.load(std::memory_order_relaxed) + direction * 8.0f,
+                       -1024.0f, 1024.0f),
+            std::memory_order_release);
+        break;
+    case 6:
+        display_bottom_opacity.store(
+            std::clamp(display_bottom_opacity.load(std::memory_order_relaxed) + direction * 0.05f,
+                       0.0f, 1.0f),
+            std::memory_order_release);
+        break;
+    default:
+        return;
+    }
+    PublishAction(OverlayUI::Action::CustomLayoutChanged, false);
+    SyncRichState();
+}
+
+void ResetCustomLayoutValue() {
+    switch (custom_layout_focus) {
+    case 0:
+        display_top_scale.store(1.0f, std::memory_order_release);
+        break;
+    case 1:
+        display_top_offset_x.store(0.0f, std::memory_order_release);
+        break;
+    case 2:
+        display_top_offset_y.store(0.0f, std::memory_order_release);
+        break;
+    case 3:
+        display_bottom_scale.store(1.0f, std::memory_order_release);
+        break;
+    case 4:
+        display_bottom_offset_x.store(0.0f, std::memory_order_release);
+        break;
+    case 5:
+        display_bottom_offset_y.store(0.0f, std::memory_order_release);
+        break;
+    case 6:
+        display_bottom_opacity.store(1.0f, std::memory_order_release);
+        break;
+    default:
+        return;
+    }
+    PublishAction(OverlayUI::Action::CustomLayoutChanged, false);
+    SyncRichState();
 }
 
 void ActivateOverlaySidebar() {
@@ -733,8 +850,8 @@ void ActivateFilePickerEntry() {
     if (file_picker_entries.empty()) {
         return;
     }
-    file_picker_focus = std::clamp(file_picker_focus, 0,
-                                   static_cast<int>(file_picker_entries.size()) - 1);
+    file_picker_focus =
+        std::clamp(file_picker_focus, 0, static_cast<int>(file_picker_entries.size()) - 1);
     const auto entry = file_picker_entries[file_picker_focus];
     if (entry.directory) {
         RefreshFilePicker(entry.path);
@@ -757,8 +874,8 @@ void PreviewFilePickerEntry() {
     if (file_picker_entries.empty()) {
         return;
     }
-    file_picker_focus = std::clamp(file_picker_focus, 0,
-                                   static_cast<int>(file_picker_entries.size()) - 1);
+    file_picker_focus =
+        std::clamp(file_picker_focus, 0, static_cast<int>(file_picker_entries.size()) - 1);
     const auto& entry = file_picker_entries[file_picker_focus];
     if (entry.directory || !IsOverlayImagePath(entry.path)) {
         return;
@@ -793,7 +910,8 @@ void ActivateCurrent() {
 
     if (page == Page::SaveState) {
         const auto items = BuildCurrentItems();
-        if (selected >= 0 && selected < OverlayUI::StateSlotCount && IsSelectable(items, selected)) {
+        if (selected >= 0 && selected < OverlayUI::StateSlotCount &&
+            IsSelectable(items, selected)) {
             PublishAction(SaveActionForSlot(selected + 1), true);
         }
         return;
@@ -801,7 +919,8 @@ void ActivateCurrent() {
 
     if (page == Page::LoadState) {
         const auto items = BuildCurrentItems();
-        if (selected >= 0 && selected < OverlayUI::StateSlotCount && IsSelectable(items, selected)) {
+        if (selected >= 0 && selected < OverlayUI::StateSlotCount &&
+            IsSelectable(items, selected)) {
             PublishAction(LoadActionForSlot(selected + 1), true);
         }
         return;
@@ -818,7 +937,10 @@ void ActivateCurrent() {
     }
 
     if (page == Page::Display) {
-        if (selected == DisplayOverlaySettingsIndex) {
+        if (selected == DisplayCustomLayoutIndex &&
+            display_layout.load(std::memory_order_acquire) == 6) {
+            OpenCustomLayoutSidebar();
+        } else if (selected == DisplayOverlaySettingsIndex) {
             OpenOverlaySidebar();
         } else if (selected == DisplaySyncDisplayIndex) {
             PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
@@ -886,15 +1008,14 @@ bool Init([[maybe_unused]] Vulkan::RendererVulkan& renderer) {
     previous_navigation = {};
     ResetRepeatState();
     VideoCore::SetOverlayMenuState({});
-    rich_renderer_ready =
-        SwitchFrontend::VulkanMenuRenderer::Init(renderer.GetVulkanInstance());
+    rich_renderer_ready = SwitchFrontend::VulkanMenuRenderer::Init(renderer.GetVulkanInstance());
     if (rich_renderer_ready) {
         Vulkan::SetOverlayDrawCallback(&DrawRichOverlayCallback);
         Vulkan::SetOverlayResetCallback(&ResetRichOverlayCallback);
         SyncRichState();
     } else {
-        LOG_ERROR(Render_Vulkan, "{} rich overlay renderer unavailable; overlay image picker disabled",
-                  Tag);
+        LOG_ERROR(Render_Vulkan,
+                  "{} rich overlay renderer unavailable; overlay image picker disabled", Tag);
     }
     LOG_INFO(Render_Vulkan, "{} initialized with video_core overlay", Tag);
     return true;
@@ -952,12 +1073,49 @@ void Update(PadState* pad) {
         }
         if (Rising(nav.cancel, previous_navigation.cancel)) {
             PublishAction(OverlayUI::Action::OverlaySettingsCommitted, false);
-            ReturnToDisplayMenu();
+            ReturnToDisplayMenu(DisplayOverlaySettingsIndex);
             previous_navigation = nav;
             return;
         }
         if (Rising(nav.accept, previous_navigation.accept)) {
             ActivateOverlaySidebar();
+            previous_navigation = nav;
+            return;
+        }
+        previous_navigation = nav;
+        if (changed) {
+            SyncRichState();
+        }
+        return;
+    }
+
+    if (overlay_mode == OverlayMode::CustomLayoutSidebar) {
+        constexpr int CustomLayoutItemCount = 7;
+        if (up_step) {
+            custom_layout_focus =
+                (custom_layout_focus - 1 + CustomLayoutItemCount) % CustomLayoutItemCount;
+            changed = true;
+        }
+        if (down_step) {
+            custom_layout_focus = (custom_layout_focus + 1) % CustomLayoutItemCount;
+            changed = true;
+        }
+        if (shoulder_left_step || shoulder_right_step ||
+            Rising(nav.left, previous_navigation.left) ||
+            Rising(nav.right, previous_navigation.right)) {
+            const bool increase =
+                shoulder_right_step || Rising(nav.right, previous_navigation.right);
+            StepCustomLayoutValue(increase ? 1 : -1);
+            changed = true;
+        }
+        if (Rising(nav.cancel, previous_navigation.cancel)) {
+            PublishAction(OverlayUI::Action::CustomLayoutCommitted, false);
+            ReturnToDisplayMenu(DisplayCustomLayoutIndex);
+            previous_navigation = nav;
+            return;
+        }
+        if (Rising(nav.accept, previous_navigation.accept)) {
+            ResetCustomLayoutValue();
             previous_navigation = nav;
             return;
         }
