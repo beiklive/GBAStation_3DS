@@ -9,6 +9,7 @@
 
 #include "GBAStation/display_settings.h"
 #include "GBAStation/switch_libnx.h"
+#include "common/settings.h"
 #include "core/frontend/emu_window.h"
 
 namespace SwitchFrontend {
@@ -41,6 +42,10 @@ private:
     float cursor_y{};
     std::chrono::steady_clock::time_point last_cursor_update{};
     GBAStationDisplaySettings display_settings{};
+    u32 framebuffer_width{};
+    u32 framebuffer_height{};
+    bool display_layout_dirty{true};
+    Settings::StereoRenderOption last_render_3d_mode{};
 };
 
 } // namespace SwitchFrontend

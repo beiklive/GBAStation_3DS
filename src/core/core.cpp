@@ -62,6 +62,12 @@ namespace Core {
 
 /*static*/ System System::s_instance;
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+        statement;                                                                                   \
+    } while (false)
+
 std::atomic<u64> diagnostic_runloop_calls{};
 std::atomic<u64> diagnostic_runloop_active_runs{};
 std::atomic<u64> diagnostic_runloop_idle_runs{};
@@ -229,6 +235,21 @@ RunLoopDiagnostics GetAndResetRunLoopDiagnostics() {
     CollectTopPcSamples(diagnostic_runloop_pc_samples, result.top_pcs, result.top_pc_counts);
     return result;
 }
+#else
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+    } while (false)
+
+void SampleRunLoopEntryPc(u32, u32, u32) {}
+
+void SampleRunLoopExitPc(u32, u32) {}
+
+void AddRunLoopDiagnostics(const RunLoopDiagnostics&) {}
+
+RunLoopDiagnostics GetAndResetRunLoopDiagnostics() {
+    return {};
+}
+#endif
 
 template <>
 Core::System& Global() {
@@ -255,7 +276,7 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         return ResultStatus::ErrorNotInitialized;
     }
     RunLoopDiagnostics loop_diag{};
-    loop_diag.calls = 1;
+    GBASTATION_HOTPATH_DIAG(loop_diag.calls = 1);
 
 #ifdef ENABLE_GDBSTUB
     if (GDBStub::IsServerEnabled()) {
@@ -369,7 +390,7 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             cpu_core->GetTimer().Advance();
             cpu_core->PrepareReschedule();
             kernel->GetThreadManager(cpu_core->GetID()).Reschedule();
-            loop_diag.reschedules++;
+            GBASTATION_HOTPATH_DIAG(loop_diag.reschedules++);
             cpu_core->GetTimer().SetNextSlice(delay);
             if (max_delay < delay) {
                 max_delay = delay;
@@ -386,8 +407,8 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         LOG_TRACE(Core_ARM11, "Core {} running (delayed) for {} ticks",
                   current_core_to_execute->GetID(),
                   current_core_to_execute->GetTimer().GetDowncount());
-        loop_diag.delayed_runs++;
-        loop_diag.max_delay_ticks += static_cast<u64>(max_delay);
+        GBASTATION_HOTPATH_DIAG(loop_diag.delayed_runs++);
+        GBASTATION_HOTPATH_DIAG(loop_diag.max_delay_ticks += static_cast<u64>(max_delay));
         const u64 start_ticks = current_core_to_execute->GetTimer().GetTicks();
         if (running_core != current_core_to_execute) {
             running_core = current_core_to_execute;
@@ -395,23 +416,24 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         }
         if (kernel->GetCurrentThreadManager().GetCurrentThread() == nullptr) {
             LOG_TRACE(Core_ARM11, "Core {} idling", current_core_to_execute->GetID());
-            loop_diag.idle_runs++;
+            GBASTATION_HOTPATH_DIAG(loop_diag.idle_runs++);
             current_core_to_execute->GetTimer().Idle();
             PrepareReschedule();
         } else {
-            loop_diag.active_runs++;
-            SampleRunLoopEntryPc(current_core_to_execute->GetPC(),
-                                 current_core_to_execute->GetCPSR(),
-                                 current_core_to_execute->GetReg(14));
+            GBASTATION_HOTPATH_DIAG(loop_diag.active_runs++);
+            GBASTATION_HOTPATH_DIAG(SampleRunLoopEntryPc(
+                current_core_to_execute->GetPC(), current_core_to_execute->GetCPSR(),
+                current_core_to_execute->GetReg(14)));
             if (tight_loop) {
                 current_core_to_execute->Run();
             } else {
                 current_core_to_execute->Step();
             }
-            SampleRunLoopExitPc(current_core_to_execute->GetPC(),
-                                current_core_to_execute->GetCPSR());
+            GBASTATION_HOTPATH_DIAG(SampleRunLoopExitPc(current_core_to_execute->GetPC(),
+                                                        current_core_to_execute->GetCPSR()));
         }
-        loop_diag.executed_ticks += current_core_to_execute->GetTimer().GetTicks() - start_ticks;
+        GBASTATION_HOTPATH_DIAG(loop_diag.executed_ticks +=
+                                current_core_to_execute->GetTimer().GetTicks() - start_ticks);
     } else {
         // Now all cores are at the same global time. So we will run them one after the other
         // with a max slice that is the minimum of all max slices of all cores
@@ -423,11 +445,11 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             cpu_core->GetTimer().Advance();
             cpu_core->PrepareReschedule();
             kernel->GetThreadManager(cpu_core->GetID()).Reschedule();
-            loop_diag.reschedules++;
+            GBASTATION_HOTPATH_DIAG(loop_diag.reschedules++);
             max_slice = std::min(max_slice, cpu_core->GetTimer().GetMaxSliceLength());
         }
-        loop_diag.sync_runs++;
-        loop_diag.max_slice_ticks += static_cast<u64>(max_slice);
+        GBASTATION_HOTPATH_DIAG(loop_diag.sync_runs++);
+        GBASTATION_HOTPATH_DIAG(loop_diag.max_slice_ticks += static_cast<u64>(max_slice));
         for (auto& cpu_core : cpu_cores) {
             cpu_core->GetTimer().SetNextSlice(max_slice);
             auto start_ticks = cpu_core->GetTimer().GetTicks();
@@ -439,13 +461,13 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             // instead advance to the next event and try to yield to the next thread
             if (kernel->GetCurrentThreadManager().GetCurrentThread() == nullptr) {
                 LOG_TRACE(Core_ARM11, "Core {} idling", cpu_core->GetID());
-                loop_diag.idle_runs++;
+                GBASTATION_HOTPATH_DIAG(loop_diag.idle_runs++);
                 cpu_core->GetTimer().Idle();
                 PrepareReschedule();
             } else {
-                loop_diag.active_runs++;
-                SampleRunLoopEntryPc(cpu_core->GetPC(), cpu_core->GetCPSR(),
-                                     cpu_core->GetReg(14));
+                GBASTATION_HOTPATH_DIAG(loop_diag.active_runs++);
+                GBASTATION_HOTPATH_DIAG(SampleRunLoopEntryPc(
+                    cpu_core->GetPC(), cpu_core->GetCPSR(), cpu_core->GetReg(14)));
                 // In the rare case the break flag is set (due to exception thrown)
                 // there is probably no need to adjust the timer accordingly.
                 if (tight_loop) {
@@ -453,16 +475,17 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
                 } else {
                     cpu_core->Step();
                 }
-                SampleRunLoopExitPc(cpu_core->GetPC(), cpu_core->GetCPSR());
+                GBASTATION_HOTPATH_DIAG(
+                    SampleRunLoopExitPc(cpu_core->GetPC(), cpu_core->GetCPSR()));
             }
             max_slice = cpu_core->GetTimer().GetTicks() - start_ticks;
-            loop_diag.executed_ticks += max_slice;
+            GBASTATION_HOTPATH_DIAG(loop_diag.executed_ticks += max_slice);
         }
     }
 
     Reschedule();
-    loop_diag.reschedules++;
-    AddRunLoopDiagnostics(loop_diag);
+    GBASTATION_HOTPATH_DIAG(loop_diag.reschedules++);
+    GBASTATION_HOTPATH_DIAG(AddRunLoopDiagnostics(loop_diag));
 
     return status;
 }

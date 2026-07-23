@@ -52,6 +52,7 @@ static constexpr u64 audio_frame_ticks = samples_per_frame * 4096 * 2ull; ///< U
 
 namespace {
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 using DspClock = std::chrono::steady_clock;
 
 std::atomic<u64> dsp_ticks{};
@@ -77,10 +78,14 @@ void RecordDspTick(u64 active_sources, u64 tick_ns, u64 generate_ns, u64 output_
     dsp_generate_ns.fetch_add(generate_ns, std::memory_order_relaxed);
     dsp_output_ns.fetch_add(output_ns, std::memory_order_relaxed);
 }
+#endif
 
 } // namespace
 
 DspHleDiagnostics GetAndResetDspHleDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
     return {
         .ticks = dsp_ticks.exchange(0, std::memory_order_relaxed),
         .active_source_sum = dsp_active_source_sum.exchange(0, std::memory_order_relaxed),
@@ -95,6 +100,7 @@ DspHleDiagnostics GetAndResetDspHleDiagnostics() {
             static_cast<double>(dsp_output_ns.exchange(0, std::memory_order_relaxed)) /
             1000000.0,
     };
+#endif
 }
 
 struct DspHle::Impl final {
@@ -500,9 +506,11 @@ StereoFrame16 DspHle::Impl::GenerateCurrentFrame() {
 
 bool DspHle::Impl::Tick() {
     bool is_on = GetDspState() == DspState::On;
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     const auto tick_start = DspClock::now();
     u64 generate_ns = 0;
     u64 output_ns = 0;
+#endif
     last_active_sources = 0;
 
     if (is_on) {
@@ -510,25 +518,33 @@ bool DspHle::Impl::Tick() {
 
         // TODO: Check dsp::DSP semaphore (which indicates emulated application has finished writing
         // to shared memory region)
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const auto generate_start = DspClock::now();
+#endif
         current_frame = GenerateCurrentFrame();
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const auto generate_end = DspClock::now();
 
         const auto output_start = DspClock::now();
+#endif
         parent.OutputFrame(std::move(current_frame));
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const auto output_end = DspClock::now();
         generate_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(generate_end - generate_start)
                 .count();
         output_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(output_end - output_start).count();
+#endif
     }
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     const auto tick_end = DspClock::now();
     RecordDspTick(last_active_sources,
                   std::chrono::duration_cast<std::chrono::nanoseconds>(tick_end - tick_start)
                       .count(),
                   generate_ns, output_ns);
+#endif
 
     return is_on;
 }
@@ -537,7 +553,9 @@ void DspHle::Impl::AudioTickCallback(s64 cycles_late) {
     if (Tick()) {
         // TODO(merry): Signal all the other interrupts as appropriate.
         interrupt_handler(InterruptType::Pipe, DspPipe::Audio);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         dsp_interrupts.fetch_add(1, std::memory_order_relaxed);
+#endif
     }
 
     // Reschedule recurrent event

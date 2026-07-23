@@ -29,12 +29,15 @@
 namespace HW::Y2R {
 
 using namespace Service::Y2R;
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 using Clock = std::chrono::steady_clock;
+#endif
 
 static const std::size_t MAX_TILES = 1024 / 8;
 static const std::size_t TILE_SIZE = 8 * 8;
 using ImageTile = std::array<u32, TILE_SIZE>;
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 std::mutex diagnostics_mutex;
 Diagnostics diagnostics;
 
@@ -106,6 +109,13 @@ Diagnostics GetAndResetDiagnostics() {
     diagnostics = {};
     return result;
 }
+#else
+void RecordPreConversionFlush(bool, u32, double) {}
+
+Diagnostics GetAndResetDiagnostics() {
+    return {};
+}
+#endif
 
 [[nodiscard]] static constexpr unsigned int BytesPerPixel(OutputFormat format) {
     switch (format) {
@@ -1346,17 +1356,23 @@ MICROPROFILE_DEFINE(Y2R_PerformConversion, "Y2R", "PerformConversion", MP_RGB(18
  */
 void PerformConversion(Memory::MemorySystem& memory, ConversionConfiguration cvt) {
     MICROPROFILE_SCOPE(Y2R_PerformConversion);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     const auto start_time = Clock::now();
+#endif
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     const u64 pixel_count = static_cast<u64>(cvt.input_line_width) * cvt.input_lines;
+#endif
 
     ASSERT(cvt.input_line_width % 8 == 0);
     ASSERT(cvt.block_alignment != BlockAlignment::Block8x8 || cvt.input_lines % 8 == 0);
 
     if (TryDirectConvert(memory, cvt)) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const auto end_time = Clock::now();
         AddDiagnostics(true, pixel_count,
                        std::chrono::duration<double, std::milli>(end_time - start_time).count(),
                        &cvt);
+#endif
         return;
     }
 
@@ -1508,8 +1524,10 @@ void PerformConversion(Memory::MemorySystem& memory, ConversionConfiguration cvt
         }
     }
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     const auto end_time = Clock::now();
     AddDiagnostics(false, pixel_count,
                    std::chrono::duration<double, std::milli>(end_time - start_time).count(), &cvt);
+#endif
 }
 } // namespace HW::Y2R

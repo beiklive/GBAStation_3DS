@@ -12,6 +12,17 @@
 
 namespace Core {
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+        statement;                                                                                   \
+    } while (false)
+#else
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+    } while (false)
+#endif
+
 // Sort by time, unless the times are the same, in which case sort by the order added to the queue
 bool Timing::Event::operator>(const Timing::Event& right) const {
     return std::tie(time, fifo_order) > std::tie(right.time, right.fifo_order);
@@ -162,6 +173,9 @@ std::shared_ptr<Timing::Timer> Timing::GetTimer(std::size_t cpu_id) {
 }
 
 Timing::Diagnostics Timing::GetAndResetDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
     Diagnostics total{};
     for (auto& timer : timers) {
         const Diagnostics timer_stats = timer->GetAndResetDiagnostics();
@@ -188,6 +202,7 @@ Timing::Diagnostics Timing::GetAndResetDiagnostics() {
         }
     }
     return total;
+#endif
 }
 
 Timing::Timer::Timer(s64 base_ticks) : executed_ticks(base_ticks) {}
@@ -213,9 +228,13 @@ u64 Timing::Timer::GetIdleTicks() const {
 }
 
 Timing::Diagnostics Timing::Timer::GetAndResetDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
     Diagnostics result = diagnostics;
     diagnostics = {};
     return result;
+#endif
 }
 
 void Timing::Timer::ForceExceptionCheck(s64 cycles) {
@@ -246,7 +265,7 @@ s64 Timing::Timer::GetMaxSliceLength() const {
 void Timing::Timer::Advance() {
     MoveEvents();
 
-    diagnostics.advance_calls++;
+    GBASTATION_HOTPATH_DIAG(diagnostics.advance_calls++);
     s64 cycles_executed = slice_length - downcount;
     idled_cycles = 0;
     executed_ticks += cycles_executed;
@@ -259,8 +278,8 @@ void Timing::Timer::Advance() {
         Event evt = std::move(event_queue.front());
         std::pop_heap(event_queue.begin(), event_queue.end(), std::greater<>());
         event_queue.pop_back();
-        diagnostics.events_processed++;
-        diagnostics.event_counts[evt.type]++;
+        GBASTATION_HOTPATH_DIAG(diagnostics.events_processed++);
+        GBASTATION_HOTPATH_DIAG(diagnostics.event_counts[evt.type]++);
         if (evt.type->callback != nullptr) {
             evt.type->callback(evt.user_data, static_cast<int>(executed_ticks - evt.time));
         } else {
@@ -280,20 +299,19 @@ void Timing::Timer::SetNextSlice(s64 max_slice_length) {
             std::min<s64>(event_queue.front().time - executed_ticks, max_slice_length));
     }
 
-    diagnostics.slice_count++;
-    diagnostics.slice_total += static_cast<u64>(std::max<s64>(0, slice_length));
-    diagnostics.min_slice = std::min(diagnostics.min_slice, slice_length);
-    diagnostics.max_slice = std::max(diagnostics.max_slice, slice_length);
-    if (slice_length <= usToCycles(150)) {
-        diagnostics.short_slices++;
-    }
+    GBASTATION_HOTPATH_DIAG(diagnostics.slice_count++);
+    GBASTATION_HOTPATH_DIAG(diagnostics.slice_total +=
+                            static_cast<u64>(std::max<s64>(0, slice_length)));
+    GBASTATION_HOTPATH_DIAG(diagnostics.min_slice = std::min(diagnostics.min_slice, slice_length));
+    GBASTATION_HOTPATH_DIAG(diagnostics.max_slice = std::max(diagnostics.max_slice, slice_length));
+    GBASTATION_HOTPATH_DIAG(if (slice_length <= usToCycles(150)) { diagnostics.short_slices++; });
 
     downcount = slice_length;
 }
 
 void Timing::Timer::Idle() {
     idled_cycles += downcount;
-    diagnostics.idle_ticks += downcount;
+    GBASTATION_HOTPATH_DIAG(diagnostics.idle_ticks += downcount);
     downcount = 0;
 }
 

@@ -60,12 +60,25 @@
 
 namespace Service {
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+        statement;                                                                                   \
+    } while (false)
+#else
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+    } while (false)
+#endif
+
 namespace {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 std::atomic<u64> diagnostic_ipc_calls{};
 std::atomic<u64> diagnostic_unimplemented_calls{};
 std::atomic<u64> diagnostic_mvd_calls{};
 std::atomic<u64> diagnostic_mvd_unimplemented_calls{};
 std::atomic<u32> diagnostic_last_unimplemented_command{};
+#endif
 } // namespace
 
 const std::array<ServiceModuleInfo, 41> service_module_map{
@@ -185,21 +198,22 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(u32* cmd_buf, const Funct
 }
 
 void ServiceFrameworkBase::HandleSyncRequest(Kernel::HLERequestContext& context) {
-    diagnostic_ipc_calls.fetch_add(1, std::memory_order_relaxed);
     const bool is_mvd_service = service_name == "mvd:std";
-    if (is_mvd_service) {
+    GBASTATION_HOTPATH_DIAG(diagnostic_ipc_calls.fetch_add(1, std::memory_order_relaxed));
+    GBASTATION_HOTPATH_DIAG(if (is_mvd_service) {
         diagnostic_mvd_calls.fetch_add(1, std::memory_order_relaxed);
-    }
+    });
 
     auto itr = handlers.find(context.CommandHeader().command_id.Value());
     const FunctionInfoBase* info = itr == handlers.end() ? nullptr : &itr->second;
     if (info == nullptr || !info->implemented) {
-        diagnostic_unimplemented_calls.fetch_add(1, std::memory_order_relaxed);
-        diagnostic_last_unimplemented_command.store(context.CommandHeader().command_id.Value(),
-                                                    std::memory_order_relaxed);
-        if (is_mvd_service) {
+        GBASTATION_HOTPATH_DIAG(
+            diagnostic_unimplemented_calls.fetch_add(1, std::memory_order_relaxed));
+        GBASTATION_HOTPATH_DIAG(diagnostic_last_unimplemented_command.store(
+            context.CommandHeader().command_id.Value(), std::memory_order_relaxed));
+        GBASTATION_HOTPATH_DIAG(if (is_mvd_service) {
             diagnostic_mvd_unimplemented_calls.fetch_add(1, std::memory_order_relaxed);
-        }
+        });
         context.ReportUnimplemented();
         return ReportUnimplementedFunction(context.CommandBuffer(), info);
     }
@@ -219,6 +233,9 @@ std::string ServiceFrameworkBase::GetFunctionName(IPC::Header header) const {
 }
 
 Diagnostics GetAndResetDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
     Diagnostics result;
     result.ipc_calls = diagnostic_ipc_calls.exchange(0, std::memory_order_relaxed);
     result.unimplemented_calls =
@@ -229,6 +246,7 @@ Diagnostics GetAndResetDiagnostics() {
     result.last_unimplemented_command =
         diagnostic_last_unimplemented_command.exchange(0, std::memory_order_relaxed);
     return result;
+#endif
 }
 
 static bool AttemptLLE(const ServiceModuleInfo& service_module, u64 loading_titleid) {

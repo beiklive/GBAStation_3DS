@@ -39,6 +39,7 @@ namespace Core {
 
 namespace {
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 std::atomic<u64> dynarmic_jit_instances_created{};
 std::atomic<u64> dynarmic_instruction_cache_clears{};
 std::atomic<u64> dynarmic_cache_range_invalidations{};
@@ -54,12 +55,16 @@ std::atomic<u64> dynarmic_memory_exclusive_callbacks{};
 std::atomic<u64> dynarmic_memory_code_callbacks{};
 std::atomic<u32> dynarmic_last_read_callback_addr{};
 std::atomic<u32> dynarmic_last_write_callback_addr{};
+#endif
 
 constexpr std::size_t SwitchCodeCacheSize = 64 * 1024 * 1024;
 
 } // namespace
 
 DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
 #if CITRA_ARCH(arm64)
     const auto dispatch_stats = Dynarmic::Backend::Arm64::GetAndResetArm64DispatchDiagnostics();
 #else
@@ -91,6 +96,7 @@ DynarmicDiagnostics GetAndResetDynarmicDiagnostics() {
         .last_read_callback_addr = dynarmic_last_read_callback_addr.load(),
         .last_write_callback_addr = dynarmic_last_write_callback_addr.load(),
     };
+#endif
 }
 
 class DynarmicUserCallbacks final : public Dynarmic::A32::UserCallbacks {
@@ -100,35 +106,35 @@ public:
     ~DynarmicUserCallbacks() = default;
 
     std::optional<std::uint32_t> MemoryReadCode(VAddr vaddr) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_code_callbacks.fetch_add(1, std::memory_order_relaxed);
 #endif
         return memory.Read32OrNullopt(vaddr);
     }
 
     std::uint8_t MemoryRead8(VAddr vaddr) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
         return memory.Read8(vaddr);
     }
     std::uint16_t MemoryRead16(VAddr vaddr) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
         return memory.Read16(vaddr);
     }
     std::uint32_t MemoryRead32(VAddr vaddr) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
         return memory.Read32(vaddr);
     }
     std::uint64_t MemoryRead64(VAddr vaddr) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_read_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_read_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
@@ -136,28 +142,28 @@ public:
     }
 
     void MemoryWrite8(VAddr vaddr, std::uint8_t value) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
         memory.Write8(vaddr, value);
     }
     void MemoryWrite16(VAddr vaddr, std::uint16_t value) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
         memory.Write16(vaddr, value);
     }
     void MemoryWrite32(VAddr vaddr, std::uint32_t value) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
         memory.Write32(vaddr, value);
     }
     void MemoryWrite64(VAddr vaddr, std::uint64_t value) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_write_callbacks.fetch_add(1, std::memory_order_relaxed);
         dynarmic_last_write_callback_addr.store(vaddr, std::memory_order_relaxed);
 #endif
@@ -165,25 +171,25 @@ public:
     }
 
     bool MemoryWriteExclusive8(u32 vaddr, u8 value, u8 expected) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
 #endif
         return memory.WriteExclusive8(vaddr, value, expected);
     }
     bool MemoryWriteExclusive16(u32 vaddr, u16 value, u16 expected) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
 #endif
         return memory.WriteExclusive16(vaddr, value, expected);
     }
     bool MemoryWriteExclusive32(u32 vaddr, u32 value, u32 expected) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
 #endif
         return memory.WriteExclusive32(vaddr, value, expected);
     }
     bool MemoryWriteExclusive64(u32 vaddr, u64 value, u64 expected) override {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
         dynarmic_memory_exclusive_callbacks.fetch_add(1, std::memory_order_relaxed);
 #endif
         return memory.WriteExclusive64(vaddr, value, expected);
@@ -419,7 +425,7 @@ void ARM_Dynarmic::PrepareReschedule() {
 }
 
 void ARM_Dynarmic::ClearInstructionCache() {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
     dynarmic_instruction_cache_clears.fetch_add(1);
 #endif
     for (const auto& j : jits) {
@@ -428,7 +434,7 @@ void ARM_Dynarmic::ClearInstructionCache() {
 }
 
 void ARM_Dynarmic::InvalidateCacheRange(u32 start_address, std::size_t length) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(GBASTATION_HOTPATH_DIAGNOSTICS)
     dynarmic_cache_range_invalidations.fetch_add(1);
     dynarmic_cache_range_invalidation_bytes.fetch_add(static_cast<u64>(length));
 #endif
@@ -491,12 +497,14 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
         config.recompile_on_fastmem_failure = true;
         config.fastmem_exclusive_access = false;
     }
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     dynarmic_jit_instances_created.fetch_add(1);
     dynarmic_last_code_cache_size.store(static_cast<u64>(config.code_cache_size));
     dynarmic_last_optimization_flags.store(static_cast<u32>(config.optimizations));
     dynarmic_last_hook_hint_instructions.store(config.hook_hint_instructions ? 1u : 0u);
     dynarmic_last_always_little_endian.store(config.always_little_endian ? 1u : 0u);
     dynarmic_last_fastmem_enabled.store(config.fastmem_pointer ? 1u : 0u);
+#endif
     LOG_INFO(Core_ARM11,
              "Switch Dynarmic config: core={} optimizations=0x{:x} hook_hints={} little_endian={} code_cache={} fastmem={}",
              GetID(), static_cast<unsigned>(config.optimizations),

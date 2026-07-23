@@ -86,12 +86,26 @@ public:
 MICROPROFILE_DEFINE(GPU_DisplayTransfer, "GPU", "DisplayTransfer", MP_RGB(100, 100, 255));
 MICROPROFILE_DEFINE(GPU_CmdlistProcessing, "GPU", "Cmdlist Processing", MP_RGB(100, 255, 100));
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+        statement;                                                                                   \
+    } while (false)
 static TransferDiagnostics transfer_diagnostics{};
+#else
+#define GBASTATION_HOTPATH_DIAG(statement)                                                           \
+    do {                                                                                             \
+    } while (false)
+#endif
 
 TransferDiagnostics GetAndResetTransferDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
     const TransferDiagnostics result = transfer_diagnostics;
     transfer_diagnostics = {};
     return result;
+#endif
 }
 
 GPU::GPU(Core::System& system, Frontend::EmuWindow& emu_window,
@@ -470,10 +484,10 @@ void GPU::MemoryTransfer() {
     u64 delay{};
     // Perform memory transfer
     if (config.is_texture_copy) {
-        transfer_diagnostics.texture_copy_count++;
-        transfer_diagnostics.texture_copy_bytes += config.texture_copy.size;
+        GBASTATION_HOTPATH_DIAG(transfer_diagnostics.texture_copy_count++);
+        GBASTATION_HOTPATH_DIAG(transfer_diagnostics.texture_copy_bytes += config.texture_copy.size);
         if (!impl->rasterizer->AccelerateTextureCopy(config)) {
-            transfer_diagnostics.software_texture_copy_count++;
+            GBASTATION_HOTPATH_DIAG(transfer_diagnostics.software_texture_copy_count++);
             impl->sw_blitter->TextureCopy(config);
         }
         delay = DelayGenerator::CalculateDelayNanoseconds(
@@ -483,12 +497,12 @@ void GPU::MemoryTransfer() {
         const u64 transfer_bytes =
             static_cast<u64>(config.input_width) * config.input_height *
             BytesPerPixel(config.input_format);
-        transfer_diagnostics.display_transfer_count++;
-        transfer_diagnostics.display_transfer_bytes += transfer_bytes;
+        GBASTATION_HOTPATH_DIAG(transfer_diagnostics.display_transfer_count++);
+        GBASTATION_HOTPATH_DIAG(transfer_diagnostics.display_transfer_bytes += transfer_bytes);
         if (right_eye_disabler->ShouldAllowDisplayTransfer(config.GetPhysicalInputAddress(),
                                                            config.input_height)) {
             if (!impl->rasterizer->AccelerateDisplayTransfer(config)) {
-                transfer_diagnostics.software_display_transfer_count++;
+                GBASTATION_HOTPATH_DIAG(transfer_diagnostics.software_display_transfer_count++);
                 impl->sw_blitter->DisplayTransfer(config);
             }
         }

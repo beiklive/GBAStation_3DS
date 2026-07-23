@@ -38,6 +38,7 @@ namespace Kernel {
 
 namespace {
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 constexpr std::size_t ThreadStatusIndex(ThreadStatus status) {
     return static_cast<std::size_t>(status);
 }
@@ -101,14 +102,25 @@ std::size_t DelayBucket(s64 nanoseconds) {
     }
     return 6;
 }
+#endif
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
 std::mutex thread_wakeup_diagnostics_mutex;
 ThreadWakeupDiagnostics thread_wakeup_diagnostics;
 std::unordered_map<u32, u64> thread_wakeup_counts;
+#endif
 
 void RecordThreadWakeupScheduled(u32 thread_id, u32 core_id, ThreadStatus status,
                                  const std::string& name, s64 nanoseconds,
                                  ThreadWakeupSource source) {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    (void)thread_id;
+    (void)core_id;
+    (void)status;
+    (void)name;
+    (void)nanoseconds;
+    (void)source;
+#else
     std::scoped_lock lock(thread_wakeup_diagnostics_mutex);
 
     auto& diag = thread_wakeup_diagnostics;
@@ -142,16 +154,22 @@ void RecordThreadWakeupScheduled(u32 thread_id, u32 core_id, ThreadStatus status
         diag.busiest_thread_name = SanitizeThreadName(name);
         diag.busiest_thread_status_name = ThreadStatusName(status);
     }
+#endif
 }
 
 void RecordThreadWakeupFired() {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     std::scoped_lock lock(thread_wakeup_diagnostics_mutex);
     thread_wakeup_diagnostics.fired++;
+#endif
 }
 
 } // namespace
 
 ThreadWakeupDiagnostics GetAndResetThreadWakeupDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
     std::scoped_lock lock(thread_wakeup_diagnostics_mutex);
     ThreadWakeupDiagnostics result = thread_wakeup_diagnostics;
     if (result.min_ns == std::numeric_limits<s64>::max()) {
@@ -160,6 +178,7 @@ ThreadWakeupDiagnostics GetAndResetThreadWakeupDiagnostics() {
     thread_wakeup_diagnostics = {};
     thread_wakeup_counts.clear();
     return result;
+#endif
 }
 
 template <class Archive>

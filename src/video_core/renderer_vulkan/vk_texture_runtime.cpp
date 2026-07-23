@@ -4,6 +4,8 @@
 
 #include "video_core/renderer_vulkan/vk_texture_runtime.h"
 
+#include <atomic>
+#include <chrono>
 #include <limits>
 #include <span>
 #include <string>
@@ -43,6 +45,60 @@ using VideoCore::PixelFormat;
 using VideoCore::SurfaceType;
 using VideoCore::TextureType;
 using namespace Common::Literals;
+
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+std::atomic<u64> diagnostic_surface_creates{};
+std::atomic<u64> diagnostic_custom_surface_creates{};
+std::atomic<u64> diagnostic_images_created{};
+std::atomic<u64> diagnostic_surface_create_ns{};
+std::atomic<u64> diagnostic_upload_calls{};
+std::atomic<u64> diagnostic_upload_bytes{};
+std::atomic<u64> diagnostic_upload_ns{};
+std::atomic<u64> diagnostic_staging_upload_maps{};
+std::atomic<u64> diagnostic_staging_upload_bytes{};
+std::atomic<u64> diagnostic_staging_upload_ns{};
+std::atomic<u64> diagnostic_staging_download_maps{};
+std::atomic<u64> diagnostic_staging_download_bytes{};
+std::atomic<u64> diagnostic_staging_download_ns{};
+std::atomic<u64> diagnostic_pipeline_builds{};
+std::atomic<u64> diagnostic_pipeline_compile_required{};
+std::atomic<u64> diagnostic_pipeline_build_ns{};
+
+using DiagnosticClock = std::chrono::steady_clock;
+
+u64 ElapsedNs(DiagnosticClock::time_point start) {
+    return static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(DiagnosticClock::now() - start)
+            .count());
+}
+
+void AddSurfaceCreateDiagnostics(bool custom, u32 image_count, u64 elapsed_ns) {
+    diagnostic_surface_creates.fetch_add(1, std::memory_order_relaxed);
+    if (custom) {
+        diagnostic_custom_surface_creates.fetch_add(1, std::memory_order_relaxed);
+    }
+    diagnostic_images_created.fetch_add(image_count, std::memory_order_relaxed);
+    diagnostic_surface_create_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+}
+
+void AddUploadDiagnostics(u32 bytes, u64 elapsed_ns) {
+    diagnostic_upload_calls.fetch_add(1, std::memory_order_relaxed);
+    diagnostic_upload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    diagnostic_upload_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+}
+
+void AddStagingDiagnostics(bool upload, u32 bytes, u64 elapsed_ns) {
+    if (upload) {
+        diagnostic_staging_upload_maps.fetch_add(1, std::memory_order_relaxed);
+        diagnostic_staging_upload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        diagnostic_staging_upload_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+    } else {
+        diagnostic_staging_download_maps.fetch_add(1, std::memory_order_relaxed);
+        diagnostic_staging_download_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        diagnostic_staging_download_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+    }
+}
+#endif
 
 struct RecordParams {
     vk::ImageAspectFlags aspect;
@@ -166,6 +222,55 @@ constexpr u64 UPLOAD_BUFFER_SIZE = 512_MiB;
 constexpr u64 DOWNLOAD_BUFFER_SIZE = 16_MiB;
 
 } // Anonymous namespace
+
+TextureRuntimeDiagnostics GetAndResetTextureRuntimeDiagnostics() {
+#ifndef GBASTATION_HOTPATH_DIAGNOSTICS
+    return {};
+#else
+    return {
+        .surface_creates = diagnostic_surface_creates.exchange(0, std::memory_order_relaxed),
+        .custom_surface_creates =
+            diagnostic_custom_surface_creates.exchange(0, std::memory_order_relaxed),
+        .images_created = diagnostic_images_created.exchange(0, std::memory_order_relaxed),
+        .surface_create_ns =
+            diagnostic_surface_create_ns.exchange(0, std::memory_order_relaxed),
+        .upload_calls = diagnostic_upload_calls.exchange(0, std::memory_order_relaxed),
+        .upload_bytes = diagnostic_upload_bytes.exchange(0, std::memory_order_relaxed),
+        .upload_ns = diagnostic_upload_ns.exchange(0, std::memory_order_relaxed),
+        .staging_upload_maps =
+            diagnostic_staging_upload_maps.exchange(0, std::memory_order_relaxed),
+        .staging_upload_bytes =
+            diagnostic_staging_upload_bytes.exchange(0, std::memory_order_relaxed),
+        .staging_upload_ns =
+            diagnostic_staging_upload_ns.exchange(0, std::memory_order_relaxed),
+        .staging_download_maps =
+            diagnostic_staging_download_maps.exchange(0, std::memory_order_relaxed),
+        .staging_download_bytes =
+            diagnostic_staging_download_bytes.exchange(0, std::memory_order_relaxed),
+        .staging_download_ns =
+            diagnostic_staging_download_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_builds = diagnostic_pipeline_builds.exchange(0, std::memory_order_relaxed),
+        .pipeline_compile_required =
+            diagnostic_pipeline_compile_required.exchange(0, std::memory_order_relaxed),
+        .pipeline_build_ns =
+            diagnostic_pipeline_build_ns.exchange(0, std::memory_order_relaxed),
+    };
+#endif
+}
+
+void AddGraphicsPipelineBuildDiagnostics(bool compile_required, u64 elapsed_ns) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    if (compile_required) {
+        diagnostic_pipeline_compile_required.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        diagnostic_pipeline_builds.fetch_add(1, std::memory_order_relaxed);
+    }
+    diagnostic_pipeline_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+#else
+    (void)compile_required;
+    (void)elapsed_ns;
+#endif
+}
 
 void Handle::Create(u32 width, u32 height, u32 levels, TextureType type, vk::Format format,
                     vk::ImageUsageFlags usage, vk::ImageCreateFlags flags,
@@ -305,8 +410,14 @@ TextureRuntime::TextureRuntime(const Instance& instance, Scheduler& scheduler,
 TextureRuntime::~TextureRuntime() = default;
 
 VideoCore::StagingData TextureRuntime::FindStaging(u32 size, bool upload) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto diagnostic_started = DiagnosticClock::now();
+#endif
     StreamBuffer& buffer = upload ? upload_buffer : download_buffer;
     const auto [data, offset, invalidate] = buffer.Map(size, 16);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    AddStagingDiagnostics(upload, size, ElapsedNs(diagnostic_started));
+#endif
     return VideoCore::StagingData{
         .size = size,
         .offset = offset,
@@ -749,6 +860,10 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
         return;
     }
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto diagnostic_started = DiagnosticClock::now();
+#endif
+
     bool is_mutable = traits.native == vk::Format::eR8G8B8A8Unorm;
 
     if (True(flags & VideoCore::SurfaceFlagBits::ShadowSource) &&
@@ -806,6 +921,9 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
             vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTopOfPipe,
             vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, num_images, barriers.data());
     });
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    AddSurfaceCreateDiagnostics(false, num_images, ElapsedNs(diagnostic_started));
+#endif
 }
 
 Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceBase& surface,
@@ -816,6 +934,10 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceBase& surface
     if (!traits.transfer_support) {
         return;
     }
+
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto diagnostic_started = DiagnosticClock::now();
+#endif
 
     const bool has_normal = mat && mat->Map(MapType::Normal);
     const vk::Format format = traits.native;
@@ -858,10 +980,16 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceBase& surface
 
     custom_format = mat->format;
     material = mat;
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    AddSurfaceCreateDiagnostics(true, num_images, ElapsedNs(diagnostic_started));
+#endif
 }
 
 void Surface::Upload(const VideoCore::BufferTextureCopy& upload,
                      const VideoCore::StagingData& staging) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto diagnostic_started = DiagnosticClock::now();
+#endif
     runtime.renderpass_cache.EndRendering();
 
     const RecordParams params = {
@@ -947,6 +1075,9 @@ void Surface::Upload(const VideoCore::BufferTextureCopy& upload,
             BlitScale(blit, true);
         }
     }
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    AddUploadDiagnostics(upload.buffer_size, ElapsedNs(diagnostic_started));
+#endif
 }
 
 void Surface::UploadCustom(const VideoCore::Material* material, u32 level) {

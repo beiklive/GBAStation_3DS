@@ -35,9 +35,11 @@ done
 if [ "${BUILD_VARIANT}" = "diagnostic" ]; then
     OUTPUT_SUFFIX="-diagnostic"
     DIAGNOSTIC_LOGS=ON
+    HOTPATH_DIAGNOSTICS=ON
 else
     OUTPUT_SUFFIX=""
     DIAGNOSTIC_LOGS=OFF
+    HOTPATH_DIAGNOSTICS=OFF
 fi
 
 # GenerateSCMRev embeds BUILD_DATE in the ELF. Pin it to the source commit so
@@ -111,6 +113,7 @@ cmake -G Ninja -B "${BUILD_DIR}" "${SCRIPT_DIR}" \
     -DCITRA_WARNINGS_AS_ERRORS=OFF \
     -DENABLE_LTO=OFF \
     -DGBASTATION_SWITCH_DIAGNOSTIC_LOGS="${DIAGNOSTIC_LOGS}" \
+    -DGBASTATION_HOTPATH_DIAGNOSTICS="${HOTPATH_DIAGNOSTICS}" \
     "${CMAKE_EXTRA_ARGS[@]}"
 
 cmake --build "${BUILD_DIR}" --target gbastation -j"$(nproc)"

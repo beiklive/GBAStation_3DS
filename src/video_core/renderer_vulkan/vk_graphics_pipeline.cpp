@@ -12,6 +12,11 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_render_manager.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/vk_texture_runtime.h"
+
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+#include <chrono>
+#endif
 
 namespace Vulkan {
 
@@ -108,6 +113,15 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
 
 bool GraphicsPipeline::Build(bool fail_on_compile_required) {
     MICROPROFILE_SCOPE(Vulkan_Pipeline);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto diagnostic_started = std::chrono::steady_clock::now();
+    const auto elapsed_ns = [&] {
+        return static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - diagnostic_started)
+                .count());
+    };
+#endif
 
     const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
     std::array<vk::VertexInputBindingDescription, MAX_VERTEX_BINDINGS> bindings;
@@ -286,12 +300,18 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
     if (result.result == vk::Result::eSuccess) {
         pipeline = std::move(result.value);
     } else if (result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+        AddGraphicsPipelineBuildDiagnostics(true, elapsed_ns());
+#endif
         return false;
     } else {
         UNREACHABLE_MSG("Graphics pipeline creation failed!");
     }
 
     MarkDone();
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    AddGraphicsPipelineBuildDiagnostics(false, elapsed_ns());
+#endif
     return true;
 }
 

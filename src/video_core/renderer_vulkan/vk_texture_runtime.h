@@ -25,6 +25,28 @@ class RenderManager;
 class Surface;
 class DescriptorUpdateQueue;
 
+struct TextureRuntimeDiagnostics {
+    u64 surface_creates{};
+    u64 custom_surface_creates{};
+    u64 images_created{};
+    u64 surface_create_ns{};
+    u64 upload_calls{};
+    u64 upload_bytes{};
+    u64 upload_ns{};
+    u64 staging_upload_maps{};
+    u64 staging_upload_bytes{};
+    u64 staging_upload_ns{};
+    u64 staging_download_maps{};
+    u64 staging_download_bytes{};
+    u64 staging_download_ns{};
+    u64 pipeline_builds{};
+    u64 pipeline_compile_required{};
+    u64 pipeline_build_ns{};
+};
+
+TextureRuntimeDiagnostics GetAndResetTextureRuntimeDiagnostics();
+void AddGraphicsPipelineBuildDiagnostics(bool compile_required, u64 elapsed_ns);
+
 enum Type {
     Current = -1,
     Base = 0,

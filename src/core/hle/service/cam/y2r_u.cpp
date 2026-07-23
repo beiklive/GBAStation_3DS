@@ -522,13 +522,17 @@ void Y2R_U::StartConversion(Kernel::HLERequestContext& ctx) {
     const bool invalidate_only = conversion.dst.gap == 0;
     const Memory::FlushMode flush_mode =
         invalidate_only ? Memory::FlushMode::Invalidate : Memory::FlushMode::FlushAndInvalidate;
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     const auto flush_start = std::chrono::steady_clock::now();
+#endif
     system.Memory().RasterizerFlushVirtualRegion(conversion.dst.address, total_output_size,
                                                  flush_mode);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     HW::Y2R::RecordPreConversionFlush(
         invalidate_only, total_output_size,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - flush_start)
             .count());
+#endif
 
     HW::Y2R::PerformConversion(system.Memory(), conversion);
 

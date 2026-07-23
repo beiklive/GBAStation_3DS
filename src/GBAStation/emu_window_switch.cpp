@@ -26,41 +26,6 @@ constexpr float CursorDefaultFrameTime = 1.0f / 60.0f;
 constexpr float CursorMaxFrameTime = 1.0f / 30.0f;
 constexpr float StickScale = 1.0f / 32767.0f;
 
-struct Region {
-    float x;
-    float y;
-    float width;
-    float height;
-};
-
-float FitScale(const Region& region, float native_width, float native_height,
-               bool integer_scale) {
-    float scale = std::max(0.01f, std::min(region.width / native_width,
-                                           region.height / native_height));
-    if (integer_scale && scale >= 1.0f) {
-        scale = std::floor(scale);
-    }
-    return std::max(0.01f, scale);
-}
-
-Common::Rectangle<u32> PlaceScreen(const Region& region, float native_width, float native_height,
-                                   bool integer_scale, float scale_multiplier = 1.0f,
-                                   float offset_x = 0.0f, float offset_y = 0.0f) {
-    float scale = FitScale(region, native_width, native_height, integer_scale);
-    scale *= std::max(0.01f, scale_multiplier);
-    float screen_width = std::min(native_width * scale, region.width);
-    float screen_height = std::min(native_height * scale, region.height);
-    float left = region.x + (region.width - screen_width) * 0.5f + offset_x;
-    float top = region.y + (region.height - screen_height) * 0.5f + offset_y;
-    left = std::clamp(left, region.x, region.x + std::max(0.0f, region.width - screen_width));
-    top = std::clamp(top, region.y, region.y + std::max(0.0f, region.height - screen_height));
-    const u32 x = static_cast<u32>(std::max(0.0f, std::round(left)));
-    const u32 y = static_cast<u32>(std::max(0.0f, std::round(top)));
-    const u32 right = static_cast<u32>(std::max<float>(x + 1, std::round(left + screen_width)));
-    const u32 bottom = static_cast<u32>(std::max<float>(y + 1, std::round(top + screen_height)));
-    return {x, y, right, bottom};
-}
-
 Common::Rectangle<u32> PlaceCustomScreen(float framebuffer_width, float framebuffer_height,
                                          float native_width, float native_height, float scale,
                                          float center_x, float center_y, float offset_x,
@@ -94,47 +59,33 @@ Common::Rectangle<u32> PlaceCustomScreen(float framebuffer_width, float framebuf
     return {x, y, std::max(x + 1, right), std::max(y + 1, bottom)};
 }
 
+class ScopedOriginalLayoutSettings {
+public:
+    explicit ScopedOriginalLayoutSettings(const GBAStationDisplaySettings& settings)
+        : old_integer_scale{Settings::values.use_integer_scaling.GetValue()},
+          old_screen_gap{Settings::values.screen_gap.GetValue()} {
+        Settings::values.use_integer_scaling.SetValue(settings.integer_scale);
+        Settings::values.screen_gap.SetValue(
+            std::max(0, std::clamp(settings.screen_gap, -256, 256)));
+    }
+
+    ~ScopedOriginalLayoutSettings() {
+        Settings::values.use_integer_scaling.SetValue(old_integer_scale);
+        Settings::values.screen_gap.SetValue(old_screen_gap);
+    }
+
+private:
+    bool old_integer_scale{};
+    int old_screen_gap{};
+};
+
 Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
                                                const GBAStationDisplaySettings& settings) {
     const float w = static_cast<float>(width);
     const float h = static_cast<float>(height);
-    const float gap = static_cast<float>(std::clamp(settings.screen_gap, -256, 256));
-    const float positive_gap = std::max(0.0f, gap);
-    const Region full{0.0f, 0.0f, w, h};
     Layout::FramebufferLayout layout{width, height, true, true, {}, {}, true};
 
-    if (settings.screen_layout == "vertical") {
-        const float row_height = std::max(1.0f, (h - gap) * 0.5f);
-        const Region top{0.0f, 0.0f, w, row_height};
-        const Region bottom{0.0f, row_height + gap, w, row_height};
-        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
-        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
-                                           Core::kScreenBottomHeight, settings.integer_scale);
-    } else if (settings.screen_layout == "horizontal") {
-        const float available = std::max(2.0f, w - gap);
-        const float top_width = available * 5.0f / 9.0f;
-        const Region top{0.0f, 0.0f, top_width, h};
-        const Region bottom{top_width + gap, 0.0f, available - top_width, h};
-        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
-        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
-                                           Core::kScreenBottomHeight, settings.integer_scale);
-    } else if (settings.screen_layout == "hybrid") {
-        layout = Layout::HybridScreenLayout(width, height, false, false);
-    } else if (settings.screen_layout == "top") {
-        layout.top_screen = PlaceScreen(full, Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
-        layout.bottom_screen = PlaceScreen(full, Core::kScreenBottomWidth,
-                                           Core::kScreenBottomHeight, settings.integer_scale);
-        layout.bottom_screen_enabled = false;
-    } else if (settings.screen_layout == "bottom") {
-        layout.top_screen = PlaceScreen(full, Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
-        layout.bottom_screen = PlaceScreen(full, Core::kScreenBottomWidth,
-                                           Core::kScreenBottomHeight, settings.integer_scale);
-        layout.top_screen_enabled = false;
-    } else if (settings.screen_layout == "custom") {
+    if (settings.screen_layout == "custom") {
         // Match nds_stub's custom canvas: both screens share the vertical center and use
         // independent offsets, with the large screen on the left and small screen on the right.
         const bool portrait_canvas = h > w;
@@ -152,16 +103,29 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
             bottom_center_x, bottom_center_y, settings.bottom_offset_x,
             settings.bottom_offset_y);
     } else {
-        const float small_width = std::max(1.0f, (w - positive_gap) / 3.0f);
-        const Region top{0.0f, 0.0f, w - small_width - positive_gap, h};
-        const Region bottom{w - small_width, 0.0f, small_width, h};
-        layout.top_screen = PlaceScreen(top, Core::kScreenTopWidth, Core::kScreenTopHeight,
-                                        settings.integer_scale);
-        layout.bottom_screen = PlaceScreen(bottom, Core::kScreenBottomWidth,
-                                           Core::kScreenBottomHeight, settings.integer_scale);
+        const ScopedOriginalLayoutSettings scoped_settings{settings};
+        if (settings.screen_layout == "vertical") {
+            layout = Layout::DefaultFrameLayout(width, height, false, false);
+        } else if (settings.screen_layout == "horizontal") {
+            layout = Layout::LargeFrameLayout(width, height, false, false, 1.0f,
+                                              Settings::SmallScreenPosition::MiddleRight);
+        } else if (settings.screen_layout == "hybrid") {
+            layout = Layout::HybridScreenLayout(width, height, false, false);
+        } else if (settings.screen_layout == "top") {
+            layout = Layout::SingleFrameLayout(width, height, false, false);
+        } else if (settings.screen_layout == "bottom") {
+            layout = Layout::SingleFrameLayout(width, height, true, false);
+        } else {
+            layout = Layout::LargeFrameLayout(
+                width, height, false, false, Settings::values.large_screen_proportion.GetValue(),
+                Settings::values.small_screen_position.GetValue());
+        }
     }
+
+    layout.bottom_opacity = settings.screen_layout == "custom"
+                                ? std::clamp(settings.bottom_opacity, 0.0f, 1.0f)
+                                : 1.0f;
     layout.render_3d_mode = Settings::values.render_3d.GetValue();
-    layout.bottom_opacity = std::clamp(settings.bottom_opacity, 0.0f, 1.0f);
     return layout;
 }
 
@@ -182,6 +146,18 @@ Layout::FramebufferLayout BuildDisplayLayout(u32 width, u32 height,
         layout = Layout::rotate180Layout(layout);
     }
     return layout;
+}
+
+bool DisplayLayoutSettingsEqual(const GBAStationDisplaySettings& lhs,
+                                const GBAStationDisplaySettings& rhs) {
+    return lhs.screen_layout == rhs.screen_layout &&
+           lhs.screen_orientation == rhs.screen_orientation &&
+           lhs.integer_scale == rhs.integer_scale && lhs.screen_gap == rhs.screen_gap &&
+           lhs.top_scale == rhs.top_scale && lhs.top_offset_x == rhs.top_offset_x &&
+           lhs.top_offset_y == rhs.top_offset_y && lhs.bottom_scale == rhs.bottom_scale &&
+           lhs.bottom_offset_x == rhs.bottom_offset_x &&
+           lhs.bottom_offset_y == rhs.bottom_offset_y &&
+           lhs.bottom_opacity == rhs.bottom_opacity;
 }
 
 std::pair<float, float> ApplyCursorResponse(float x_axis, float y_axis) {
@@ -230,8 +206,12 @@ void EmuWindowSwitch::SetInputSuppressed(bool suppressed) {
 }
 
 void EmuWindowSwitch::SetDisplaySettings(const GBAStationDisplaySettings& settings) {
+    display_layout_dirty = display_layout_dirty ||
+                           !DisplayLayoutSettingsEqual(display_settings, settings);
     display_settings = settings;
-    RefreshDimensions();
+    if (display_layout_dirty) {
+        RefreshDimensions();
+    }
 }
 
 void EmuWindowSwitch::RefreshDimensions() {
@@ -244,6 +224,15 @@ void EmuWindowSwitch::RefreshDimensions() {
             height = DefaultHeight;
         }
     }
+    const Settings::StereoRenderOption render_3d_mode = Settings::values.render_3d.GetValue();
+    if (!display_layout_dirty && width == framebuffer_width && height == framebuffer_height &&
+        render_3d_mode == last_render_3d_mode) {
+        return;
+    }
+    framebuffer_width = width;
+    framebuffer_height = height;
+    display_layout_dirty = false;
+    last_render_3d_mode = render_3d_mode;
     NotifyFramebufferLayoutChanged(BuildDisplayLayout(width, height, display_settings));
 }
 

@@ -101,6 +101,7 @@ RepeatButton repeat_shoulder_left;
 RepeatButton repeat_shoulder_right;
 std::mutex rich_state_mutex;
 SwitchFrontend::VulkanMenuRenderer::State rich_state;
+std::atomic_bool rich_state_has_hidden_content{};
 bool rich_renderer_ready{};
 OverlayMode overlay_mode{OverlayMode::Normal};
 int overlay_focus{};
@@ -217,12 +218,17 @@ void DrawRichOverlayCallback(vk::CommandBuffer command_buffer, vk::Image image,
     if (!rich_renderer_ready) {
         return;
     }
+    std::string toast = OverlayUI::GetToast();
+    if (!visible.load(std::memory_order_acquire) && toast.empty() &&
+        !rich_state_has_hidden_content.load(std::memory_order_acquire)) {
+        return;
+    }
     SwitchFrontend::VulkanMenuRenderer::State snapshot;
     {
         std::scoped_lock lock{rich_state_mutex};
         snapshot = rich_state;
     }
-    snapshot.toast = OverlayUI::GetToast();
+    snapshot.toast = std::move(toast);
     SwitchFrontend::VulkanMenuRenderer::Draw(command_buffer, image, extent, format, snapshot);
 }
 
@@ -336,6 +342,10 @@ void SyncRichState() {
     rich_state.file_preview = file_preview;
     rich_state.file_preview_path = file_preview_path;
     rich_state.display = std::move(display);
+    rich_state_has_hidden_content.store(
+        rich_state.fast_forward_active || rich_state.show_fps ||
+            (rich_state.display.overlay_enabled && !rich_state.display.overlay_path.empty()),
+        std::memory_order_release);
 }
 
 bool PageHasContent(Page target) {
