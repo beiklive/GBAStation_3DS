@@ -110,24 +110,27 @@ struct LaunchOptions {
     std::string title;
     SwitchFrontend::GBAStationDisplaySettings display_settings;
     std::string return_nro_path{LauncherPath};
+    std::string uninstall_record_path;
+    u64 uninstall_title_id{};
     bool return_to_nro{true};
     bool display_settings_from_game_db{};
     bool install_cia_mode{};
+    bool uninstall_title_mode{};
 };
 #if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
-constexpr bool DiagnosticLogsEnabled = true;
+constexpr bool DiagnosticLogsDefaultEnabled = true;
 #else
-constexpr bool DiagnosticLogsEnabled = false;
+constexpr bool DiagnosticLogsDefaultEnabled = false;
 #endif
 // Keep memory-map dumping separate because it is substantially heavier than boot logging.
-constexpr bool EnableStartupLogFile = DiagnosticLogsEnabled;
-constexpr bool EnableStdStreamLogs = DiagnosticLogsEnabled;
-constexpr bool EnableMemMapLogFile = false;
-constexpr bool EnableSwitchDebugLogFile = DiagnosticLogsEnabled;
-constexpr bool EnableHeartbeatLogFile = true;
-constexpr bool EnableExitLogFile = true;
-constexpr bool EnableCommonLogFile = DiagnosticLogsEnabled;
-constexpr bool EnableBootMarkerFile = DiagnosticLogsEnabled;
+bool EnableStartupLogFile = DiagnosticLogsDefaultEnabled;
+bool EnableStdStreamLogs = DiagnosticLogsDefaultEnabled;
+bool EnableMemMapLogFile = false;
+bool EnableSwitchDebugLogFile = DiagnosticLogsDefaultEnabled;
+bool EnableHeartbeatLogFile = DiagnosticLogsDefaultEnabled;
+bool EnableExitLogFile = DiagnosticLogsDefaultEnabled;
+bool EnableCommonLogFile = DiagnosticLogsDefaultEnabled;
+bool EnableBootMarkerFile = DiagnosticLogsDefaultEnabled;
 FILE* startup_log{};
 FILE* debug_log{};
 FILE* heartbeat_log{};
@@ -135,6 +138,37 @@ FILE* exit_log{};
 auto exit_log_started = std::chrono::steady_clock::now();
 bool raw_marker_enabled = true;
 PadState pad{};
+
+bool ParseDiagnosticLogEnvValue(const char* value, bool fallback) {
+    if (!value || !*value) {
+        return fallback;
+    }
+    std::string text = Common::ToLower(value);
+    if (text == "1" || text == "true" || text == "on" || text == "yes") {
+        return true;
+    }
+    if (text == "0" || text == "false" || text == "off" || text == "no") {
+        return false;
+    }
+    return fallback;
+}
+
+void ApplyDiagnosticLogSwitchFromEnv() {
+    static bool applied = false;
+    if (applied) {
+        return;
+    }
+    applied = true;
+    const bool enabled = ParseDiagnosticLogEnvValue(std::getenv("GBASTATION_3DS_DIAGNOSTIC_LOGS"),
+                                                    DiagnosticLogsDefaultEnabled);
+    EnableStartupLogFile = enabled;
+    EnableStdStreamLogs = enabled;
+    EnableSwitchDebugLogFile = enabled;
+    EnableHeartbeatLogFile = enabled;
+    EnableExitLogFile = enabled;
+    EnableCommonLogFile = enabled;
+    EnableBootMarkerFile = enabled;
+}
 
 void EnsureSystemDirs() {
     mkdir("sdmc:/GBAStation", 0777);
@@ -950,6 +984,30 @@ std::string InstalledTitleSavePath(u64 program_id) {
     return "sdmc:/GBAStation/saves/3DS/" + TitleIdString(program_id);
 }
 
+bool ParseTitleId(std::string_view text, u64& out) {
+    if (text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0) {
+        text.remove_prefix(2);
+    }
+    if (text.empty() || text.size() > 16) {
+        return false;
+    }
+    u64 value = 0;
+    for (const char c : text) {
+        value <<= 4;
+        if (c >= '0' && c <= '9') {
+            value |= static_cast<u64>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            value |= static_cast<u64>(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            value |= static_cast<u64>(c - 'A' + 10);
+        } else {
+            return false;
+        }
+    }
+    out = value;
+    return true;
+}
+
 u32 Rgb565ToRgba8888(u16 color) {
     const u8 r = static_cast<u8>((((color >> 11) & 0x1F) << 3) | (((color >> 11) & 0x1F) >> 2));
     const u8 g = static_cast<u8>((((color >> 5) & 0x3F) << 2) | (((color >> 5) & 0x3F) >> 4));
@@ -1700,6 +1758,50 @@ int RunCiaInstaller(const LaunchOptions& options) {
     return EXIT_SUCCESS;
 }
 
+int RunTitleUninstaller(const LaunchOptions& options) {
+    const u64 title_id = options.uninstall_title_id;
+    const std::string title_id_text = TitleIdString(title_id);
+    const std::string save_path = InstalledTitleSavePath(title_id);
+    DebugLog("3DS uninstall branch enter title_id=%s record=%s save=%s",
+             title_id_text.c_str(), options.uninstall_record_path.c_str(), save_path.c_str());
+    ExitLog("3DS uninstall begin title_id=%s record=%s save=%s", title_id_text.c_str(),
+            options.uninstall_record_path.c_str(), save_path.c_str());
+
+    const auto media_type = Service::FS::MediaType::SDMC;
+    const std::string content_path = Service::AM::GetTitlePath(media_type, title_id) + "content/";
+    DebugLog("3DS uninstall content path=%s", content_path.c_str());
+
+    const Result uninstall_result = Service::AM::UninstallProgram(media_type, title_id);
+    const bool uninstall_ok = uninstall_result.IsSuccess();
+    DebugLog("3DS uninstall content result=0x%08x ok=%d", uninstall_result.raw,
+             uninstall_ok ? 1 : 0);
+    ExitLog("3DS uninstall content result=0x%08x ok=%d", uninstall_result.raw,
+            uninstall_ok ? 1 : 0);
+    if (!uninstall_ok) {
+        return EXIT_FAILURE;
+    }
+
+    const bool save_exists = FileUtil::Exists(save_path);
+    const bool save_deleted = !save_exists || FileUtil::DeleteDirRecursively(save_path);
+    DebugLog("3DS uninstall save path=%s existed=%d deleted=%d", save_path.c_str(),
+             save_exists ? 1 : 0, save_deleted ? 1 : 0);
+    ExitLog("3DS uninstall save path=%s existed=%d deleted=%d", save_path.c_str(),
+            save_exists ? 1 : 0, save_deleted ? 1 : 0);
+
+    bool db_removed = true;
+    if (!options.uninstall_record_path.empty()) {
+        db_removed =
+            SwitchFrontend::GameDatabase::RemoveInstalledGameRecord(options.uninstall_record_path);
+    }
+    DebugLog("3DS uninstall db record=%s removed=%d", options.uninstall_record_path.c_str(),
+             db_removed ? 1 : 0);
+    ExitLog("3DS uninstall db record=%s removed=%d", options.uninstall_record_path.c_str(),
+            db_removed ? 1 : 0);
+
+    DebugLog("3DS uninstall branch exit ok=%d", (save_deleted && db_removed) ? 1 : 0);
+    return save_deleted && db_removed ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 LaunchOptions ParseLaunchOptions(int argc, char** argv) {
     LaunchOptions options;
     for (int i = 1; i < argc; ++i) {
@@ -1719,6 +1821,17 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
             options.install_cia_mode = true;
             continue;
         }
+        if (argument == "--uninstall-title" && i + 1 < argc && argv[i + 1]) {
+            options.uninstall_title_mode = ParseTitleId(argv[++i], options.uninstall_title_id);
+            if (!options.uninstall_title_mode) {
+                StartupLog("ParseLaunchOptions: invalid uninstall title id %s", argv[i]);
+            }
+            continue;
+        }
+        if (argument == "--record-path" && i + 1 < argc && argv[i + 1]) {
+            options.uninstall_record_path = argv[++i];
+            continue;
+        }
         if (argument.starts_with("--")) {
             StartupLog("ParseLaunchOptions: ignoring unknown option %s", argv[i]);
             continue;
@@ -1731,12 +1844,14 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
         }
     }
 
-    if (options.rom_path.empty() && !options.install_cia_mode) {
+    if (options.rom_path.empty() && !options.install_cia_mode && !options.uninstall_title_mode) {
         options.rom_path = FallbackRomPath;
         StartupLog("ParseLaunchOptions: no ROM argument, using fallback %s", FallbackRomPath);
     }
     if (options.install_cia_mode) {
         options.title = "CIA安装";
+    } else if (options.uninstall_title_mode) {
+        options.title = "卸载3DS游戏";
     } else {
         options.title = TitleFromPath(options.rom_path);
         const auto game_record = SwitchFrontend::GameDatabase::LoadGameRecord(options.rom_path);
@@ -1748,9 +1863,12 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
             options.display_settings_from_game_db = true;
         }
     }
-    StartupLog("ParseLaunchOptions: mode=%s rom=%s title=%s return=%s target=%s",
-               options.install_cia_mode ? "install-cia" : "run",
+    StartupLog("ParseLaunchOptions: mode=%s rom=%s title=%s uninstall_title=%016llx return=%s target=%s",
+               options.install_cia_mode    ? "install-cia"
+               : options.uninstall_title_mode ? "uninstall-title"
+                                              : "run",
                options.rom_path.c_str(), options.title.c_str(),
+               static_cast<unsigned long long>(options.uninstall_title_id),
                options.return_to_nro ? "nro" : "home", options.return_nro_path.c_str());
     return options;
 }
@@ -2145,6 +2263,7 @@ void ApplyConfiguredUsername(Core::System& system) {
 }
 
 int Run(int argc, char** argv) {
+    ApplyDiagnosticLogSwitchFromEnv();
 #if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
     // Raw NVK normally submits asynchronously.  Near the known scene-change
     // fault, serialize individual submits so the backend captures the exact
@@ -2184,7 +2303,8 @@ int Run(int argc, char** argv) {
     StartupLog("Run: parsing ROM path");
     LaunchOptions launch_options = ParseLaunchOptions(argc, argv);
     const std::string& rom_path = launch_options.rom_path;
-    if (rom_path.empty() && !launch_options.install_cia_mode) {
+    if (rom_path.empty() && !launch_options.install_cia_mode &&
+        !launch_options.uninstall_title_mode) {
         DebugLog("no ROM path supplied");
         ExitLog("early exit: no ROM path");
         thread_core_guard.Restore("no-rom");
@@ -2279,6 +2399,25 @@ int Run(int argc, char** argv) {
         DebugClose();
         appletUnlockExit();
         return queued_launcher_return ? install_exit_code : EXIT_FAILURE;
+    }
+
+    if (launch_options.uninstall_title_mode) {
+        DebugLog("entering 3DS title uninstall mode");
+        const int uninstall_exit_code = RunTitleUninstaller(launch_options);
+        DebugLog("3DS title uninstall mode finished code=%d", uninstall_exit_code);
+        if (common_log_started) {
+            Common::Log::Stop();
+            common_log_started = false;
+        }
+        if (romfs_initialized) {
+            romfsExit();
+        }
+        thread_core_guard.Restore("3ds-uninstaller");
+        const bool queued_launcher_return = QueueLauncherReturn(launch_options);
+        DebugLog("3DS title uninstall return queued=%d", queued_launcher_return ? 1 : 0);
+        DebugClose();
+        appletUnlockExit();
+        return queued_launcher_return ? uninstall_exit_code : EXIT_FAILURE;
     }
 
     StartupLog("Run: creating NWindow frontend");
@@ -3266,6 +3405,7 @@ int Run(int argc, char** argv) {
 } // namespace
 
 extern "C" void userAppInit() {
+    ApplyDiagnosticLogSwitchFromEnv();
     WriteRawBootMarker("userAppInit: entry");
     LogTlsLayoutEarly("userAppInit TLS");
     OpenStartupLogIfNeeded("w");
@@ -3308,6 +3448,7 @@ extern "C" [[noreturn]] void SwitchFastmemResumeException(
     const SwitchExceptionResumeContext* context);
 
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    ApplyDiagnosticLogSwitchFromEnv();
     if (ctx) {
         u64 resume_pc{};
         if (DynarmicHandleSwitchFastmemFault(ctx->pc.x, &resume_pc)) {
@@ -3371,6 +3512,7 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
 }
 
 int main(int argc, char** argv) {
+    ApplyDiagnosticLogSwitchFromEnv();
     WriteRawBootMarker("main: entry");
     OpenStartupLogIfNeeded("a");
     StartupLog("main: entry argc=%d", argc);

@@ -107,6 +107,7 @@ NCCHCryptoFile::NCCHCryptoFile(const std::string& out_file, bool encrypted_conte
     }
 
     if (!file->IsOpen()) {
+        LOG_ERROR(Service_AM, "Failed to open NCCH install output file {}", out_file);
         is_error = true;
     }
 }
@@ -561,8 +562,10 @@ ResultVal<std::size_t> CIAFile::WriteContentData(u64 offset, std::size_t length,
                     install_results.push_back(current_content_install_result);
                 }
                 current_content_index = static_cast<u16>(i);
+                const bool content_encrypted =
+                    (tmd.GetContentTypeByIndex(i) & FileSys::TMDContentTypeFlag::Encrypted) != 0;
                 current_content_file =
-                    std::make_unique<NCCHCryptoFile>(content_file_paths[i], decryption_authorized);
+                    std::make_unique<NCCHCryptoFile>(content_file_paths[i], content_encrypted);
                 current_content_file->decryption_authorized = decryption_authorized;
 
                 current_content_install_result.type = InstallResult::Type::APP;
@@ -588,6 +591,8 @@ ResultVal<std::size_t> CIAFile::WriteContentData(u64 offset, std::size_t length,
 
             file.Write(temp.data(), temp.size());
             if (file.IsError()) {
+                LOG_ERROR(Service_AM, "Failed to write CIA content {} to {}", i,
+                          content_file_paths[i]);
                 // This can never happen in real HW
                 current_content_install_result.result =
                     Result(ErrCodes::InvalidImportState, ErrorModule::AM,
@@ -798,8 +803,11 @@ ResultVal<std::size_t> CIAFile::WriteContentDataIndexed(u16 content_index, u64 o
         }
 
         current_content_index = content_index;
+        const bool content_encrypted =
+            (tmd.GetContentTypeByIndex(content_index) & FileSys::TMDContentTypeFlag::Encrypted) !=
+            0;
         current_content_file = std::make_unique<NCCHCryptoFile>(content_file_paths[content_index],
-                                                                decryption_authorized);
+                                                                content_encrypted);
         current_content_file->decryption_authorized = decryption_authorized;
 
         current_content_install_result.type = InstallResult::Type::APP;
@@ -824,6 +832,8 @@ ResultVal<std::size_t> CIAFile::WriteContentDataIndexed(u16 content_index, u64 o
 
     file.Write(temp.data(), temp.size());
     if (file.IsError()) {
+        LOG_ERROR(Service_AM, "Failed to write CIA indexed content {} to {}", content_index,
+                  content_file_paths[content_index]);
         // This can never happen in real HW
         current_content_install_result.result =
             Result(ErrCodes::InvalidImportState, ErrorModule::AM, ErrorSummary::InvalidState,

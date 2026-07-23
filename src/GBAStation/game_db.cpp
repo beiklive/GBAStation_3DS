@@ -322,6 +322,28 @@ bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& tit
     return saved;
 }
 
+bool RemoveInstalledGameRecord(const std::string& rom_path) {
+    const char* target_path = nullptr;
+    nlohmann::json data;
+    LoadWritableDatabase(data, target_path);
+    const std::string normalized_rom = NormalizePath(rom_path);
+    const auto old_size = data.size();
+    data.erase(std::remove_if(data.begin(), data.end(),
+                              [&](const nlohmann::json& item) {
+                                  return item.is_object() &&
+                                         NormalizePath(item.value("path", "")) == normalized_rom;
+                              }),
+               data.end());
+    if (data.size() == old_size) {
+        LOG_WARNING(Frontend, "3DS GameDB remove skipped, record not found path={}", rom_path);
+        return true;
+    }
+    const bool saved = WriteDatabase(target_path, data);
+    LOG_INFO(Frontend, "3DS GameDB remove {} path={} db={}", saved ? "ok" : "failed",
+             rom_path, target_path);
+    return saved;
+}
+
 bool SyncDisplaySettings(const GBAStationDisplaySettings& settings, bool include_screen,
                          bool include_overlay, int& updated_count) {
     updated_count = 0;

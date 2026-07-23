@@ -22,6 +22,7 @@ bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& tit
                              const GBAStationDisplaySettings& settings,
                              const std::string& logo_path = {},
                              const std::string& save_path = {});
+bool RemoveInstalledGameRecord(const std::string& rom_path);
 bool SyncDisplaySettings(const GBAStationDisplaySettings& settings, bool include_screen,
                          bool include_overlay, int& updated_count);
 bool UpdatePlayStats(const std::string& rom_path, const std::string& title,
