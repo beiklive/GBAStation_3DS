@@ -100,6 +100,8 @@ constexpr const char* HeartbeatLogPath = "sdmc:/GBAStation/3ds/debug/heartbeat.t
 constexpr const char* ExitLogPath = "sdmc:/GBAStation/3ds/debug/exit.txt";
 constexpr const char* StdoutLogPath = "sdmc:/GBAStation/3ds/debug/stdout.txt";
 constexpr const char* StderrLogPath = "sdmc:/GBAStation/3ds/debug/stderr.txt";
+constexpr const char* CommonLogPath = "sdmc:/GBAStation/3ds/debug/azahar_common.txt";
+constexpr const char* InitArrayLogPath = "sdmc:/GBAStation/3ds/debug/init_array.txt";
 constexpr const char* FallbackRomPath = "sdmc:/GBAStation/3ds/games/3Dlandchs.cci";
 constexpr const char* MemMapLogPath = "sdmc:/GBAStation/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
@@ -227,6 +229,33 @@ void WriteRawBootMarkerV(const char* prefix, const char* fmt, std::va_list args)
 void EnsureDebugDirs() {
     EnsureSystemDirs();
     mkdir(DebugDir, 0777);
+}
+
+void RotateDiagnosticLog(const char* path) {
+    std::string previous{path};
+    const std::size_t extension = previous.rfind(".txt");
+    if (extension == std::string::npos) {
+        previous += ".previous";
+    } else {
+        previous.insert(extension, ".previous");
+    }
+    std::remove(previous.c_str());
+    std::rename(path, previous.c_str());
+}
+
+void RotateDiagnosticLogs() {
+    if (!DiagnosticLogsDefaultEnabled && !EnableStartupLogFile && !EnableStdStreamLogs &&
+        !EnableSwitchDebugLogFile && !EnableHeartbeatLogFile && !EnableExitLogFile &&
+        !EnableCommonLogFile) {
+        return;
+    }
+
+    EnsureDebugDirs();
+    for (const char* path : {StartupLogPath, DebugLogPath, HeartbeatLogPath, ExitLogPath,
+                             StdoutLogPath, StderrLogPath, CommonLogPath, MemMapLogPath,
+                             InitArrayLogPath}) {
+        RotateDiagnosticLog(path);
+    }
 }
 
 void WriteLogLine(FILE* file, const char* prefix, const char* fmt, std::va_list args) {
@@ -447,6 +476,55 @@ void DebugLog(const char* fmt, ...) {
         va_end(raw_args);
     }
     va_end(args);
+}
+
+void LogDefaultNWindowState(const char* phase) {
+    NWindow* window = nwindowGetDefault();
+    if (!window) {
+        DebugLog("nwindow[%s]: null", phase);
+        ExitLog("nwindow[%s]: null", phase);
+        return;
+    }
+
+    u32 width = 0;
+    u32 height = 0;
+    const LibnxResult dimensions_rc = nwindowGetDimensions(window, &width, &height);
+    DebugLog("nwindow[%s]: ptr=%p valid=%d connected=%d dimensions_rc=0x%x size=%ux%u "
+             "configured=0x%llx requested=0x%llx cur_slot=%d swap_interval=%u",
+             phase, static_cast<void*>(window), nwindowIsValid(window) ? 1 : 0,
+             window->is_connected ? 1 : 0, dimensions_rc, width, height,
+             static_cast<unsigned long long>(window->slots_configured),
+             static_cast<unsigned long long>(window->slots_requested), window->cur_slot,
+             window->swap_interval);
+    ExitLog("nwindow[%s]: valid=%d connected=%d dimensions_rc=0x%x size=%ux%u "
+            "configured=0x%llx requested=0x%llx cur_slot=%d swap_interval=%u",
+            phase, nwindowIsValid(window) ? 1 : 0, window->is_connected ? 1 : 0,
+            dimensions_rc, width, height,
+            static_cast<unsigned long long>(window->slots_configured),
+            static_cast<unsigned long long>(window->slots_requested), window->cur_slot,
+            window->swap_interval);
+}
+
+void ReleaseStaleDefaultNWindowBuffers(const char* phase) {
+    NWindow* window = nwindowGetDefault();
+    if (!window || !nwindowIsValid(window)) {
+        LogDefaultNWindowState(phase);
+        return;
+    }
+
+    LogDefaultNWindowState(phase);
+    if (window->cur_slot >= 0) {
+        const s32 slot = window->cur_slot;
+        const LibnxResult cancel_rc = nwindowCancelBuffer(window, slot, nullptr);
+        DebugLog("nwindow[%s]: cancel slot=%d rc=0x%x", phase, slot, cancel_rc);
+        ExitLog("nwindow[%s]: cancel slot=%d rc=0x%x", phase, slot, cancel_rc);
+    }
+    if (window->slots_configured != 0) {
+        const LibnxResult release_rc = nwindowReleaseBuffers(window);
+        DebugLog("nwindow[%s]: release buffers rc=0x%x", phase, release_rc);
+        ExitLog("nwindow[%s]: release buffers rc=0x%x", phase, release_rc);
+    }
+    LogDefaultNWindowState((std::string{phase} + "-done").c_str());
 }
 
 bool QueueLauncherReturn(const LaunchOptions& options) {
@@ -1530,11 +1608,17 @@ public:
     explicit CiaInstallerCanvas(CiaInstallerFont& font_) : font(font_) {}
 
     bool Initialize() {
-        if (framebufferCreate(&fb, nwindowGetDefault(), 1280, 720, PIXEL_FORMAT_RGBA_8888, 2) !=
-            0) {
+        NWindow* window = nwindowGetDefault();
+        const LibnxResult create_rc =
+            framebufferCreate(&fb, window, 1280, 720, PIXEL_FORMAT_RGBA_8888, 2);
+        DebugLog("CIA framebuffer create: window=%p rc=0x%x", static_cast<void*>(window),
+                 create_rc);
+        if (create_rc != 0) {
             return false;
         }
-        if (framebufferMakeLinear(&fb) != 0) {
+        const LibnxResult linear_rc = framebufferMakeLinear(&fb);
+        DebugLog("CIA framebuffer linear: rc=0x%x", linear_rc);
+        if (linear_rc != 0) {
             framebufferClose(&fb);
             return false;
         }
@@ -1544,19 +1628,41 @@ public:
 
     ~CiaInstallerCanvas() {
         if (ready) {
+            DebugLog("CIA framebuffer close: presents=%llu",
+                     static_cast<unsigned long long>(present_count));
             framebufferClose(&fb);
+            ready = false;
         }
     }
 
-    void Begin() {
+    bool Begin() {
         u32 stride_bytes = 0;
         pixels = static_cast<u32*>(framebufferBegin(&fb, &stride_bytes));
         stride = stride_bytes / sizeof(u32);
+        if (!pixels || stride < 1280) {
+            DebugLog("CIA framebuffer begin failed: pixels=%p stride_bytes=%u present=%llu",
+                     static_cast<void*>(pixels), stride_bytes,
+                     static_cast<unsigned long long>(present_count));
+            pixels = nullptr;
+            stride = 0;
+            return false;
+        }
+        if (present_count < 3) {
+            DebugLog("CIA framebuffer begin: pixels=%p stride_bytes=%u present=%llu",
+                     static_cast<void*>(pixels), stride_bytes,
+                     static_cast<unsigned long long>(present_count));
+        }
         FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
+        return true;
     }
 
     void End() {
         framebufferEnd(&fb);
+        present_count++;
+        if (present_count <= 3) {
+            DebugLog("CIA framebuffer present: count=%llu",
+                     static_cast<unsigned long long>(present_count));
+        }
     }
 
     void FillRect(int x, int y, int w, int h, Rgba color) {
@@ -1596,6 +1702,7 @@ private:
     Framebuffer fb{};
     u32* pixels{};
     u32 stride{};
+    u64 present_count{};
     bool ready{};
 };
 
@@ -1610,7 +1717,9 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
     constexpr Rgba row{38, 46, 61, 255};
     constexpr Rgba error{255, 102, 126, 255};
 
-    canvas.Begin();
+    if (!canvas.Begin()) {
+        return;
+    }
     canvas.FillRect(0, 0, 1280, 90, {17, 22, 31, 255});
     canvas.Text(44, 58, "CIA安装", 34, text);
     const std::string toggle = std::string{"安装完成删除源文件 "} + (delete_source ? "开" : "关");
@@ -1674,7 +1783,9 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
 
 void DrawCiaMessage(CiaInstallerCanvas& canvas, const std::string& title,
                     const std::string& message) {
-    canvas.Begin();
+    if (!canvas.Begin()) {
+        return;
+    }
     canvas.FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
     canvas.FillRect(320, 250, 640, 210, {28, 34, 45, 255});
     canvas.Border(320, 250, 640, 210, {80, 96, 120, 255});
@@ -2410,7 +2521,6 @@ int Run(int argc, char** argv) {
     InstallFatalHandlers();
     ThreadCoreMaskGuard thread_core_guard;
     SwitchClockGuard clock_guard;
-
     DebugLog("argc=%d", argc);
     for (int i = 0; i < argc; i++) {
         DebugLog("argv[%d]=%s", i, argv[i] ? argv[i] : "(null)");
@@ -2496,11 +2606,13 @@ int Run(int argc, char** argv) {
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
     Frontend::RegisterDefaultApplets(system);
     system.RegisterSoftwareKeyboard(std::make_shared<SwitchFrontend::SwitchKeyboard>());
+    ReleaseStaleDefaultNWindowBuffers("graphics-entry");
 
     if (launch_options.install_cia_mode) {
         DebugLog("entering CIA installer mode");
         const int install_exit_code = RunCiaInstaller(launch_options);
         DebugLog("CIA installer mode finished code=%d", install_exit_code);
+        ReleaseStaleDefaultNWindowBuffers("cia-installer-finished");
         DebugLog("shutdown step: InputCommon::Shutdown begin");
         InputCommon::Shutdown();
         DebugLog("shutdown step: InputCommon::Shutdown done");
@@ -2550,6 +2662,7 @@ int Run(int argc, char** argv) {
                  static_cast<unsigned>(load_result));
         ExitLog("early exit: load failed status=%s (%u)", ResultStatusName(load_result),
                 static_cast<unsigned>(load_result));
+        ReleaseStaleDefaultNWindowBuffers("load-failed");
         if (common_log_started) {
             Common::Log::Stop();
             common_log_started = false;
@@ -3563,6 +3676,7 @@ int Run(int argc, char** argv) {
         ExitLog("shutdown step: system.Shutdown done (%lld ms)", step_ms);
         ExitLogMemorySummary("after-system-shutdown");
     }
+    ReleaseStaleDefaultNWindowBuffers("after-system-shutdown");
     ExitLog("shutdown step: clear input suppression begin");
     window.SetInputSuppressed(false);
     InputCommon::SwitchHID::SetInputSuppressed(false);
@@ -3625,6 +3739,7 @@ extern "C" void userAppInit() {
     ApplyDiagnosticLogSwitchFromEnv();
     WriteRawBootMarker("userAppInit: entry");
     LogTlsLayoutEarly("userAppInit TLS");
+    RotateDiagnosticLogs();
     OpenStartupLogIfNeeded("w");
     StartupLog("userAppInit: begin");
     if (EnableStdStreamLogs) {
@@ -3642,9 +3757,9 @@ extern "C" void userAppExit() {
     WriteRawBootMarker("userAppExit: entry");
     ExitLog("userAppExit entry");
     ExitLogMemorySummary("userAppExit-entry");
-    // Runs after C++ static destructors — the closest observable state to what hbl
-    // inherits. Anything still flagged SUSPECT here is what kills hbl with 0xD401.
-    DumpMemoryMap("static-dtors-done");
+    // The normal frontend path uses std::_Exit after explicit subsystem shutdown, so this hook
+    // runs without invoking chainload-unsafe C++ static destructors.
+    DumpMemoryMap("libnx-app-exit");
     StartupLog("userAppExit");
     CloseStartupLog();
     ExitLog("userAppExit closing logs");
@@ -3736,8 +3851,8 @@ int main(int argc, char** argv) {
     ExitLogOpen("w");
     ExitLog("main entry argc=%d", argc);
     const int result = Run(argc, argv);
-    StartupLog("main: _Exit result=%d", result);
-    ExitLog("main _Exit result=%d", result);
+    StartupLog("main: fast exit result=%d (skip static destructors)", result);
+    ExitLog("main fast exit result=%d skip_static_destructors=1", result);
     CloseStartupLog();
     ExitLogClose();
     std::_Exit(result);

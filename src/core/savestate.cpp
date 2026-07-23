@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <istream>
+#include <iterator>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -394,8 +395,15 @@ static bool ValidateSaveState(const CSTHeader& header, SaveStateInfo& info, u64 
     } else {
         if (!build_name.empty()) {
             info.build_name = build_name;
-        } else if (hash_to_version.find(revision) != hash_to_version.end()) {
-            info.build_name = hash_to_version.at(revision);
+        } else {
+            const auto known_version =
+                std::find_if(std::begin(hash_to_version), std::end(hash_to_version),
+                             [&revision](const auto& entry) {
+                                 return entry.first == std::string_view{revision};
+                             });
+            if (known_version != std::end(hash_to_version)) {
+                info.build_name.assign(known_version->second.data(), known_version->second.size());
+            }
         }
         if (info.build_name.empty()) {
             LOG_WARNING(Core, "Save state file {} created from a different revision {}", path,

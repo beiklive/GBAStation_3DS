@@ -4,12 +4,12 @@
 
 #pragma once
 
-#include <map>
-#include <string>
+#include <string_view>
+#include <utility>
 
 namespace Core {
 
-std::map<std::string, std::string> hash_to_version = {
+constexpr std::pair<std::string_view, std::string_view> hash_to_version[] = {
     {"c605bb42dbb364cc0977c417aed0630d74b05c25", "nightly-1481"},
     {"47829ee095aa398494f4068919ca83ea2a32caee", "nightly-1482"},
     {"8967b403b984134fddf99a8c2a5158af177d5fba", "nightly-1483"},

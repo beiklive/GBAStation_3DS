@@ -4,6 +4,7 @@ add_executable(gbastation
     display_settings.h
     game_db.cpp
     game_db.h
+    init_array_diagnostics.cpp
     main.cpp
     switch_fastmem_resume.S
     switch_keyboard.cpp
@@ -31,6 +32,9 @@ target_compile_definitions(gbastation PRIVATE
 option(GBASTATION_SWITCH_DIAGNOSTIC_LOGS "Enable first-boot Switch filesystem logs" OFF)
 if(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
     target_compile_definitions(gbastation PRIVATE GBASTATION_SWITCH_DIAGNOSTIC_LOGS=1)
+    set_source_files_properties(init_array_diagnostics.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-stack-protector"
+    )
 endif()
 
 target_include_directories(gbastation PRIVATE

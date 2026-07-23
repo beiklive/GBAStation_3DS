@@ -37,6 +37,7 @@ void EmitSpinLockUnlock(oaknut::CodeGenerator& code, oaknut::XReg ptr) {
 
 namespace {
 
+#if !defined(__SWITCH__)
 struct SpinLockImpl {
     SpinLockImpl();
 
@@ -70,17 +71,33 @@ void SpinLockImpl::Initialize() {
     mem.invalidate_all();
     mem.protect();
 }
+#endif
 
 }  // namespace
 
 void SpinLock::Lock() {
+#if defined(__SWITCH__)
+    for (;;) {
+        if (__atomic_exchange_n(&storage, 1, __ATOMIC_ACQUIRE) == 0) {
+            return;
+        }
+        while (__atomic_load_n(&storage, __ATOMIC_RELAXED) != 0) {
+            asm volatile("yield");
+        }
+    }
+#else
     std::call_once(flag, &SpinLockImpl::Initialize, impl);
     impl.lock(&storage);
+#endif
 }
 
 void SpinLock::Unlock() {
+#if defined(__SWITCH__)
+    __atomic_store_n(&storage, 0, __ATOMIC_RELEASE);
+#else
     std::call_once(flag, &SpinLockImpl::Initialize, impl);
     impl.unlock(&storage);
+#endif
 }
 
 }  // namespace Dynarmic
