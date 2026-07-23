@@ -200,6 +200,13 @@ std::vector<unsigned char> LoadFile(const char* path) {
 }
 
 std::vector<unsigned char> LoadMaterialFont() {
+    static bool attempted = false;
+    static std::vector<unsigned char> cached_data;
+    if (attempted) {
+        return cached_data;
+    }
+    attempted = true;
+
     constexpr std::array<const char*, 4> paths{{
         "romfs:/material/MaterialIcons-Regular.ttf",
         "romfs:/rescources/material/MaterialIcons-Regular.ttf",
@@ -210,11 +217,12 @@ std::vector<unsigned char> LoadMaterialFont() {
         std::vector<unsigned char> data = LoadFile(path);
         if (!data.empty()) {
             LOG_INFO(Render_Vulkan, "Overlay material icon font loaded from {}", path);
-            return data;
+            cached_data = std::move(data);
+            return cached_data;
         }
     }
     LOG_WARNING(Render_Vulkan, "Overlay material icon font not found; tab icons will be hidden");
-    return {};
+    return cached_data;
 }
 
 #ifdef __SWITCH__
@@ -433,6 +441,10 @@ bool EnsureCodepoints(const std::vector<u32>& codepoints) {
             continue;
         }
         if (runtime.glyphs.find(cp) == runtime.glyphs.end()) {
+            if (std::find(dynamic_text_codepoints.begin(), dynamic_text_codepoints.end(), cp) !=
+                dynamic_text_codepoints.end()) {
+                continue;
+            }
             dynamic_text_codepoints.push_back(cp);
             missing = true;
         }
