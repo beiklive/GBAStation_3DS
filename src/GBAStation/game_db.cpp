@@ -25,6 +25,8 @@ constexpr std::array<const char*, 2> DatabasePaths{{
     "/GBAStation/data/GameData_3DS.json",
 }};
 
+std::string StemFromPath(const std::string& path);
+
 std::string NormalizePath(std::string path) {
     std::replace(path.begin(), path.end(), '\\', '/');
     if (path.rfind("sdmc:", 0) == 0) {
@@ -34,6 +36,34 @@ std::string NormalizePath(std::string path) {
         path.erase(0, 1);
     }
     return path;
+}
+
+std::string ExtractTitleIdFromInstalledPath(const std::string& rom_path) {
+    const std::string normalized = NormalizePath(rom_path);
+    const std::string marker = "/title/";
+    const std::size_t marker_pos = normalized.find(marker);
+    if (marker_pos == std::string::npos) {
+        return {};
+    }
+
+    const std::size_t high_begin = marker_pos + marker.size();
+    const std::size_t high_end = normalized.find('/', high_begin);
+    if (high_end == std::string::npos || high_end - high_begin != 8) {
+        return {};
+    }
+
+    const std::size_t low_begin = high_end + 1;
+    const std::size_t low_end = normalized.find('/', low_begin);
+    if (low_end == std::string::npos || low_end - low_begin != 8) {
+        return {};
+    }
+
+    return normalized.substr(high_begin, 8) + normalized.substr(low_begin, 8);
+}
+
+std::string DefaultSavePathForInstalledTitle(const std::string& rom_path) {
+    const std::string title_id = ExtractTitleIdFromInstalledPath(rom_path);
+    return "sdmc:/GBAStation/saves/3DS/" + (title_id.empty() ? StemFromPath(rom_path) : title_id);
 }
 
 bool IsKnownLayout(const std::string& layout) {
@@ -247,7 +277,7 @@ bool SaveDisplaySettings(const std::string& rom_path, const std::string& title,
 
 bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& title,
                              const GBAStationDisplaySettings& settings,
-                             const std::string& logo_path) {
+                             const std::string& logo_path, const std::string& save_path) {
     const char* target_path = nullptr;
     nlohmann::json data;
     LoadWritableDatabase(data, target_path);
@@ -279,11 +309,10 @@ bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& tit
     item["shaderParaPath"] = item.value("shaderParaPath", "");
     item["shaderParaNames"] = item.value("shaderParaNames", std::vector<std::string>{});
     item["shaderParaValues"] = item.value("shaderParaValues", std::vector<float>{});
-    if (item.value("savePath", "").empty()) {
-        const std::string stem = StemFromPath(rom_path);
-        item["savePath"] = "sdmc:/GBAStation/save/3DS/" + stem;
-        mkdir("sdmc:/GBAStation/save", 0777);
-        mkdir("sdmc:/GBAStation/save/3DS", 0777);
+    if (!save_path.empty() || item.value("savePath", "").empty()) {
+        item["savePath"] = save_path.empty() ? DefaultSavePathForInstalledTitle(rom_path) : save_path;
+        mkdir("sdmc:/GBAStation/saves", 0777);
+        mkdir("sdmc:/GBAStation/saves/3DS", 0777);
         mkdir(item["savePath"].get<std::string>().c_str(), 0777);
     }
     WriteAllDisplaySettings(item, settings);

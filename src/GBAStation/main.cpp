@@ -940,8 +940,14 @@ std::string StemFromPath(std::string_view path) {
     return end <= begin ? std::string{"Nintendo 3DS"} : std::string{path.substr(begin, end - begin)};
 }
 
-std::string DefaultInstalledSavePath(const std::string& rom_path) {
-    return "sdmc:/GBAStation/save/3DS/" + StemFromPath(rom_path);
+std::string TitleIdString(u64 program_id) {
+    char text[17]{};
+    std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(program_id));
+    return text;
+}
+
+std::string InstalledTitleSavePath(u64 program_id) {
+    return "sdmc:/GBAStation/saves/3DS/" + TitleIdString(program_id);
 }
 
 u32 Rgb565ToRgba8888(u16 color) {
@@ -1119,8 +1125,8 @@ std::string SaveCiaIconPng(const std::string& save_path, const std::vector<u8>& 
     if (icon_rgba.size() != 48 * 48 * 4) {
         return {};
     }
-    mkdir("sdmc:/GBAStation/save", 0777);
-    mkdir("sdmc:/GBAStation/save/3DS", 0777);
+    mkdir("sdmc:/GBAStation/saves", 0777);
+    mkdir("sdmc:/GBAStation/saves/3DS", 0777);
     mkdir(save_path.c_str(), 0777);
     const std::string icon_path = save_path + "/icon.png";
     const unsigned error = lodepng::encode(icon_path, icon_rgba, 48, 48);
@@ -1476,7 +1482,7 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
     if (!notice.empty()) {
         canvas.Text(54, 674, canvas.Truncate(notice, 20, 780), 20, accent);
     }
-    canvas.Text(890, 674, "A 确认   B 返回/退出   X 删除源文件", 19, dim);
+    canvas.Text(760, 674, "A 确认   B 返回上级   X 删除源文件   + 返回主程序", 19, dim);
 
     if (install_state.active.load(std::memory_order_acquire)) {
         const std::size_t written = install_state.written.load(std::memory_order_acquire);
@@ -1502,7 +1508,7 @@ void DrawCiaMessage(CiaInstallerCanvas& canvas, const std::string& title,
     canvas.Border(320, 250, 640, 210, {80, 96, 120, 255});
     canvas.Text(360, 310, title, 30, {238, 243, 250, 255});
     canvas.Text(360, 360, canvas.Truncate(message, 22, 560), 22, {172, 184, 200, 255});
-    canvas.Text(360, 420, "按 A 或 B 返回", 20, {74, 170, 255, 255});
+    canvas.Text(360, 420, "按 A 或 B 返回文件列表", 20, {74, 170, 255, 255});
     canvas.End();
 }
 
@@ -1527,6 +1533,17 @@ int RunCiaInstaller(const LaunchOptions& options) {
     CiaInstallState install_state;
     std::thread install_thread;
 
+    const auto join_install_thread = [&](const char* reason) {
+        if (!install_thread.joinable()) {
+            return;
+        }
+        DebugLog("CIA installer joining install thread reason=%s active=%d done=%d", reason,
+                 install_state.active.load(std::memory_order_acquire) ? 1 : 0,
+                 install_state.done.load(std::memory_order_acquire) ? 1 : 0);
+        install_thread.join();
+        DebugLog("CIA installer install thread joined reason=%s", reason);
+    };
+
     const auto refresh = [&] {
         entries = ListCiaInstallEntries(directory);
         selected = std::clamp(selected, 0, std::max(0, static_cast<int>(entries.size()) - 1));
@@ -1538,22 +1555,31 @@ int RunCiaInstaller(const LaunchOptions& options) {
             notice = entry.name + ": 不是有效的CIA";
             return;
         }
+        if (install_thread.joinable()) {
+            join_install_thread("start-new-install");
+        }
         install_state.source_path = entry.path;
         CiaInstallMetadata metadata = ReadCiaMetadata(entry.path, StemFromPath(entry.path));
         install_state.title = metadata.title;
+        install_state.installed_path.clear();
+        install_state.message.clear();
+        install_state.success = false;
+        install_state.result = Service::AM::InstallStatus::ErrorInvalid;
         install_state.total = static_cast<std::size_t>(entry.size);
         install_state.written = 0;
         install_state.done = false;
         install_state.active = true;
         notice.clear();
-        install_thread = std::thread([&, entry, metadata = std::move(metadata)] {
+        const bool delete_after_install = delete_source;
+        install_thread = std::thread([&, entry, metadata = std::move(metadata), delete_after_install] {
             DebugLog("CIA install begin path=%s tid=%016llx", entry.path.c_str(),
                      static_cast<unsigned long long>(entry.program_id));
             install_state.result = Service::AM::InstallCIA(
                 entry.path, [&](std::size_t written, std::size_t total) {
                     install_state.written = written;
                     install_state.total = total;
-                });
+                },
+                true);
             const bool installed_ok =
                 install_state.result == Service::AM::InstallStatus::Success;
             install_state.success = installed_ok;
@@ -1563,14 +1589,13 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         Service::AM::GetTitleMediaType(entry.program_id);
                     install_state.installed_path =
                         Service::AM::GetTitleContentPath(media, entry.program_id);
-                    const std::string save_path =
-                        DefaultInstalledSavePath(install_state.installed_path);
+                    const std::string save_path = InstalledTitleSavePath(entry.program_id);
                     const std::string logo_path = SaveCiaIconPng(save_path, metadata.icon_rgba);
                     install_state.success =
                         !install_state.installed_path.empty() &&
                         SwitchFrontend::GameDatabase::SaveInstalledGameRecord(
                             install_state.installed_path, install_state.title,
-                            options.display_settings, logo_path);
+                            options.display_settings, logo_path, save_path);
                     install_state.message = install_state.success
                                                 ? "安装成功，已添加到数据库"
                                                 : "安装成功，但写入数据库失败";
@@ -1579,7 +1604,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         std::string{"安装成功，"} + CiaTitleKindName(entry.kind) +
                         "类型未添加到数据库";
                 }
-                if (install_state.success && delete_source) {
+                if (install_state.success && delete_after_install) {
                     const int remove_rc = std::remove(entry.path.c_str());
                     DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(), remove_rc);
                 }
@@ -1587,8 +1612,9 @@ int RunCiaInstaller(const LaunchOptions& options) {
             if (!installed_ok) {
                 install_state.message = InstallStatusText(install_state.result);
             }
-            DebugLog("CIA install end result=%u success=%d installed=%s",
-                     static_cast<unsigned>(install_state.result), install_state.success ? 1 : 0,
+            DebugLog("CIA install end result=%u status=%s success=%d installed=%s",
+                     static_cast<unsigned>(install_state.result),
+                     InstallStatusText(install_state.result), install_state.success ? 1 : 0,
                      install_state.installed_path.c_str());
             install_state.done = true;
         });
@@ -1599,9 +1625,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
         const u64 down = padGetButtonsDown(&pad);
         if (install_state.active.load(std::memory_order_acquire)) {
             if (install_state.done.load(std::memory_order_acquire)) {
-                if (install_thread.joinable()) {
-                    install_thread.join();
-                }
+                join_install_thread("install-done");
                 install_state.active = false;
                 notice = install_state.message;
                 refresh();
@@ -1616,7 +1640,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                     }
                     svcSleepThread(16'000'000);
                 }
-                break;
+                refresh();
             }
             DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
                              install_state, notice);
@@ -1624,6 +1648,9 @@ int RunCiaInstaller(const LaunchOptions& options) {
             continue;
         }
 
+        if (down & HidNpadButton_Plus) {
+            break;
+        }
         if (down & HidNpadButton_X) {
             delete_source = !delete_source;
         }
@@ -1634,7 +1661,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                 scroll = 0;
                 refresh();
             } else {
-                break;
+                notice = "已在根目录，按 + 返回主程序";
             }
         }
         if (down & HidNpadButton_Up) {
@@ -1668,9 +1695,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
         svcSleepThread(16'000'000);
     }
 
-    if (install_thread.joinable()) {
-        install_thread.join();
-    }
+    join_install_thread("installer-exit");
     DebugLog("CIA installer branch exit");
     return EXIT_SUCCESS;
 }

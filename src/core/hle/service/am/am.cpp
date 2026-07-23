@@ -1059,8 +1059,8 @@ void ContentFile::Cancel(FS::MediaType media_type, u64 title_id) {
     FileUtil::Delete(path);
 }
 
-InstallStatus InstallCIA(const std::string& path,
-                         std::function<ProgressCallback>&& update_callback) {
+InstallStatus InstallCIA(const std::string& path, std::function<ProgressCallback>&& update_callback,
+                         bool authorize_decryption) {
     LOG_INFO(Service_AM, "Installing {}...", path);
 
     if (!FileUtil::Exists(path)) {
@@ -1081,6 +1081,10 @@ InstallStatus InstallCIA(const std::string& path,
         Service::AM::CIAFile installFile(
             Core::System::GetInstance(),
             Service::AM::GetTitleMediaType(container.GetTitleMetadata().GetTitleID()));
+        if (authorize_decryption) {
+            installFile.AuthorizeDecryptionFromHLE();
+            LOG_INFO(Service_AM, "Authorized encrypted CIA installation from direct installer.");
+        }
 
         if (container.GetTitleMetadata().HasEncryptedContent(container.GetHeader())) {
             LOG_ERROR(Service_AM, "File {} is encrypted! Aborting...", path);

@@ -375,7 +375,8 @@ private:
  * @returns bool whether the install was successful
  */
 InstallStatus InstallCIA(const std::string& path,
-                         std::function<ProgressCallback>&& update_callback = nullptr);
+                         std::function<ProgressCallback>&& update_callback = nullptr,
+                         bool authorize_decryption = false);
 
 /**
  * Checks if the provided path is a valid CIA file
