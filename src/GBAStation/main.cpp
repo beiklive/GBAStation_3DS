@@ -773,6 +773,10 @@ const char* ResultStatusName(Core::System::ResultStatus status) {
         return "ErrorLoader_ErrorInvalidFormat";
     case Core::System::ResultStatus::ErrorLoader_ErrorGbaTitle:
         return "ErrorLoader_ErrorGbaTitle";
+    case Core::System::ResultStatus::ErrorLoader_ErrorPatches:
+        return "ErrorLoader_ErrorPatches";
+    case Core::System::ResultStatus::ErrorLoader_ErrorPatchesInvalidTitle:
+        return "ErrorLoader_ErrorPatchesInvalidTitle";
     case Core::System::ResultStatus::ErrorSystemFiles:
         return "ErrorSystemFiles";
     case Core::System::ResultStatus::ErrorSavestate:
@@ -781,12 +785,64 @@ const char* ResultStatusName(Core::System::ResultStatus status) {
         return "ErrorArticDisconnected";
     case Core::System::ResultStatus::ErrorN3DSApplication:
         return "ErrorN3DSApplication";
+    case Core::System::ResultStatus::ErrorCoreExceptionRaised:
+        return "ErrorCoreExceptionRaised";
+    case Core::System::ResultStatus::ErrorMemoryExceptionRaised:
+        return "ErrorMemoryExceptionRaised";
     case Core::System::ResultStatus::ShutdownRequested:
         return "ShutdownRequested";
     case Core::System::ResultStatus::ErrorUnknown:
         return "ErrorUnknown";
     }
     return "Unknown";
+}
+
+u64 HashCheatCode(std::string_view code) {
+    u64 hash = 14695981039346656037ULL;
+    for (const unsigned char byte : code) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+std::size_t CountCheatCodeLines(std::string_view code) {
+    if (code.empty()) {
+        return 0;
+    }
+    return static_cast<std::size_t>(std::count(code.begin(), code.end(), '\n')) +
+           (code.back() == '\n' ? 0 : 1);
+}
+
+std::string MakeSingleLineLogText(std::string text) {
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    std::replace(text.begin(), text.end(), '\r', ' ');
+    return text;
+}
+
+void LogEnabledCheatsAtFailure(Core::System& system) {
+    const auto cheats = system.CheatEngine().GetCheats();
+    std::size_t enabled_count = 0;
+    for (std::size_t index = 0; index < cheats.size(); ++index) {
+        const auto& cheat = cheats[index];
+        if (!cheat || !cheat->IsEnabled()) {
+            continue;
+        }
+        ++enabled_count;
+        const std::string name = MakeSingleLineLogText(cheat->GetName());
+        const std::string type = MakeSingleLineLogText(cheat->GetType());
+        const std::string code = cheat->GetCode();
+        DebugLog("active cheat at failure: index=%zu name=\"%s\" type=%s code_lines=%zu "
+                 "code_hash=%016llx",
+                 index, name.c_str(), type.c_str(), CountCheatCodeLines(code),
+                 static_cast<unsigned long long>(HashCheatCode(code)));
+        ExitLog("active cheat at failure: index=%zu name=\"%s\" type=%s code_lines=%zu "
+                "code_hash=%016llx",
+                index, name.c_str(), type.c_str(), CountCheatCodeLines(code),
+                static_cast<unsigned long long>(HashCheatCode(code)));
+    }
+    DebugLog("active cheats at failure total=%zu", enabled_count);
+    ExitLog("active cheats at failure total=%zu", enabled_count);
 }
 
 bool DrainAsyncOperationsForSavestate(Core::System& system) {
@@ -2179,7 +2235,9 @@ void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& s
     }
 
     if (TryParseFloat(GetConfigValue("fastforward.multiplier"), parsed_float)) {
-        settings.fast_forward_multiplier = std::clamp(parsed_float, 0.1f, 5.0f);
+        settings.fast_forward_multiplier =
+            std::clamp(parsed_float, SwitchFrontend::MinFastForwardMultiplier,
+                       SwitchFrontend::MaxFastForwardMultiplier);
     }
 }
 
@@ -2496,12 +2554,25 @@ int Run(int argc, char** argv) {
             if (index < 0) {
                 return false;
             }
+            std::string cheat_name{"<unknown>"};
+            std::string cheat_type{"<unknown>"};
+            std::string cheat_code;
+            const auto cheats = system.CheatEngine().GetCheats();
+            if (static_cast<std::size_t>(index) < cheats.size() && cheats[index]) {
+                cheat_name = MakeSingleLineLogText(cheats[index]->GetName());
+                cheat_type = MakeSingleLineLogText(cheats[index]->GetType());
+                cheat_code = cheats[index]->GetCode();
+            }
             bool enabled = false;
             if (!system.CheatEngine().ToggleCheat(static_cast<std::size_t>(index), &enabled)) {
                 return false;
             }
             cheat_settings_dirty->store(true, std::memory_order_release);
-            DebugLog("menu cheat toggled index=%d enabled=%d", index, enabled ? 1 : 0);
+            DebugLog("menu cheat toggled index=%d enabled=%d name=\"%s\" type=%s code_lines=%zu "
+                     "code_hash=%016llx",
+                     index, enabled ? 1 : 0, cheat_name.c_str(), cheat_type.c_str(),
+                     CountCheatCodeLines(cheat_code),
+                     static_cast<unsigned long long>(HashCheatCode(cheat_code)));
             return true;
         });
 
@@ -2511,9 +2582,8 @@ int Run(int argc, char** argv) {
     bool show_fps_overlay = ParseConfigBool(
         SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
     SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
-    DebugLog("GBAStation menu init=%d hotkey=ZL+ZR return=%s target=%s",
-             menu_initialized ? 1 : 0, launch_options.return_to_nro ? "nro" : "home",
-             launch_options.return_nro_path.c_str());
+    DebugLog("GBAStation menu init=%d hotkey=ZL+ZR return=%s target=%s", menu_initialized ? 1 : 0,
+             launch_options.return_to_nro ? "nro" : "home", launch_options.return_nro_path.c_str());
 
     DebugLog("startup keepalive armed");
 
@@ -2539,6 +2609,8 @@ int Run(int argc, char** argv) {
     bool block_game_input_until_release = false;
     bool menu_audio_muted = false;
     float menu_restore_volume = Settings::values.volume.GetValue();
+    constexpr std::size_t FastForwardCompileThrottleThreshold = 1;
+    constexpr auto FastForwardCompileResumeDelay = std::chrono::milliseconds{750};
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
     bool previous_mic_input_combo = false;
@@ -2546,8 +2618,9 @@ int Run(int argc, char** argv) {
     AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
     bool last_fast_forward_active = false;
     bool fast_forward_compile_throttled = false;
+    auto fast_forward_compile_resume_at = Clock::time_point::min();
     bool force_input_suppressed_during_shutdown = false;
-    const bool normal_vsync = Settings::values.use_vsync.GetValue();
+    [[maybe_unused]] const bool normal_vsync = Settings::values.use_vsync.GetValue();
     enum class PendingStateOperation {
         None,
         Save,
@@ -2616,28 +2689,50 @@ int Run(int argc, char** argv) {
         const std::size_t pending_compilations = vulkan_renderer.PendingCompilationCount();
         if (!fast_forward_requested) {
             fast_forward_compile_throttled = false;
-        } else if (!fast_forward_compile_throttled && pending_compilations >= 4) {
+            fast_forward_compile_resume_at = Clock::time_point::min();
+        } else if (pending_compilations >= FastForwardCompileThrottleThreshold) {
+            if (!fast_forward_compile_throttled) {
+                DebugLog("fast forward throttled: pending shader/pipeline work=%zu",
+                         pending_compilations);
+            }
             fast_forward_compile_throttled = true;
-            DebugLog("fast forward throttled: pending shader/pipeline work=%zu",
-                     pending_compilations);
-        } else if (fast_forward_compile_throttled && pending_compilations == 0) {
+            fast_forward_compile_resume_at = now + FastForwardCompileResumeDelay;
+        } else if (fast_forward_compile_throttled &&
+                   now >= fast_forward_compile_resume_at) {
             fast_forward_compile_throttled = false;
-            DebugLog("fast forward resumed: shader/pipeline queue drained");
+            DebugLog("fast forward resumed: shader/pipeline queue drained and guard elapsed");
         }
-        const bool fast_forward_active =
-            fast_forward_requested && !fast_forward_compile_throttled;
-        const float fast_forward_multiplier =
+        const bool fast_forward_active = fast_forward_requested;
+        const float requested_fast_forward_multiplier =
             SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
-        Settings::is_temporary_frame_limit = fast_forward_active;
-        Settings::temporary_frame_limit =
-            fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
+        const float fast_forward_multiplier =
+            std::clamp(requested_fast_forward_multiplier,
+                       SwitchFrontend::MinFastForwardMultiplier,
+                       SwitchFrontend::MaxFastForwardMultiplier);
+        // Keep the temporary limit active while compilation is throttling. The Vulkan rasterizer
+        // uses this state to wait for scene-critical pipelines instead of dropping their draws.
+        Settings::is_temporary_frame_limit = fast_forward_requested;
+        Settings::temporary_frame_limit = fast_forward_requested
+                                              ? (fast_forward_compile_throttled
+                                                     ? 100.0
+                                                     : static_cast<double>(
+                                                           fast_forward_multiplier) *
+                                                           100.0)
+                                              : 0.0;
         if (fast_forward_active != last_fast_forward_active) {
+#ifdef __SWITCH__
+            // NVK on Switch exposes only FIFO presentation in this frontend. Toggling vsync while
+            // fast-forward is repeatedly throttled just recreates the swapchain during heavy scene
+            // transitions, which has shown up as device-lost crashes in large 3DS titles.
+#else
             Settings::values.use_vsync.SetValue(fast_forward_active ? false : normal_vsync);
+#endif
             SwitchFrontend::VulkanOverlay::SetFastForwardActive(fast_forward_active);
             vulkan_renderer.SetFastForward(fast_forward_active, fast_forward_multiplier);
-            DebugLog("fast forward %s multiplier=%.2f limit=%.1f",
-                     fast_forward_active ? "on" : "off", fast_forward_multiplier,
-                     Settings::temporary_frame_limit);
+            DebugLog("fast forward %s requested=%.2f effective=%.2f limit=%.1f pending=%zu",
+                     fast_forward_active ? "on" : "off", requested_fast_forward_multiplier,
+                     fast_forward_multiplier, Settings::temporary_frame_limit,
+                     pending_compilations);
             last_fast_forward_active = fast_forward_active;
         }
         if (menu_visible != menu_was_visible) {
@@ -3273,12 +3368,14 @@ int Run(int argc, char** argv) {
         }
         if (run_result != Core::System::ResultStatus::Success) {
             exit_reason = "RunLoop returned error";
-            DebugLog("run loop failed after %llu iterations: %s (%u)",
+            const std::string details = MakeSingleLineLogText(system.GetStatusDetails());
+            DebugLog("run loop failed after %llu iterations: %s (%u) details=\"%s\"",
                      static_cast<unsigned long long>(loop_count), ResultStatusName(run_result),
-                     static_cast<unsigned>(run_result));
-            ExitLog("main loop exit: RunLoop error iterations=%llu status=%s (%u)",
+                     static_cast<unsigned>(run_result), details.empty() ? "none" : details.c_str());
+            ExitLog("main loop exit: RunLoop error iterations=%llu status=%s (%u) details=\"%s\"",
                     static_cast<unsigned long long>(loop_count), ResultStatusName(run_result),
-                    static_cast<unsigned>(run_result));
+                    static_cast<unsigned>(run_result), details.empty() ? "none" : details.c_str());
+            LogEnabledCheatsAtFailure(system);
             break;
         }
     }
@@ -3290,9 +3387,9 @@ int Run(int argc, char** argv) {
             system.IsPoweredOn() ? 1 : 0, applet_loop_active ? 1 : 0,
             static_cast<unsigned long long>(loop_count));
     ExitLogMemorySummary("shutdown-begin");
-    const auto remaining_play_time = std::chrono::duration_cast<std::chrono::seconds>(
-                                         Clock::now() - play_stats_checkpoint)
-                                         .count();
+    const auto remaining_play_time =
+        std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - play_stats_checkpoint)
+            .count();
     if (remaining_play_time > 0) {
         ExitLog("shutdown step: UpdatePlayStats begin seconds=%lld",
                 static_cast<long long>(remaining_play_time));

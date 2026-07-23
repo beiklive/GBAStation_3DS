@@ -17,8 +17,10 @@
 #include <utility>
 #include <vector>
 
+#define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <imstb_truetype.h>
+#define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
@@ -1185,6 +1187,25 @@ void DrawCustomLayoutSidebar(const State& state) {
     row(6, 564, "透明度", opacityValue(state.display.bottom_opacity));
 }
 
+std::string CompactPathForWidth(std::string_view path, float max_width, float size) {
+    if (path.empty()) {
+        return "未选择";
+    }
+    if (MeasureText(path, size) <= max_width) {
+        return std::string{path};
+    }
+    const std::string name = Filename(path);
+    const std::string shortened = ".../" + name;
+    if (MeasureText(shortened, size) <= max_width) {
+        return shortened;
+    }
+    std::string text = shortened;
+    while (text.size() > 4 && MeasureText(text, size) > max_width) {
+        text.erase(text.begin() + 3);
+    }
+    return text;
+}
+
 void DrawOverlaySidebar(const State& state) {
     constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
     constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.72f};
@@ -1192,16 +1213,16 @@ void DrawOverlaySidebar(const State& state) {
     constexpr float PanelX = 800.0f;
     constexpr float RowX = 830.0f;
     constexpr float RowW = 420.0f;
-    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.28f});
-    Rect(PanelX, 0, 480, 720, {0.015f, 0.020f, 0.030f, 0.97f});
+    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.16f});
+    Rect(PanelX, 0, 480, 720, {0.015f, 0.020f, 0.030f, 0.52f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
     IconCentered(850, 47, 27, Cyan, 0xE53B);
-    Text(878, 54, 27, White, "遮罩选择");
+    Text(878, 54, 27, White, "遮罩设置");
     Text(830, 88, 16, Muted, "选择 PNG 遮罩文件");
-    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩文件"}};
+    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩选择"}};
     const std::array<std::string, 2> values{{
         state.display.overlay_enabled ? "开启" : "关闭",
-        state.display.overlay_path.empty() ? "未选择" : Filename(state.display.overlay_path),
+        CompactPathForWidth(state.display.overlay_path, 214.0f, 17.0f),
     }};
     for (int row = 0; row < 2; ++row) {
         const float y = 132.0f + row * 66.0f;
@@ -1252,8 +1273,8 @@ void DrawFilePicker(const State& state) {
     constexpr float BodyH = 492.0f;
     constexpr float RowH = 84.0f;
 
-    Rect(0, 0, 1280, 720, {0.010f, 0.014f, 0.020f, 0.985f});
-    Rect(0, 0, 1280, TopH, {0.0f, 0.0f, 0.0f, 0.42f});
+    Rect(0, 0, 1280, 720, {0.010f, 0.014f, 0.020f, 0.68f});
+    Rect(0, 0, 1280, TopH, {0.0f, 0.0f, 0.0f, 0.34f});
     Rect(0, TopH, 1280, 1, {1, 1, 1, 0.12f});
     Text(32, 61, 24, White, state.file_picker_path.empty() ? "/" : state.file_picker_path);
 
@@ -1327,7 +1348,7 @@ void DrawFilePicker(const State& state) {
     }
 
     const float footer_y = 720.0f - FooterH;
-    Rect(0, footer_y, 1280, FooterH, {0.0f, 0.0f, 0.0f, 0.42f});
+    Rect(0, footer_y, 1280, FooterH, {0.0f, 0.0f, 0.0f, 0.34f});
     Rect(0, footer_y, 1280, 1, {1, 1, 1, 0.12f});
     float right = 1244.0f;
     auto hint = [&](int icon, const char* label, const std::array<float, 4>& color,

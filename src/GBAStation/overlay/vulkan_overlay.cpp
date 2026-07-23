@@ -9,15 +9,24 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
+#include <ctime>
+#include <dirent.h>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <sys/stat.h>
 #include <utility>
 #include <vector>
 
 #include "GBAStation/input_mapping.h"
 #include "GBAStation/overlay/overlay_ui.h"
+#include "GBAStation/overlay/vulkan_menu_renderer.h"
+#include "common/file_util.h"
 #include "common/logging/log.h"
 #include "video_core/overlay.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
+#include "video_core/renderer_vulkan/vk_present_window.h"
 
 namespace SwitchFrontend::VulkanOverlay {
 namespace {
@@ -47,8 +56,10 @@ constexpr int DisplayLayoutIndex = 4;
 constexpr int DisplayOrientationIndex = 5;
 constexpr int DisplayIntegerScaleIndex = 6;
 constexpr int DisplayGapIndex = 7;
+constexpr int DisplayOverlaySettingsIndex = 9;
 constexpr int DisplaySyncDisplayIndex = 12;
 constexpr int DisplaySyncOverlayIndex = 13;
+constexpr const char* OverlayDefaultDirectory = "sdmc:/GBAStation/overlays/3DS";
 
 struct PreviousNavigation {
     bool up{};
@@ -57,6 +68,7 @@ struct PreviousNavigation {
     bool right{};
     bool accept{};
     bool cancel{};
+    bool x{};
     bool shoulder_left{};
     bool shoulder_right{};
 };
@@ -64,6 +76,12 @@ struct PreviousNavigation {
 struct RepeatButton {
     bool held{};
     std::chrono::steady_clock::time_point next{};
+};
+
+enum class OverlayMode {
+    Normal,
+    Sidebar,
+    FilePicker,
 };
 
 std::atomic_bool initialized{};
@@ -79,9 +97,21 @@ RepeatButton repeat_up;
 RepeatButton repeat_down;
 RepeatButton repeat_shoulder_left;
 RepeatButton repeat_shoulder_right;
+std::mutex rich_state_mutex;
+SwitchFrontend::VulkanMenuRenderer::State rich_state;
+bool rich_renderer_ready{};
+OverlayMode overlay_mode{OverlayMode::Normal};
+int overlay_focus{};
+std::string file_picker_directory;
+std::vector<SwitchFrontend::VulkanMenuRenderer::FileEntry> file_picker_entries;
+int file_picker_focus{};
+bool file_preview{};
+std::string file_preview_path;
 
 void ResetRepeatState();
 bool PressOrRepeat(bool pressed, RepeatButton& repeat);
+void Repaint();
+void SyncRichState();
 
 std::atomic<float> fast_forward_multiplier{4.0f};
 std::atomic_int display_layout{2};
@@ -99,9 +129,204 @@ std::atomic<float> display_bottom_opacity{1.0f};
 std::atomic_bool display_overlay_enabled{};
 std::string display_overlay_path;
 
+std::string LowerAscii(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (const char ch : value) {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+bool EndsWithNoCase(std::string_view value, std::string_view suffix) {
+    if (value.size() < suffix.size()) {
+        return false;
+    }
+    return LowerAscii(value.substr(value.size() - suffix.size())) == LowerAscii(suffix);
+}
+
+bool IsOverlayImagePath(std::string_view path) {
+    return EndsWithNoCase(path, ".png");
+}
+
+std::string TrimTrailingSlash(std::string path) {
+    while (path.size() > 6 && (path.back() == '/' || path.back() == '\\')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+bool IsSdmcRoot(std::string_view path) {
+    return path == "sdmc:/" || path == "sdmc:" || path == "/";
+}
+
+std::string ParentPath(std::string_view path) {
+    std::string normalized = TrimTrailingSlash(std::string{path});
+    if (IsSdmcRoot(normalized)) {
+        return "sdmc:/";
+    }
+    const std::size_t slash = normalized.find_last_of("/\\");
+    if (slash == std::string::npos) {
+        return "sdmc:/";
+    }
+    if (slash <= 5 && normalized.rfind("sdmc:", 0) == 0) {
+        return "sdmc:/";
+    }
+    return normalized.substr(0, slash);
+}
+
+std::string Filename(std::string_view path) {
+    const std::size_t slash = path.find_last_of("/\\");
+    return slash == std::string_view::npos ? std::string{path}
+                                           : std::string{path.substr(slash + 1)};
+}
+
+std::string JoinPath(std::string_view directory, std::string_view name) {
+    if (directory.empty() || IsSdmcRoot(directory)) {
+        return "sdmc:/" + std::string{name};
+    }
+    std::string out{directory};
+    if (!out.empty() && out.back() != '/' && out.back() != '\\') {
+        out.push_back('/');
+    }
+    out += name;
+    return out;
+}
+
+std::string FormatModifiedTime(std::time_t modified) {
+    if (modified <= 0) {
+        return {};
+    }
+    std::tm tm{};
+    localtime_r(&modified, &tm);
+    char text[24]{};
+    std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M", &tm);
+    return text;
+}
+
 int LayoutIndex(const std::string& layout) {
     const auto it = std::find(LayoutIds.begin(), LayoutIds.end(), layout);
     return it == LayoutIds.end() ? 2 : static_cast<int>(std::distance(LayoutIds.begin(), it));
+}
+
+void DrawRichOverlayCallback(vk::CommandBuffer command_buffer, vk::Image image,
+                             vk::Extent2D extent, vk::Format format) {
+    if (!rich_renderer_ready) {
+        return;
+    }
+    SwitchFrontend::VulkanMenuRenderer::State snapshot;
+    {
+        std::scoped_lock lock{rich_state_mutex};
+        snapshot = rich_state;
+    }
+    SwitchFrontend::VulkanMenuRenderer::Draw(command_buffer, image, extent, format, snapshot);
+}
+
+void ResetRichOverlayCallback() {
+    if (rich_renderer_ready) {
+        SwitchFrontend::VulkanMenuRenderer::ResetSwapchain();
+    }
+}
+
+void RefreshFilePicker(std::string directory, std::string focus_path = {}) {
+    directory = directory.empty() ? OverlayDefaultDirectory : TrimTrailingSlash(std::move(directory));
+    file_picker_directory = directory;
+    file_picker_entries.clear();
+    file_picker_focus = 0;
+    file_preview = false;
+    file_preview_path.clear();
+
+    if (!FileUtil::IsDirectory(file_picker_directory)) {
+        FileUtil::CreateFullPath(file_picker_directory);
+    }
+
+    if (!IsSdmcRoot(file_picker_directory)) {
+        file_picker_entries.push_back({
+            .name = "..",
+            .path = ParentPath(file_picker_directory),
+            .directory = true,
+        });
+    }
+
+    std::vector<SwitchFrontend::VulkanMenuRenderer::FileEntry> directories;
+    std::vector<SwitchFrontend::VulkanMenuRenderer::FileEntry> files;
+    DIR* dir = opendir(file_picker_directory.c_str());
+    if (!dir) {
+        LOG_ERROR(Render_Vulkan, "{} failed to open overlay directory {}", Tag,
+                  file_picker_directory);
+        SyncRichState();
+        return;
+    }
+
+    while (dirent* entry = readdir(dir)) {
+        const std::string name = entry->d_name ? entry->d_name : "";
+        if (name.empty() || name == "." || name == "..") {
+            continue;
+        }
+        const std::string path = JoinPath(file_picker_directory, name);
+        struct stat st {};
+        if (stat(path.c_str(), &st) != 0) {
+            continue;
+        }
+        const bool is_directory = S_ISDIR(st.st_mode);
+        if (!is_directory && !IsOverlayImagePath(name)) {
+            continue;
+        }
+        SwitchFrontend::VulkanMenuRenderer::FileEntry item{
+            .name = name,
+            .path = path,
+            .modified_time = is_directory ? std::string{} : FormatModifiedTime(st.st_mtime),
+            .size = is_directory ? 0 : static_cast<u64>(std::max<off_t>(0, st.st_size)),
+            .directory = is_directory,
+        };
+        (is_directory ? directories : files).push_back(std::move(item));
+    }
+    closedir(dir);
+
+    const auto sort_by_name = [](const auto& lhs, const auto& rhs) {
+        return LowerAscii(lhs.name) < LowerAscii(rhs.name);
+    };
+    std::sort(directories.begin(), directories.end(), sort_by_name);
+    std::sort(files.begin(), files.end(), sort_by_name);
+    file_picker_entries.insert(file_picker_entries.end(), directories.begin(), directories.end());
+    file_picker_entries.insert(file_picker_entries.end(), files.begin(), files.end());
+
+    if (!focus_path.empty()) {
+        const std::string normalized_focus = TrimTrailingSlash(std::move(focus_path));
+        for (int i = 0; i < static_cast<int>(file_picker_entries.size()); ++i) {
+            if (TrimTrailingSlash(file_picker_entries[i].path) == normalized_focus) {
+                file_picker_focus = i;
+                break;
+            }
+        }
+    }
+
+    LOG_INFO(Render_Vulkan, "{} overlay file picker dir={} entries={} focus={}", Tag,
+             file_picker_directory, file_picker_entries.size(), file_picker_focus);
+    SyncRichState();
+}
+
+void SyncRichState() {
+    if (!rich_renderer_ready) {
+        return;
+    }
+    GBAStationDisplaySettings display = GetDisplaySettings();
+    if (visible.load(std::memory_order_acquire) && overlay_mode == OverlayMode::Normal) {
+        display.overlay_enabled = false;
+    }
+
+    std::scoped_lock lock{rich_state_mutex};
+    rich_state.menu_visible =
+        visible.load(std::memory_order_acquire) && overlay_mode != OverlayMode::Normal;
+    rich_state.overlay_sidebar = overlay_mode == OverlayMode::Sidebar;
+    rich_state.overlay_focus = overlay_focus;
+    rich_state.file_picker = overlay_mode == OverlayMode::FilePicker;
+    rich_state.file_picker_focus = file_picker_focus;
+    rich_state.file_picker_path = file_picker_directory;
+    rich_state.file_entries = file_picker_entries;
+    rich_state.file_preview = file_preview;
+    rich_state.file_preview_path = file_preview_path;
+    rich_state.display = std::move(display);
 }
 
 bool PageHasContent(Page target) {
@@ -116,7 +341,11 @@ void PublishAction(OverlayUI::Action action, bool close_menu) {
     }
     if (close_menu) {
         visible.store(false, std::memory_order_release);
+        overlay_mode = OverlayMode::Normal;
+        file_preview = false;
+        file_preview_path.clear();
         VideoCore::SetOverlayMenuState({});
+        SyncRichState();
     }
 }
 
@@ -219,7 +448,8 @@ std::vector<VideoCore::OverlayMenuItem> BuildDisplayItems() {
         Selector("画面整数倍", display_integer_scale.load() ? "开启" : "关闭"),
         Selector("屏幕间距", std::to_string(display_gap.load())),
         Header("扩展"),
-        Disabled("遮罩设置"),
+        Row("遮罩设置", display_overlay_enabled.load(std::memory_order_acquire) ? "已开启"
+                                                                                 : "设置"),
         Disabled("着色器设置"),
         Header("同步"),
         Row("同步画面设置"),
@@ -293,6 +523,11 @@ void StepContentSelection(int direction) {
 }
 
 void Repaint() {
+    SyncRichState();
+    if (overlay_mode != OverlayMode::Normal) {
+        VideoCore::SetOverlayMenuState({});
+        return;
+    }
     VideoCore::OverlayMenuState state;
     state.visible = visible.load(std::memory_order_acquire);
     const auto items = BuildCurrentItems();
@@ -360,6 +595,10 @@ void OpenMenu() {
     page = Page::Resume;
     selected = 0;
     tabs_focused = true;
+    overlay_mode = OverlayMode::Normal;
+    overlay_focus = 0;
+    file_preview = false;
+    file_preview_path.clear();
     visible.store(true, std::memory_order_release);
     previous_navigation = {};
     ResetRepeatState();
@@ -368,10 +607,15 @@ void OpenMenu() {
 
 void CloseMenu() {
     visible.store(false, std::memory_order_release);
+    overlay_mode = OverlayMode::Normal;
+    overlay_focus = 0;
+    file_preview = false;
+    file_preview_path.clear();
     previous_navigation = {};
     ResetRepeatState();
     tabs_focused = true;
     VideoCore::SetOverlayMenuState({});
+    SyncRichState();
 }
 
 void ToggleMenu() {
@@ -383,7 +627,7 @@ void ToggleMenu() {
 }
 
 void StepFastForward(int direction) {
-    int index = 8;
+    int index = static_cast<int>(FastForwardValues.size()) - 1;
     const float current = fast_forward_multiplier.load(std::memory_order_relaxed);
     for (int i = 0; i < static_cast<int>(FastForwardValues.size()); ++i) {
         if (std::fabs(FastForwardValues[i] - current) < 0.01f) {
@@ -438,6 +682,92 @@ void StepDisplayValue(int direction) {
     }
 }
 
+void OpenOverlaySidebar() {
+    overlay_mode = OverlayMode::Sidebar;
+    overlay_focus = 0;
+    file_preview = false;
+    file_preview_path.clear();
+    VideoCore::SetOverlayMenuState({});
+    SyncRichState();
+}
+
+void OpenOverlayFilePicker() {
+    overlay_mode = OverlayMode::FilePicker;
+    const std::string selected_path = display_overlay_path;
+    const std::string directory = selected_path.empty() ? OverlayDefaultDirectory
+                                                        : ParentPath(selected_path);
+    RefreshFilePicker(directory, selected_path);
+    VideoCore::SetOverlayMenuState({});
+    SyncRichState();
+}
+
+void ReturnToDisplayMenu() {
+    overlay_mode = OverlayMode::Normal;
+    file_preview = false;
+    file_preview_path.clear();
+    tabs_focused = false;
+    page = Page::Display;
+    selected = DisplayOverlaySettingsIndex;
+    SyncRichState();
+    Repaint();
+}
+
+void ActivateOverlaySidebar() {
+    if (overlay_focus == 0) {
+        display_overlay_enabled.store(!display_overlay_enabled.load(std::memory_order_relaxed),
+                                      std::memory_order_release);
+        PublishAction(OverlayUI::Action::OverlaySettingsChanged, false);
+        SyncRichState();
+        return;
+    }
+    OpenOverlayFilePicker();
+}
+
+void ActivateFilePickerEntry() {
+    if (file_preview) {
+        file_preview = false;
+        file_preview_path.clear();
+        SyncRichState();
+        return;
+    }
+    if (file_picker_entries.empty()) {
+        return;
+    }
+    file_picker_focus = std::clamp(file_picker_focus, 0,
+                                   static_cast<int>(file_picker_entries.size()) - 1);
+    const auto entry = file_picker_entries[file_picker_focus];
+    if (entry.directory) {
+        RefreshFilePicker(entry.path);
+        return;
+    }
+    if (!IsOverlayImagePath(entry.path)) {
+        return;
+    }
+    display_overlay_path = entry.path;
+    display_overlay_enabled.store(true, std::memory_order_release);
+    overlay_mode = OverlayMode::Sidebar;
+    overlay_focus = 1;
+    file_preview = false;
+    file_preview_path.clear();
+    PublishAction(OverlayUI::Action::OverlaySettingsCommitted, false);
+    SyncRichState();
+}
+
+void PreviewFilePickerEntry() {
+    if (file_picker_entries.empty()) {
+        return;
+    }
+    file_picker_focus = std::clamp(file_picker_focus, 0,
+                                   static_cast<int>(file_picker_entries.size()) - 1);
+    const auto& entry = file_picker_entries[file_picker_focus];
+    if (entry.directory || !IsOverlayImagePath(entry.path)) {
+        return;
+    }
+    file_preview = true;
+    file_preview_path = entry.path;
+    SyncRichState();
+}
+
 void ActivateCurrent() {
     if (tabs_focused) {
         if (page == Page::Resume) {
@@ -488,7 +818,9 @@ void ActivateCurrent() {
     }
 
     if (page == Page::Display) {
-        if (selected == DisplaySyncDisplayIndex) {
+        if (selected == DisplayOverlaySettingsIndex) {
+            OpenOverlaySidebar();
+        } else if (selected == DisplaySyncDisplayIndex) {
             PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
         } else if (selected == DisplaySyncOverlayIndex) {
             PublishAction(OverlayUI::Action::SyncOverlaySettings, false);
@@ -554,6 +886,16 @@ bool Init([[maybe_unused]] Vulkan::RendererVulkan& renderer) {
     previous_navigation = {};
     ResetRepeatState();
     VideoCore::SetOverlayMenuState({});
+    rich_renderer_ready =
+        SwitchFrontend::VulkanMenuRenderer::Init(renderer.GetVulkanInstance());
+    if (rich_renderer_ready) {
+        Vulkan::SetOverlayDrawCallback(&DrawRichOverlayCallback);
+        Vulkan::SetOverlayResetCallback(&ResetRichOverlayCallback);
+        SyncRichState();
+    } else {
+        LOG_ERROR(Render_Vulkan, "{} rich overlay renderer unavailable; overlay image picker disabled",
+                  Tag);
+    }
     LOG_INFO(Render_Vulkan, "{} initialized with video_core overlay", Tag);
     return true;
 }
@@ -585,6 +927,7 @@ void Update(PadState* pad) {
         .right = (held & (HidNpadButton_AnyRight | HidNpadButton_StickLRight)) != 0,
         .accept = (held & HidNpadButton_A) != 0,
         .cancel = (held & HidNpadButton_B) != 0,
+        .x = (held & HidNpadButton_X) != 0,
         .shoulder_left = (held & HidNpadButton_L) != 0,
         .shoulder_right = (held & HidNpadButton_R) != 0,
     };
@@ -595,6 +938,90 @@ void Update(PadState* pad) {
     const bool down_step = PressOrRepeat(nav.down, repeat_down);
     const bool shoulder_left_step = PressOrRepeat(nav.shoulder_left, repeat_shoulder_left);
     const bool shoulder_right_step = PressOrRepeat(nav.shoulder_right, repeat_shoulder_right);
+
+    if (overlay_mode == OverlayMode::Sidebar) {
+        if (up_step || down_step) {
+            overlay_focus = overlay_focus == 0 ? 1 : 0;
+            changed = true;
+        }
+        if (shoulder_left_step || shoulder_right_step) {
+            display_overlay_enabled.store(!display_overlay_enabled.load(std::memory_order_relaxed),
+                                          std::memory_order_release);
+            PublishAction(OverlayUI::Action::OverlaySettingsChanged, false);
+            changed = true;
+        }
+        if (Rising(nav.cancel, previous_navigation.cancel)) {
+            PublishAction(OverlayUI::Action::OverlaySettingsCommitted, false);
+            ReturnToDisplayMenu();
+            previous_navigation = nav;
+            return;
+        }
+        if (Rising(nav.accept, previous_navigation.accept)) {
+            ActivateOverlaySidebar();
+            previous_navigation = nav;
+            return;
+        }
+        previous_navigation = nav;
+        if (changed) {
+            SyncRichState();
+        }
+        return;
+    }
+
+    if (overlay_mode == OverlayMode::FilePicker) {
+        if (file_preview && (Rising(nav.cancel, previous_navigation.cancel) ||
+                             Rising(nav.accept, previous_navigation.accept))) {
+            file_preview = false;
+            file_preview_path.clear();
+            SyncRichState();
+            previous_navigation = nav;
+            return;
+        }
+        if (Rising(nav.cancel, previous_navigation.cancel)) {
+            overlay_mode = OverlayMode::Sidebar;
+            file_preview = false;
+            file_preview_path.clear();
+            SyncRichState();
+            previous_navigation = nav;
+            return;
+        }
+        if (!file_picker_entries.empty()) {
+            if (up_step) {
+                file_picker_focus =
+                    std::max(0, std::clamp(file_picker_focus, 0,
+                                           static_cast<int>(file_picker_entries.size()) - 1) -
+                                    1);
+                file_preview = false;
+                file_preview_path.clear();
+                changed = true;
+            }
+            if (down_step) {
+                file_picker_focus =
+                    std::min(static_cast<int>(file_picker_entries.size()) - 1,
+                             std::clamp(file_picker_focus, 0,
+                                        static_cast<int>(file_picker_entries.size()) - 1) +
+                                 1);
+                file_preview = false;
+                file_preview_path.clear();
+                changed = true;
+            }
+        }
+        if (Rising(nav.x, previous_navigation.x)) {
+            PreviewFilePickerEntry();
+            previous_navigation = nav;
+            return;
+        }
+        if (Rising(nav.accept, previous_navigation.accept)) {
+            ActivateFilePickerEntry();
+            previous_navigation = nav;
+            return;
+        }
+        previous_navigation = nav;
+        if (changed) {
+            SyncRichState();
+        }
+        return;
+    }
 
     const auto step_tab = [&](int direction) {
         const int next = (static_cast<int>(page) + direction + tab_count) % tab_count;
@@ -681,8 +1108,10 @@ int ConsumeAction() {
 }
 
 void SetDisplaySettings(const GBAStationDisplaySettings& settings) {
-    fast_forward_multiplier.store(std::clamp(settings.fast_forward_multiplier, 0.1f, 5.0f),
-                                  std::memory_order_release);
+    fast_forward_multiplier.store(
+        std::clamp(settings.fast_forward_multiplier, MinFastForwardMultiplier,
+                   MaxFastForwardMultiplier),
+        std::memory_order_release);
     display_internal_resolution.store(std::clamp(settings.internal_resolution, 1, 4),
                                       std::memory_order_release);
     display_layout.store(LayoutIndex(settings.screen_layout), std::memory_order_release);
@@ -709,6 +1138,7 @@ void SetDisplaySettings(const GBAStationDisplaySettings& settings) {
                                  std::memory_order_release);
     display_overlay_enabled.store(settings.overlay_enabled, std::memory_order_release);
     display_overlay_path = settings.overlay_path;
+    SyncRichState();
     if (visible.load(std::memory_order_acquire)) {
         Repaint();
     }
@@ -741,19 +1171,30 @@ void SetFastForwardActive([[maybe_unused]] bool active) {}
 
 void SetFpsOverlay(bool visible, [[maybe_unused]] float fps) {
     VideoCore::SetFpsOverlayState(visible, fps);
+    SyncRichState();
 }
 
 void PrepareForShutdown() {
     visible.store(false, std::memory_order_release);
     exit_requested.store(true, std::memory_order_release);
     pending_action.store(0, std::memory_order_release);
+    overlay_mode = OverlayMode::Normal;
+    file_preview = false;
+    file_preview_path.clear();
     previous_navigation = {};
     ResetRepeatState();
     VideoCore::SetOverlayMenuState({});
+    SyncRichState();
 }
 
 void Shutdown() {
     PrepareForShutdown();
+    Vulkan::SetOverlayDrawCallback(nullptr);
+    Vulkan::SetOverlayResetCallback(nullptr);
+    if (rich_renderer_ready) {
+        SwitchFrontend::VulkanMenuRenderer::Shutdown();
+        rich_renderer_ready = false;
+    }
     initialized.store(false, std::memory_order_release);
     exit_requested.store(false, std::memory_order_release);
     LOG_INFO(Render_Vulkan, "{} shutdown complete", Tag);

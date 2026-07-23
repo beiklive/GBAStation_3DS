@@ -60,9 +60,20 @@ AttribLoadFlags MakeAttribLoadFlag(Pica::PipelineRegs::VertexAttributeFormat for
 
 std::size_t GetPipelineWorkerThreadCount() {
 #ifdef __SWITCH__
+    // Every pipeline build accesses the same VkPipelineCache, whose host access must be externally
+    // synchronized. Keep pipeline creation serialized to avoid NVK device loss.
     return 1;
 #else
     return std::max(std::thread::hardware_concurrency(), 2U) / 2;
+#endif
+}
+
+std::size_t GetShaderWorkerThreadCount() {
+#ifdef __SWITCH__
+    // Shader translation does not share VkPipelineCache state and can use both background cores.
+    return 2;
+#else
+    return GetPipelineWorkerThreadCount();
 #endif
 }
 
@@ -94,9 +105,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              RenderManager& renderpass_cache_, DescriptorUpdateQueue& update_queue_)
     : instance{instance_}, scheduler{scheduler_}, renderpass_cache{renderpass_cache_},
       update_queue{update_queue_},
-      num_worker_threads{GetPipelineWorkerThreadCount()},
-      pipeline_workers{num_worker_threads, "Pipeline workers"},
-      shader_workers{num_worker_threads, "Shader workers"},
+      num_pipeline_worker_threads{GetPipelineWorkerThreadCount()},
+      num_shader_worker_threads{GetShaderWorkerThreadCount()},
+      pipeline_workers{num_pipeline_worker_threads, "Pipeline workers"},
+      shader_workers{num_shader_worker_threads, "Shader workers"},
       descriptor_heaps{
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), TEXTURE_BINDINGS<1>},
@@ -105,6 +117,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
           instance, vk::ShaderStageFlagBits::eVertex,
           GLSL::GenerateTrivialVertexShader(instance.IsShaderClipDistanceSupported(), true)} {
     scheduler.RegisterOnDispatch([this] { update_queue.Flush(); });
+#ifdef __SWITCH__
+    LOG_INFO(Render_Vulkan, "Switch compilation workers: shaders={} pipelines={} (serialized)",
+             num_shader_worker_threads, num_pipeline_worker_threads);
+#endif
     profile = Pica::Shader::Profile{
         .enable_accurate_mul = false,
         .has_separable_shaders = true,

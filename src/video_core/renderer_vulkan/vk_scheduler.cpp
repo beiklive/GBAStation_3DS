@@ -142,9 +142,9 @@ void Scheduler::DispatchWork() {
 
 void Scheduler::WorkerThread(std::stop_token stop_token) {
     Common::SetCurrentThreadName("VulkanWorker");
-    // Allow cores 0 and 1; prefer core 1 (main is on core 2).
-    // Core 0 absorbs overflow when core 1 is busy.
-    Common::SetCurrentThreadAffinityMask(1, (1ULL << 0) | (1ULL << 1));
+    // Core 2 runs emulation, while core 0 handles shader translation and presentation. Keep queue
+    // recording/submission on core 1 so a shader burst cannot starve Vulkan progress.
+    Common::SetCurrentThreadAffinityMask(1, 1ULL << 1);
 
     const auto TryPopQueue{[this](auto& work) -> bool {
         if (work_queue.empty()) {

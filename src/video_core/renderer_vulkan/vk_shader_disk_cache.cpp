@@ -10,6 +10,7 @@
 #include "common/zstd_compression.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_disk_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/shader/generator/glsl_fs_shader_gen.h"
@@ -252,7 +253,8 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
         }
         it.value() = std::make_unique<GraphicsPipeline>(
             parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
-            *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers);
+            *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers,
+            &parent.scheduler.submit_mutex);
     }
 
     if (known_graphic_pipelines.emplace(hash).second) {
@@ -1454,7 +1456,8 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
             auto [it_pl, _] = graphics_pipelines.try_emplace(pl_hash_opt);
             it_pl.value() = std::make_unique<GraphicsPipeline>(
                 parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
-                *parent.pipeline_layout, shaders, &parent.pipeline_workers);
+                *parent.pipeline_layout, shaders, &parent.pipeline_workers,
+                &parent.scheduler.submit_mutex);
 
 #ifndef __SWITCH__
             it_pl.value()->TryBuild(false);

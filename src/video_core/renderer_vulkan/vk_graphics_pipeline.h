@@ -315,7 +315,7 @@ public:
     explicit GraphicsPipeline(const Instance& instance, RenderManager& renderpass_cache,
                               const PipelineInfo& info, vk::PipelineCache pipeline_cache,
                               vk::PipelineLayout layout, std::array<Shader*, 3> stages,
-                              Common::ThreadWorker* worker);
+                              Common::ThreadWorker* worker, std::mutex* build_mutex);
     ~GraphicsPipeline();
 
     bool TryBuild(bool wait_built);
@@ -330,6 +330,7 @@ private:
     const Instance& instance;
     RenderManager& renderpass_cache;
     Common::ThreadWorker* worker;
+    std::mutex* build_mutex;
 
     vk::UniquePipeline pipeline;
     vk::PipelineLayout pipeline_layout;

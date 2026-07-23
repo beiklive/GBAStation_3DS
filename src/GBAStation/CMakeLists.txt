@@ -16,6 +16,8 @@ add_executable(gbastation
     overlay/overlay_ui.h
     overlay/gbastation_config.cpp
     overlay/gbastation_config.h
+    overlay/vulkan_menu_renderer.cpp
+    overlay/vulkan_menu_renderer.h
     overlay/vulkan_overlay.cpp
     overlay/vulkan_overlay.h
 )
