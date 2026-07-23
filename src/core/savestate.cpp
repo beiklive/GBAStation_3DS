@@ -595,24 +595,15 @@ void System::LoadState(u32 slot) {
         throw std::runtime_error("Invalid savestate");
     }
 
-    std::vector<u8> compressed(static_cast<std::size_t>(file_size - sizeof(CSTHeader)));
-    if (file.ReadBytes(compressed.data(), compressed.size()) != compressed.size()) {
-        throw std::runtime_error("Could not read from file at " + path);
-    }
-    file.Close();
-
-    std::string decompressed = DecompressSaveStateData(compressed);
-    compressed.clear();
-    compressed.shrink_to_fit();
-
-    std::istringstream sstream{std::move(decompressed), std::ios_base::binary};
-    iarchive ia{sstream};
+    ZstdSaveStateInputStreamBuf decompressed_stream{
+        file, static_cast<std::size_t>(file_size - sizeof(CSTHeader))};
+    iarchive ia{decompressed_stream};
     ia&* this;
     const auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - load_start_time)
                              .count();
-    LOG_INFO(Core, "Switch load state slot {} completed in {} ms file_size={}", slot, load_ms,
-             file_size);
+    LOG_INFO(Core, "Switch streaming load state slot {} completed in {} ms file_size={}", slot,
+             load_ms, file_size);
 #else
     std::vector<u8> decompressed;
     {

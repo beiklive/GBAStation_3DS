@@ -3097,6 +3097,7 @@ int Run(int argc, char** argv) {
         }
 
         if (pending_overlay_reinit &&
+            pending_state_request.operation == PendingStateOperation::None &&
             (run_result == Core::System::ResultStatus::Success ||
              run_result == Core::System::ResultStatus::ErrorSavestate) &&
             system.IsPoweredOn()) {
