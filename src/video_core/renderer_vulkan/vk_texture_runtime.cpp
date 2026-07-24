@@ -63,6 +63,18 @@ std::atomic<u64> diagnostic_staging_download_ns{};
 std::atomic<u64> diagnostic_pipeline_builds{};
 std::atomic<u64> diagnostic_pipeline_compile_required{};
 std::atomic<u64> diagnostic_pipeline_build_ns{};
+std::atomic<u64> diagnostic_pipeline_probe_count{};
+std::atomic<u64> diagnostic_pipeline_probe_ns{};
+std::atomic<u64> diagnostic_pipeline_probe_max_ns{};
+std::atomic<u64> diagnostic_pipeline_compile_count{};
+std::atomic<u64> diagnostic_pipeline_compile_ns{};
+std::atomic<u64> diagnostic_pipeline_compile_max_ns{};
+std::atomic<u64> diagnostic_pipeline_queue_wait_count{};
+std::atomic<u64> diagnostic_pipeline_queue_wait_ns{};
+std::atomic<u64> diagnostic_pipeline_queue_wait_max_ns{};
+std::atomic<u64> diagnostic_queue_submit_count{};
+std::atomic<u64> diagnostic_queue_submit_ns{};
+std::atomic<u64> diagnostic_queue_submit_max_ns{};
 
 using DiagnosticClock = std::chrono::steady_clock;
 
@@ -70,6 +82,13 @@ u64 ElapsedNs(DiagnosticClock::time_point start) {
     return static_cast<u64>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(DiagnosticClock::now() - start)
             .count());
+}
+
+void UpdateDiagnosticMax(std::atomic<u64>& target, u64 value) {
+    u64 current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
 }
 
 void AddSurfaceCreateDiagnostics(bool custom, u32 image_count, u64 elapsed_ns) {
@@ -254,11 +273,35 @@ TextureRuntimeDiagnostics GetAndResetTextureRuntimeDiagnostics() {
             diagnostic_pipeline_compile_required.exchange(0, std::memory_order_relaxed),
         .pipeline_build_ns =
             diagnostic_pipeline_build_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_probe_count =
+            diagnostic_pipeline_probe_count.exchange(0, std::memory_order_relaxed),
+        .pipeline_probe_ns =
+            diagnostic_pipeline_probe_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_probe_max_ns =
+            diagnostic_pipeline_probe_max_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_compile_count =
+            diagnostic_pipeline_compile_count.exchange(0, std::memory_order_relaxed),
+        .pipeline_compile_ns =
+            diagnostic_pipeline_compile_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_compile_max_ns =
+            diagnostic_pipeline_compile_max_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_queue_wait_count =
+            diagnostic_pipeline_queue_wait_count.exchange(0, std::memory_order_relaxed),
+        .pipeline_queue_wait_ns =
+            diagnostic_pipeline_queue_wait_ns.exchange(0, std::memory_order_relaxed),
+        .pipeline_queue_wait_max_ns =
+            diagnostic_pipeline_queue_wait_max_ns.exchange(0, std::memory_order_relaxed),
+        .queue_submit_count =
+            diagnostic_queue_submit_count.exchange(0, std::memory_order_relaxed),
+        .queue_submit_ns =
+            diagnostic_queue_submit_ns.exchange(0, std::memory_order_relaxed),
+        .queue_submit_max_ns =
+            diagnostic_queue_submit_max_ns.exchange(0, std::memory_order_relaxed),
     };
 #endif
 }
 
-void AddGraphicsPipelineBuildDiagnostics(bool compile_required, u64 elapsed_ns) {
+void AddGraphicsPipelineBuildDiagnostics(bool probe, bool compile_required, u64 elapsed_ns) {
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     if (compile_required) {
         diagnostic_pipeline_compile_required.fetch_add(1, std::memory_order_relaxed);
@@ -266,8 +309,39 @@ void AddGraphicsPipelineBuildDiagnostics(bool compile_required, u64 elapsed_ns) 
         diagnostic_pipeline_builds.fetch_add(1, std::memory_order_relaxed);
     }
     diagnostic_pipeline_build_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+
+    if (probe) {
+        diagnostic_pipeline_probe_count.fetch_add(1, std::memory_order_relaxed);
+        diagnostic_pipeline_probe_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+        UpdateDiagnosticMax(diagnostic_pipeline_probe_max_ns, elapsed_ns);
+    } else {
+        diagnostic_pipeline_compile_count.fetch_add(1, std::memory_order_relaxed);
+        diagnostic_pipeline_compile_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+        UpdateDiagnosticMax(diagnostic_pipeline_compile_max_ns, elapsed_ns);
+    }
 #else
+    (void)probe;
     (void)compile_required;
+    (void)elapsed_ns;
+#endif
+}
+
+void AddGraphicsPipelineQueueWaitDiagnostics(u64 elapsed_ns) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    diagnostic_pipeline_queue_wait_count.fetch_add(1, std::memory_order_relaxed);
+    diagnostic_pipeline_queue_wait_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+    UpdateDiagnosticMax(diagnostic_pipeline_queue_wait_max_ns, elapsed_ns);
+#else
+    (void)elapsed_ns;
+#endif
+}
+
+void AddVulkanQueueSubmitDiagnostics(u64 elapsed_ns) {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    diagnostic_queue_submit_count.fetch_add(1, std::memory_order_relaxed);
+    diagnostic_queue_submit_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+    UpdateDiagnosticMax(diagnostic_queue_submit_max_ns, elapsed_ns);
+#else
     (void)elapsed_ns;
 #endif
 }

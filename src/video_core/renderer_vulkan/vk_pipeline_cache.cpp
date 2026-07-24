@@ -95,7 +95,13 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, renderpass_cache{renderpass_cache_},
       update_queue{update_queue_},
       num_worker_threads{GetPipelineWorkerThreadCount()},
-      pipeline_workers{num_worker_threads, "Pipeline workers"},
+      pipeline_workers{num_worker_threads, "Pipeline workers", {},
+#ifdef __SWITCH__
+                       Common::ThreadWorker::QueueOrder::RecentFirstWithFifoFairness
+#else
+                       Common::ThreadWorker::QueueOrder::Fifo
+#endif
+      },
       shader_workers{num_worker_threads, "Shader workers"},
       descriptor_heaps{
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
@@ -104,6 +110,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
       trivial_vertex_shader{
           instance, vk::ShaderStageFlagBits::eVertex,
           GLSL::GenerateTrivialVertexShader(instance.IsShaderClipDistanceSupported(), true)} {
+#ifdef __SWITCH__
+    LOG_INFO(Render_Vulkan,
+             "Switch pipeline workers use recent-first scheduling with FIFO fairness");
+#endif
     scheduler.RegisterOnDispatch([this] { update_queue.Flush(); });
     profile = Pica::Shader::Profile{
         .enable_accurate_mul = false,

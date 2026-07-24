@@ -58,6 +58,7 @@
 #include "core/savestate.h"
 #include "core/frontend/applets/default_applets.h"
 #include "core/frontend/image_interface.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/thread.h"
 #include "core/hle/service/am/am.h"
 #include "core/hw/y2r.h"
@@ -366,6 +367,65 @@ void HeartbeatLog(const char* fmt, ...) {
     WriteLogLine(heartbeat_log, "[heartbeat] ", fmt, args);
     va_end(args);
 }
+
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+const char* GuestThreadStatusName(Kernel::ThreadStatus status) {
+    switch (status) {
+    case Kernel::ThreadStatus::Running:
+        return "Running";
+    case Kernel::ThreadStatus::Ready:
+        return "Ready";
+    case Kernel::ThreadStatus::WaitArb:
+        return "WaitArb";
+    case Kernel::ThreadStatus::WaitSleep:
+        return "WaitSleep";
+    case Kernel::ThreadStatus::WaitIPC:
+        return "WaitIPC";
+    case Kernel::ThreadStatus::WaitSynchAny:
+        return "WaitSynchAny";
+    case Kernel::ThreadStatus::WaitSynchAll:
+        return "WaitSynchAll";
+    case Kernel::ThreadStatus::WaitHleEvent:
+        return "WaitHleEvent";
+    case Kernel::ThreadStatus::Dormant:
+        return "Dormant";
+    case Kernel::ThreadStatus::Dead:
+        return "Dead";
+    }
+    return "Unknown";
+}
+
+void LogGuestThreadSnapshot(Core::System& system) {
+    if (!system.KernelRunning()) {
+        return;
+    }
+
+    const auto& kernel = system.Kernel();
+    for (u32 core_id = 0; core_id < system.GetNumCores(); ++core_id) {
+        for (const auto& thread : kernel.GetThreadManager(core_id).GetThreadList()) {
+            if (!thread) {
+                continue;
+            }
+
+            std::string wait_objects;
+            for (const auto& object : thread->wait_objects) {
+                if (!wait_objects.empty()) {
+                    wait_objects += ',';
+                }
+                wait_objects += object ? object->GetName() : "null";
+            }
+
+            HeartbeatLog(
+                "guest thread snapshot: core=%u id=0x%08x status=%s priority=%u pc=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x wait_addr=0x%08x wait_objects=%s name=%s",
+                core_id, thread->thread_id, GuestThreadStatusName(thread->status),
+                thread->current_priority, thread->context.GetProgramCounter(),
+                thread->context.GetLinkRegister(), thread->context.cpu_registers[0],
+                thread->context.cpu_registers[1], thread->wait_address,
+                wait_objects.empty() ? "-" : wait_objects.c_str(), thread->name.c_str());
+        }
+    }
+}
+#endif
 
 std::array<u32, 4> ReadGuestCodeWords(Core::System& system, u32 sampled_pc) {
     std::array<u32, 4> words{};
@@ -3375,7 +3435,20 @@ int Run(int argc, char** argv) {
                            : 0;
             };
             const auto stats = system.GetAndResetPerfStats();
-            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f svc_ipc=%llu svc_unimpl=%llu svc_last_unimpl=0x%04x mvd_calls=%llu mvd_unimpl=%llu runloop_avg_ms=%.2f runloop_max_ms=%.2f rl_calls=%llu rl_active=%llu rl_idle=%llu rl_delayed=%llu rl_sync=%llu rl_resched=%llu rl_ticks=%llu rl_ticks_avg=%.1f rl_delay_avg=%.1f rl_slice_avg=%.1f rl_epc_samples=%llu rl_epc0=0x%08x/0x%08x:%llu rl_epc1=0x%08x/0x%08x:%llu rl_epc2=0x%08x/0x%08x:%llu rl_epc3=0x%08x/0x%08x:%llu rl_ecode0=%08x,%08x,%08x,%08x rl_ecode1=%08x,%08x,%08x,%08x rl_elrctx0=%08x,%08x,%08x,%08x rl_elrctx1=%08x,%08x,%08x,%08x rl_xpc_samples=%llu rl_xpc0=0x%08x:%llu rl_xpc1=0x%08x:%llu rl_xpc2=0x%08x:%llu rl_xpc3=0x%08x:%llu rl_xcode0=%08x,%08x,%08x,%08x rl_xcode1=%08x,%08x,%08x,%08x pending_compilations=%zu jit_new=%llu jit_icache_clear=%llu jit_inv=%llu jit_inv_kb=%.1f jit_cache_mb=%.1f jit_opt=0x%08x jit_hook_hints=%u jit_little=%u jit_fastmem=%u jit_mem_r=%llu jit_mem_w=%llu jit_mem_x=%llu jit_mem_code=%llu jit_fd_miss=%llu jit_fd_update=%llu jit_fd_clear=%llu jit_fd_false=%llu jit_disp_hit=%llu jit_disp_miss=%llu jit_disp_collision=%llu jit_disp0=0x%08llx:%llu jit_disp1=0x%08llx:%llu jit_disp2=0x%08llx:%llu jit_disp3=0x%08llx:%llu jit_dcode0=%08x,%08x,%08x,%08x jit_dcode1=%08x,%08x,%08x,%08x jit_mem_last_r=0x%08x jit_mem_last_w=0x%08x dsp_ticks=%llu dsp_irq=%llu dsp_active_avg=%.1f dsp_active_max=%llu dsp_ms=%.2f dsp_gen_ms=%.2f dsp_out_ms=%.2f timing_advances=%llu timing_events=%llu timing_top=%s timing_top_count=%llu tw_sched=%llu tw_fire=%llu tw_forever=%llu tw_top_id=0x%08x tw_top_core=%u tw_top_name=%s tw_top_status=%s tw_top_count=%llu tw_avg_us=%.1f tw_min_us=%.1f tw_max_us=%.1f tw_le100us=%llu tw_le500us=%llu tw_le1ms=%llu tw_le2ms=%llu tw_le5ms=%llu tw_le16ms=%llu tw_gt16ms=%llu tw_st_sleep=%llu tw_st_any=%llu tw_st_all=%llu tw_st_hle=%llu tw_st_arb=%llu tw_src_generic=%llu tw_src_sleep=%llu tw_src_wait1=%llu tw_src_waitn_all=%llu tw_src_waitn_any=%llu tw_src_hle_sleep=%llu tw_src_hle_async=%llu tw_src_hle_thread=%llu tw_src_arb=%llu tw_src_appmain=%llu tw_src_ipc=%llu timing_slice_avg=%.1f timing_slice_min=%lld timing_slice_max=%lld timing_short_pct=%.1f timing_idle_pct=%.1f gpu_display=%llu gpu_display_sw=%llu gpu_display_mb=%.2f gpu_texcopy=%llu gpu_texcopy_sw=%llu gpu_texcopy_mb=%.2f tex_surf=%llu tex_surf_custom=%llu tex_images=%llu tex_create_ms=%.2f tex_upload=%llu tex_upload_mb=%.2f tex_upload_ms=%.2f tex_stg_up=%llu tex_stg_up_mb=%.2f tex_stg_up_ms=%.2f tex_stg_down=%llu tex_stg_down_mb=%.2f tex_stg_down_ms=%.2f vk_pipe=%llu vk_pipe_compile_req=%llu vk_pipe_ms=%.2f y2r=%llu y2r_direct=%llu y2r_fallback=%llu y2r_pixels=%llu y2r_direct_pixels=%llu y2r_ms=%.2f y2r_direct_ms=%.2f y2r_fallback_ms=%.2f y2r_flush=%llu y2r_flush_inv=%llu y2r_flush_mb=%.2f y2r_flush_ms=%.2f y2r_dir_fmt=%u/%u y2r_dir_rot=%u y2r_dir_block=%u y2r_dir_size=%ux%u y2r_dir_dst=%u+%u y2r_fb_fmt=%u/%u y2r_fb_rot=%u y2r_fb_block=%u y2r_fb_size=%ux%u y2r_fb_dma=y%u+%u,u%u+%u,v%u+%u,yuyv%u+%u,dst%u+%u powered=%d applet=%d keepalives=%llu",
+            static u32 stalled_guest_heartbeats{};
+            const bool guest_stalled = system.IsPoweredOn() &&
+                                       !SwitchFrontend::VulkanOverlay::IsVisible() &&
+                                       renderer_frame > 120 && frontend_fps >= 30.0 &&
+                                       stats.game_fps < 0.1;
+            if (guest_stalled) {
+                ++stalled_guest_heartbeats;
+                if (stalled_guest_heartbeats == 3 || stalled_guest_heartbeats % 10 == 0) {
+                    LogGuestThreadSnapshot(system);
+                }
+            } else {
+                stalled_guest_heartbeats = 0;
+            }
+            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f svc_ipc=%llu svc_unimpl=%llu svc_last_unimpl=0x%04x mvd_calls=%llu mvd_unimpl=%llu runloop_avg_ms=%.2f runloop_max_ms=%.2f rl_calls=%llu rl_active=%llu rl_idle=%llu rl_delayed=%llu rl_sync=%llu rl_resched=%llu rl_ticks=%llu rl_ticks_avg=%.1f rl_delay_avg=%.1f rl_slice_avg=%.1f rl_epc_samples=%llu rl_epc0=0x%08x/0x%08x:%llu rl_epc1=0x%08x/0x%08x:%llu rl_epc2=0x%08x/0x%08x:%llu rl_epc3=0x%08x/0x%08x:%llu rl_ecode0=%08x,%08x,%08x,%08x rl_ecode1=%08x,%08x,%08x,%08x rl_elrctx0=%08x,%08x,%08x,%08x rl_elrctx1=%08x,%08x,%08x,%08x rl_xpc_samples=%llu rl_xpc0=0x%08x:%llu rl_xpc1=0x%08x:%llu rl_xpc2=0x%08x:%llu rl_xpc3=0x%08x:%llu rl_xcode0=%08x,%08x,%08x,%08x rl_xcode1=%08x,%08x,%08x,%08x pending_compilations=%zu jit_new=%llu jit_icache_clear=%llu jit_inv=%llu jit_inv_kb=%.1f jit_cache_mb=%.1f jit_opt=0x%08x jit_hook_hints=%u jit_little=%u jit_fastmem=%u jit_mem_r=%llu jit_mem_w=%llu jit_mem_x=%llu jit_mem_code=%llu jit_fd_miss=%llu jit_fd_update=%llu jit_fd_clear=%llu jit_fd_false=%llu jit_disp_hit=%llu jit_disp_miss=%llu jit_disp_collision=%llu jit_disp0=0x%08llx:%llu jit_disp1=0x%08llx:%llu jit_disp2=0x%08llx:%llu jit_disp3=0x%08llx:%llu jit_dcode0=%08x,%08x,%08x,%08x jit_dcode1=%08x,%08x,%08x,%08x jit_mem_last_r=0x%08x jit_mem_last_w=0x%08x dsp_ticks=%llu dsp_irq=%llu dsp_active_avg=%.1f dsp_active_max=%llu dsp_ms=%.2f dsp_gen_ms=%.2f dsp_out_ms=%.2f timing_advances=%llu timing_events=%llu timing_top=%s timing_top_count=%llu tw_sched=%llu tw_fire=%llu tw_forever=%llu tw_top_id=0x%08x tw_top_core=%u tw_top_name=%s tw_top_status=%s tw_top_count=%llu tw_avg_us=%.1f tw_min_us=%.1f tw_max_us=%.1f tw_le100us=%llu tw_le500us=%llu tw_le1ms=%llu tw_le2ms=%llu tw_le5ms=%llu tw_le16ms=%llu tw_gt16ms=%llu tw_st_sleep=%llu tw_st_any=%llu tw_st_all=%llu tw_st_hle=%llu tw_st_arb=%llu tw_src_generic=%llu tw_src_sleep=%llu tw_src_wait1=%llu tw_src_waitn_all=%llu tw_src_waitn_any=%llu tw_src_hle_sleep=%llu tw_src_hle_async=%llu tw_src_hle_thread=%llu tw_src_arb=%llu tw_src_appmain=%llu tw_src_ipc=%llu timing_slice_avg=%.1f timing_slice_min=%lld timing_slice_max=%lld timing_short_pct=%.1f timing_idle_pct=%.1f gpu_display=%llu gpu_display_sw=%llu gpu_display_mb=%.2f gpu_texcopy=%llu gpu_texcopy_sw=%llu gpu_texcopy_mb=%.2f tex_surf=%llu tex_surf_custom=%llu tex_images=%llu tex_create_ms=%.2f tex_upload=%llu tex_upload_mb=%.2f tex_upload_ms=%.2f tex_stg_up=%llu tex_stg_up_mb=%.2f tex_stg_up_ms=%.2f tex_stg_down=%llu tex_stg_down_mb=%.2f tex_stg_down_ms=%.2f vk_pipe=%llu vk_pipe_compile_req=%llu vk_pipe_ms=%.2f vk_probe=%llu vk_probe_ms=%.2f vk_probe_max_ms=%.2f vk_compile=%llu vk_compile_ms=%.2f vk_compile_max_ms=%.2f vk_pipe_q=%llu vk_pipe_q_ms=%.2f vk_pipe_q_max_ms=%.2f vk_submit=%llu vk_submit_ms=%.2f vk_submit_max_ms=%.2f y2r=%llu y2r_direct=%llu y2r_fallback=%llu y2r_pixels=%llu y2r_direct_pixels=%llu y2r_ms=%.2f y2r_direct_ms=%.2f y2r_fallback_ms=%.2f y2r_flush=%llu y2r_flush_inv=%llu y2r_flush_mb=%.2f y2r_flush_ms=%.2f y2r_dir_fmt=%u/%u y2r_dir_rot=%u y2r_dir_block=%u y2r_dir_size=%ux%u y2r_dir_dst=%u+%u y2r_fb_fmt=%u/%u y2r_fb_rot=%u y2r_fb_block=%u y2r_fb_size=%ux%u y2r_fb_dma=y%u+%u,u%u+%u,v%u+%u,yuyv%u+%u,dst%u+%u powered=%d applet=%d keepalives=%llu",
                          static_cast<unsigned long long>(loop_count), loops_per_sec,
                          renderer_frame, frame_delta, frontend_fps, stats.system_fps,
                          stats.game_fps, stats.emulation_speed, stats.time_hle_svc * 1000.0,
@@ -3565,6 +3638,19 @@ int Run(int argc, char** argv) {
                          static_cast<unsigned long long>(texture_stats.pipeline_builds),
                          static_cast<unsigned long long>(texture_stats.pipeline_compile_required),
                          static_cast<double>(texture_stats.pipeline_build_ns) / 1000000.0,
+                         static_cast<unsigned long long>(texture_stats.pipeline_probe_count),
+                         static_cast<double>(texture_stats.pipeline_probe_ns) / 1000000.0,
+                         static_cast<double>(texture_stats.pipeline_probe_max_ns) / 1000000.0,
+                         static_cast<unsigned long long>(texture_stats.pipeline_compile_count),
+                         static_cast<double>(texture_stats.pipeline_compile_ns) / 1000000.0,
+                         static_cast<double>(texture_stats.pipeline_compile_max_ns) / 1000000.0,
+                         static_cast<unsigned long long>(texture_stats.pipeline_queue_wait_count),
+                         static_cast<double>(texture_stats.pipeline_queue_wait_ns) / 1000000.0,
+                         static_cast<double>(texture_stats.pipeline_queue_wait_max_ns) /
+                             1000000.0,
+                         static_cast<unsigned long long>(texture_stats.queue_submit_count),
+                         static_cast<double>(texture_stats.queue_submit_ns) / 1000000.0,
+                         static_cast<double>(texture_stats.queue_submit_max_ns) / 1000000.0,
                          static_cast<unsigned long long>(y2r_stats.conversions),
                          static_cast<unsigned long long>(y2r_stats.direct_conversions),
                          static_cast<unsigned long long>(y2r_stats.fallback_conversions),

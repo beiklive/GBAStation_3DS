@@ -20,15 +20,13 @@
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <imstb_truetype.h>
-#define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include "GBAStation/switch_libnx.h"
 #include "GBAStation/shaders/menu_frag_spv.h"
 #include "GBAStation/shaders/menu_vert_spv.h"
-#include "GBAStation/switch_libnx.h"
 #include "common/logging/log.h"
-#include "video_core/overlay.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_memory_util.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -38,7 +36,7 @@ namespace {
 
 constexpr const char* Tag = "[gbastation-menu-renderer]";
 constexpr u32 AtlasWidth = 1024;
-constexpr u32 AtlasHeight = 1024;
+constexpr u32 AtlasHeight = 2048;
 constexpr u32 GradientWidth = 512;
 constexpr u32 GradientHeight = 4;
 constexpr float PackedFontSize = 32.0f;
@@ -117,6 +115,8 @@ std::string loaded_preview_path;
 bool initialized{};
 
 std::vector<u8> font_data;
+std::vector<u8> extended_font_data;
+std::vector<u8> standard_font_data;
 std::vector<u8> nintendo_font_data;
 std::vector<u8> material_font_data;
 std::vector<u8> atlas_pixels;
@@ -162,6 +162,18 @@ bool ReadFile(const char* path, std::vector<u8>& output) {
     return true;
 }
 
+bool CopySharedFont(PlSharedFontType type, std::vector<u8>& output) {
+    PlFontData shared_font{};
+    const LibnxResult rc = plGetSharedFontByType(&shared_font, type);
+    if (rc != 0 || !shared_font.address || shared_font.size == 0) {
+        output.clear();
+        return false;
+    }
+    output.resize(shared_font.size);
+    std::memcpy(output.data(), shared_font.address, shared_font.size);
+    return true;
+}
+
 std::vector<int> DecodeUtf8(std::string_view text) {
     std::vector<int> output;
     for (std::size_t i = 0; i < text.size();) {
@@ -196,24 +208,19 @@ bool BuildFontAtlas() {
         LOG_ERROR(Render_Vulkan, "{} pl:u initialization failed", Tag);
         return false;
     }
-    PlFontData shared_font{};
-    LibnxResult rc = plGetSharedFontByType(&shared_font, PlSharedFontType_ChineseSimplified);
-    if (rc != 0 || !shared_font.address || shared_font.size == 0) {
+    CopySharedFont(PlSharedFontType_ExtChineseSimplified, extended_font_data);
+    CopySharedFont(PlSharedFontType_ChineseSimplified, font_data);
+    CopySharedFont(PlSharedFontType_Standard, standard_font_data);
+    if (extended_font_data.empty() && font_data.empty() && standard_font_data.empty()) {
         plExit();
-        LOG_ERROR(Render_Vulkan, "{} shared Chinese font unavailable rc=0x{:x}", Tag, rc);
+        LOG_ERROR(Render_Vulkan, "{} shared Chinese/standard fonts unavailable", Tag);
         return false;
     }
-    font_data.resize(shared_font.size);
-    std::memcpy(font_data.data(), shared_font.address, shared_font.size);
-    PlFontData nintendo_font{};
-    rc = plGetSharedFontByType(&nintendo_font, PlSharedFontType_NintendoExt);
-    if (rc != 0 || !nintendo_font.address || nintendo_font.size == 0) {
+    if (!CopySharedFont(PlSharedFontType_NintendoExt, nintendo_font_data)) {
         plExit();
-        LOG_ERROR(Render_Vulkan, "{} Nintendo extended font unavailable rc=0x{:x}", Tag, rc);
+        LOG_ERROR(Render_Vulkan, "{} Nintendo extended font unavailable", Tag);
         return false;
     }
-    nintendo_font_data.resize(nintendo_font.size);
-    std::memcpy(nintendo_font_data.data(), nintendo_font.address, nintendo_font.size);
     plExit();
 
     constexpr std::array<const char*, 3> MaterialPaths{{
@@ -236,12 +243,13 @@ bool BuildFontAtlas() {
     constexpr std::string_view UsedText =
         "游戏菜单返回游戏保存状态读取状态金手指画面设置重置退出"
         "档位已有状态空存档槽继续按确定返回列表不可用"
-        "暂无金手指功能将在后续版本提供屏幕布局画面方向整数倍缩放屏幕间距"
-        "自定义画面布局调整当前项上屏布局下屏布局大小缩放偏移"
+        "暂无金手指已加载的金手指会在这里显示金手指已切换设置失败"
+        "功能将在后续版本提供屏幕布局画面方向整数倍缩放屏幕间距透明度"
+        "自定义画面布局调整当前项上屏布局下屏布局缩放偏移"
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
         "同步遮罩同步画面设置执行已同步到个游戏失败"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
-        "竖向横向上屏优先混合仅上屏仅下屏自定义透明度开启关闭°"
+        "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
         "GBAStation 3DS Resume Save Load Cheats Display Reset Exit Slot Empty Occupied A B X";
     std::set<int> unique;
@@ -251,7 +259,54 @@ bool BuildFontAtlas() {
     for (const int cp : DecodeUtf8(UsedText)) {
         unique.insert(cp);
     }
+    const auto cheats = OverlayUI::GetCheats();
+    for (const auto& cheat : cheats) {
+        for (const int cp : DecodeUtf8(cheat.name)) {
+            unique.insert(cp);
+        }
+    }
+    for (const int cp : DecodeUtf8(OverlayUI::GetGameTitle())) {
+        unique.insert(cp);
+    }
     std::vector<int> regular_codepoints(unique.begin(), unique.end());
+    struct FontPackSource {
+        const char* name{};
+        const std::vector<u8>* data{};
+        stbtt_fontinfo info{};
+        bool valid{};
+        std::vector<int> points;
+    };
+    std::vector<FontPackSource> regular_sources;
+    auto add_regular_font = [&](const char* name, const std::vector<u8>& data) {
+        if (data.empty()) {
+            return;
+        }
+        FontPackSource source{.name = name, .data = &data};
+        const int offset = stbtt_GetFontOffsetForIndex(data.data(), 0);
+        source.valid = offset >= 0 && stbtt_InitFont(&source.info, data.data(), offset) != 0;
+        if (source.valid) {
+            regular_sources.push_back(std::move(source));
+        }
+    };
+    add_regular_font("ExtChineseSimplified", extended_font_data);
+    add_regular_font("ChineseSimplified", font_data);
+    add_regular_font("Standard", standard_font_data);
+    if (regular_sources.empty()) {
+        LOG_ERROR(Render_Vulkan, "{} no valid shared font for menu text", Tag);
+        return false;
+    }
+    u32 unsupported_regular = 0;
+    for (const int cp : regular_codepoints) {
+        auto it = std::find_if(regular_sources.begin(), regular_sources.end(),
+                               [cp](const FontPackSource& source) {
+                                   return stbtt_FindGlyphIndex(&source.info, cp) != 0;
+                               });
+        if (it == regular_sources.end()) {
+            ++unsupported_regular;
+            it = regular_sources.begin();
+        }
+        it->points.push_back(cp);
+    }
     const std::vector<int> nintendo_codepoints{
         NintendoIconA, NintendoIconB, NintendoIconX, NintendoIconL, NintendoIconR,
     };
@@ -265,14 +320,22 @@ bool BuildFontAtlas() {
     codepoints.insert(codepoints.end(), material_codepoints.begin(), material_codepoints.end());
     packed_chars.resize(codepoints.size());
     atlas_pixels.assign(AtlasWidth * AtlasHeight, 0);
+    std::unordered_map<int, std::size_t> codepoint_offsets;
+    codepoint_offsets.reserve(codepoints.size());
+    for (std::size_t i = 0; i < codepoints.size(); ++i) {
+        codepoint_offsets.emplace(codepoints[i], i);
+    }
 
     stbtt_pack_context context{};
     if (!stbtt_PackBegin(&context, atlas_pixels.data(), AtlasWidth, AtlasHeight, 0, 2, nullptr)) {
         return false;
     }
     stbtt_PackSetOversampling(&context, 1, 1);
-    auto pack_range = [&](const std::vector<u8>& data, const std::vector<int>& points,
-                          std::size_t offset) {
+    auto pack_contiguous_range = [&](const std::vector<u8>& data, const std::vector<int>& points,
+                                     std::size_t offset) {
+        if (points.empty()) {
+            return true;
+        }
         stbtt_pack_range range{};
         range.font_size = PackedFontSize;
         range.array_of_unicode_codepoints = const_cast<int*>(points.data());
@@ -281,16 +344,49 @@ bool BuildFontAtlas() {
         return stbtt_GetFontOffsetForIndex(data.data(), 0) >= 0 &&
                stbtt_PackFontRanges(&context, data.data(), 0, &range, 1) != 0;
     };
-    bool packed = pack_range(font_data, regular_codepoints, 0);
-    packed = packed && pack_range(nintendo_font_data, nintendo_codepoints,
-                                  regular_codepoints.size());
-    packed = packed && pack_range(material_font_data, material_codepoints,
-                                  regular_codepoints.size() + nintendo_codepoints.size());
+    auto pack_sparse_range = [&](const FontPackSource& source) {
+        if (source.points.empty()) {
+            return true;
+        }
+        std::vector<stbtt_packedchar> chars(source.points.size());
+        stbtt_pack_range range{};
+        range.font_size = PackedFontSize;
+        range.array_of_unicode_codepoints = const_cast<int*>(source.points.data());
+        range.num_chars = static_cast<int>(source.points.size());
+        range.chardata_for_range = chars.data();
+        if (stbtt_PackFontRanges(&context, source.data->data(), 0, &range, 1) == 0) {
+            LOG_ERROR(Render_Vulkan, "{} failed to pack {} menu font codepoints", Tag,
+                      source.name);
+            return false;
+        }
+        for (std::size_t i = 0; i < source.points.size(); ++i) {
+            const auto offset_it = codepoint_offsets.find(source.points[i]);
+            if (offset_it != codepoint_offsets.end()) {
+                packed_chars[offset_it->second] = chars[i];
+            }
+        }
+        return true;
+    };
+    bool packed = true;
+    for (const auto& source : regular_sources) {
+        packed = packed && pack_sparse_range(source);
+    }
+    packed = packed && pack_contiguous_range(nintendo_font_data, nintendo_codepoints,
+                                             regular_codepoints.size());
+    packed = packed && pack_contiguous_range(
+                           material_font_data, material_codepoints,
+                           regular_codepoints.size() + nintendo_codepoints.size());
     stbtt_PackEnd(&context);
     if (!packed) {
         LOG_ERROR(Render_Vulkan, "{} failed to pack shared font", Tag);
         return false;
     }
+    LOG_INFO(Render_Vulkan,
+             "{} font atlas regular={} ext={} zh={} std={} unsupported={} material={}", Tag,
+             regular_codepoints.size(), regular_sources.size() > 0 ? regular_sources[0].points.size() : 0,
+             regular_sources.size() > 1 ? regular_sources[1].points.size() : 0,
+             regular_sources.size() > 2 ? regular_sources[2].points.size() : 0,
+             unsupported_regular, material_codepoints.size());
     glyph_indices.clear();
     for (std::size_t i = 0; i < codepoints.size(); ++i) {
         glyph_indices.emplace(codepoints[i], i);
@@ -1108,28 +1204,14 @@ void DrawFastForwardIndicator(const State& state) {
     Text(54, 41, 18, {0.94f, 0.97f, 1.0f, 0.94f}, value);
 }
 
-void DrawFpsIndicator(const State& state) {
-    if (!state.show_fps || state.current_fps <= 0.0f) {
-        return;
-    }
-    char value[24]{};
-    std::snprintf(value, sizeof(value), "FPS: %.1f", state.current_fps);
-    Text(12, 30, 18, {0.20f, 1.0f, 0.24f, 0.96f}, value);
-}
-
 const char* DisplayLayoutLabel(std::string_view layout) {
-    if (layout == "vertical")
-        return "竖向";
-    if (layout == "horizontal")
-        return "横向";
-    if (layout == "hybrid")
-        return "混合";
-    if (layout == "top")
-        return "仅上屏";
-    if (layout == "bottom")
-        return "仅下屏";
-    if (layout == "custom")
-        return "自定义";
+    if (layout == "vertical") return "竖向";
+    if (layout == "horizontal") return "横向";
+    if (layout == "priority_bottom") return "下屏优先";
+    if (layout == "hybrid") return "混合";
+    if (layout == "top") return "仅上屏";
+    if (layout == "bottom") return "仅下屏";
+    if (layout == "custom") return "自定义";
     return "上屏优先";
 }
 
@@ -1143,12 +1225,11 @@ void DrawCustomLayoutSidebar(const State& state) {
     constexpr float RowW = 420.0f;
     constexpr float RowH = 52.0f;
 
-    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.16f});
+    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.04f});
     Rect(PanelX, 0, PanelW, 720, {0.015f, 0.020f, 0.030f, 0.52f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
-    IconCentered(850, 47, 27, Cyan, 0xE3C9);
-    Text(878, 54, 27, White, "自定义画面布局");
-    Text(830, 87, 16, Muted, "L/R 调整   A 重置当前项   B 保存返回");
+    Text(830, 54, 27, White, "自定义画面布局");
+    Text(830, 87, 16, Muted, "B 返回   A 重置当前项");
 
     auto section = [&](float y, const char* label) {
         Rect(830, y + 12, 72, 1, {1.0f, 1.0f, 1.0f, 0.13f});
@@ -1180,54 +1261,19 @@ void DrawCustomLayoutSidebar(const State& state) {
     };
     auto opacityValue = [](float value) {
         char text[24]{};
-        std::snprintf(text, sizeof(text), "%.0f%%", std::clamp(value, 0.0f, 1.0f) * 100.0f);
+        std::snprintf(text, sizeof(text), "%.0f%%", value * 100.0f);
         return std::string{text};
     };
 
     section(116, "上屏布局");
-    row(0, 150, "大小", scaleValue(state.display.top_scale));
+    row(0, 150, "缩放", scaleValue(state.display.top_scale));
     row(1, 210, "X 偏移", offsetValue(state.display.top_offset_x));
     row(2, 270, "Y 偏移", offsetValue(state.display.top_offset_y));
     section(350, "下屏布局");
-    row(3, 384, "大小", scaleValue(state.display.bottom_scale));
+    row(3, 384, "缩放", scaleValue(state.display.bottom_scale));
     row(4, 444, "X 偏移", offsetValue(state.display.bottom_offset_x));
     row(5, 504, "Y 偏移", offsetValue(state.display.bottom_offset_y));
     row(6, 564, "透明度", opacityValue(state.display.bottom_opacity));
-}
-
-void DrawShaderCompileIndicator(const State& state) {
-    if (!VideoCore::GetShaderCompileNoticeState()) {
-        return;
-    }
-    const u32 pending = VideoCore::GetPendingShaderCompiles();
-    if (pending == 0) {
-        return;
-    }
-    char value[64]{};
-    std::snprintf(value, sizeof(value), "正在编译着色器 %u", pending);
-    const float width = std::min(330.0f, MeasureText(value, 18.0f) + 34.0f);
-    Rect(12, 42, width, 38, {0.0f, 0.0f, 0.0f, 0.64f});
-    Border(12, 42, width, 38, 1.0f, {0.31f, 0.70f, 1.0f, 0.44f});
-    Text(28, 68, 18, {0.72f, 0.88f, 1.0f, 0.98f}, value);
-}
-
-std::string CompactPathForWidth(std::string_view path, float max_width, float size) {
-    if (path.empty()) {
-        return "未选择";
-    }
-    if (MeasureText(path, size) <= max_width) {
-        return std::string{path};
-    }
-    const std::string name = Filename(path);
-    const std::string shortened = ".../" + name;
-    if (MeasureText(shortened, size) <= max_width) {
-        return shortened;
-    }
-    std::string text = shortened;
-    while (text.size() > 4 && MeasureText(text, size) > max_width) {
-        text.erase(text.begin() + 3);
-    }
-    return text;
 }
 
 void DrawOverlaySidebar(const State& state) {
@@ -1237,16 +1283,16 @@ void DrawOverlaySidebar(const State& state) {
     constexpr float PanelX = 800.0f;
     constexpr float RowX = 830.0f;
     constexpr float RowW = 420.0f;
-    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.16f});
-    Rect(PanelX, 0, 480, 720, {0.015f, 0.020f, 0.030f, 0.52f});
+    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.28f});
+    Rect(PanelX, 0, 480, 720, {0.015f, 0.020f, 0.030f, 0.97f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
     IconCentered(850, 47, 27, Cyan, 0xE53B);
-    Text(878, 54, 27, White, "遮罩设置");
+    Text(878, 54, 27, White, "遮罩选择");
     Text(830, 88, 16, Muted, "选择 PNG 遮罩文件");
-    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩选择"}};
+    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩文件"}};
     const std::array<std::string, 2> values{{
         state.display.overlay_enabled ? "开启" : "关闭",
-        CompactPathForWidth(state.display.overlay_path, 214.0f, 17.0f),
+        state.display.overlay_path.empty() ? "未选择" : Filename(state.display.overlay_path),
     }};
     for (int row = 0; row < 2; ++row) {
         const float y = 132.0f + row * 66.0f;
@@ -1254,14 +1300,12 @@ void DrawOverlaySidebar(const State& state) {
         Rect(RowX, y, RowW, 54,
              focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
                      : std::array<float, 4>{1, 1, 1, 0.045f});
-        if (focused)
-            FlowBorder(RowX, y, RowW, 54, 3.0f);
-        else
-            Border(RowX, y, RowW, 54, 1.0f, {1, 1, 1, 0.10f});
+        if (focused) FlowBorder(RowX, y, RowW, 54, 3.0f);
+        else Border(RowX, y, RowW, 54, 1.0f, {1, 1, 1, 0.10f});
         Text(RowX + 18, y + 35, 20, White, labels[row]);
-        TextRight(RowX + RowW - (row == 1 ? 48.0f : 18.0f), y + 34, 17, Cyan, values[row]);
-        if (row == 1)
-            IconCentered(RowX + RowW - 20, y + 27, 23, Cyan, 0xE5CC);
+        TextRight(RowX + RowW - (row == 1 ? 48.0f : 18.0f), y + 34, 17, Cyan,
+                  values[row]);
+        if (row == 1) IconCentered(RowX + RowW - 20, y + 27, 23, Cyan, 0xE5CC);
     }
     IconCentered(1030, 672, 27, Muted, NintendoIconB);
     Text(1052, 681, 18, Muted, "返回并保存");
@@ -1299,8 +1343,8 @@ void DrawFilePicker(const State& state) {
     constexpr float BodyH = 492.0f;
     constexpr float RowH = 84.0f;
 
-    Rect(0, 0, 1280, 720, {0.010f, 0.014f, 0.020f, 0.68f});
-    Rect(0, 0, 1280, TopH, {0.0f, 0.0f, 0.0f, 0.34f});
+    Rect(0, 0, 1280, 720, {0.010f, 0.014f, 0.020f, 0.985f});
+    Rect(0, 0, 1280, TopH, {0.0f, 0.0f, 0.0f, 0.42f});
     Rect(0, TopH, 1280, 1, {1, 1, 1, 0.12f});
     Text(32, 61, 24, White, state.file_picker_path.empty() ? "/" : state.file_picker_path);
 
@@ -1374,10 +1418,11 @@ void DrawFilePicker(const State& state) {
     }
 
     const float footer_y = 720.0f - FooterH;
-    Rect(0, footer_y, 1280, FooterH, {0.0f, 0.0f, 0.0f, 0.34f});
+    Rect(0, footer_y, 1280, FooterH, {0.0f, 0.0f, 0.0f, 0.42f});
     Rect(0, footer_y, 1280, 1, {1, 1, 1, 0.12f});
     float right = 1244.0f;
-    auto hint = [&](int icon, const char* label, const std::array<float, 4>& color, float width) {
+    auto hint = [&](int icon, const char* label, const std::array<float, 4>& color,
+                    float width) {
         right -= width;
         IconCentered(right + 19, footer_y + 48, 34, {1, 1, 1, 0.92f}, icon);
         Text(right + 44, footer_y + 57, 26, color, label);
@@ -1410,42 +1455,40 @@ void BuildMenu(const State& state) {
     constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.78f};
     constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
 
-    Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.16f});
-    Rect(0, 0, 408, 720, {0.015f, 0.020f, 0.030f, 0.58f});
-    Rect(408, 0, 872, 720, {0.015f, 0.020f, 0.030f, 0.46f});
-    Rect(408, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
-    IconCentered(68, 47, 27, Cyan, 0xE5D2);
-    Text(94, 56, 27, White, "游戏菜单");
-    Rect(48, 92, 336, 1, {1, 1, 1, 0.14f});
+    for (int strip = 0; strip < 8; ++strip) {
+        const float t = static_cast<float>(strip) / 7.0f;
+        Rect(0, strip * 90.0f, 1280, 90,
+             {0.08f - t * 0.03f, 0.10f - t * 0.04f, 0.13f - t * 0.05f, 0.94f});
+    }
+    Text(64, 58, 26, White, "游戏菜单");
+    Rect(56, 92, 1168, 1, {1, 1, 1, 0.18f});
 
     constexpr float LeftX = 48.0f;
     constexpr float LeftY = 116.0f;
     constexpr float MenuW = 336.0f;
     constexpr float ItemH = 70.0f;
     constexpr float Step = 80.0f;
-    const int selected =
-        std::clamp(static_cast<int>(state.item), 0, static_cast<int>(Item::Count) - 1);
+    const int selected = std::clamp(static_cast<int>(state.item), 0,
+                                    static_cast<int>(Item::Count) - 1);
     for (int i = 0; i < static_cast<int>(Item::Count); ++i) {
         const float y = LeftY + i * Step;
         const bool focused = i == selected;
-        Rect(LeftX, y, MenuW, ItemH,
-             focused ? (state.content_focused ? std::array<float, 4>{0.13f, 0.42f, 0.70f, 0.20f}
-                                              : std::array<float, 4>{0.00f, 0.30f, 0.50f, 0.52f})
-                     : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.035f});
         if (focused) {
+            Rect(LeftX, y, MenuW, ItemH,
+                 state.content_focused ? std::array<float, 4>{0.13f, 0.42f, 0.70f, 0.20f}
+                                       : std::array<float, 4>{0.00f, 0.30f, 0.50f, 0.52f});
             if (state.content_focused) {
                 Border(LeftX, y, MenuW, ItemH, 1.0f, {0.31f, 0.70f, 1.0f, 0.50f});
             } else {
                 FlowBorder(LeftX, y, MenuW, ItemH, 3.0f);
             }
-        } else {
-            Border(LeftX, y, MenuW, ItemH, 1.0f, {1.0f, 1.0f, 1.0f, 0.08f});
         }
-        IconCentered(LeftX + 34, y + ItemH * 0.5f, 25, focused ? White : Muted, ItemIcons[i]);
+        IconCentered(LeftX + 34, y + ItemH * 0.5f, 25,
+                     focused ? White : Muted, ItemIcons[i]);
         Text(LeftX + 64, y + 44, 22, focused ? White : Muted, ItemLabels[i]);
     }
     Rect(LeftX + 18, LeftY + 5 * Step - 14, MenuW - 36, 1, {1, 1, 1, 0.14f});
-    Rect(408, 92, 872, 1, {1, 1, 1, 0.14f});
+    Rect(404, 110, 1, 500, {1, 1, 1, 0.08f});
 
     constexpr float ContentX = 432.0f;
     constexpr float ContentY = 110.0f;
@@ -1462,45 +1505,28 @@ void BuildMenu(const State& state) {
             const bool focused = state.content_focused && state.content_focus == slot;
             Rect(ContentX, y, 520, row_h,
                  focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
-                         : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.045f});
+                         : std::array<float, 4>{0.176f, 0.176f, 0.188f, 0.58f});
             if (focused) {
                 FlowBorder(ContentX, y, 520, row_h, 3.0f);
             } else {
-                Border(ContentX, y, 520, row_h, 1.0f, {1.0f, 1.0f, 1.0f, 0.10f});
+                Border(ContentX, y, 520, row_h, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
             }
             char slot_name[32]{};
             std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
             Text(ContentX + 16, y + 28, 20, White, slot_name);
             const char* status = state.occupied[slot] ? "已有状态" : "空存档槽";
-            TextRight(ContentX + 500, y + 27, 16, state.occupied[slot] ? Cyan : Muted, status);
+            TextRight(ContentX + 500, y + 27, 16,
+                      state.occupied[slot] ? Cyan : Muted, status);
         }
-        Rect(986, 176, 220, 420, {1.0f, 1.0f, 1.0f, 0.035f});
-        Border(976, 166, 240, 440, 1, {1.0f, 1.0f, 1.0f, 0.10f});
-        Text(1020, 380, 24, Muted, "NO THUMB");
     } else if (item == Item::Display) {
         const std::array<const char*, 10> labels{{
-            "快进倍率",
-            "3D分辨率",
-            "整数倍缩放",
-            "屏幕布局",
-            "自定义画面布局",
-            "画面方向",
-            "屏幕间距",
-            "遮罩选择",
-            "同步遮罩",
-            "同步画面设置",
+            "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局",
+            "自定义画面布局", "画面方向", "屏幕间距", "遮罩选择",
+            "同步遮罩", "同步画面设置",
         }};
         const std::array<int, 10> icons{{
-            0xE01F,
-            0xE433,
-            0xE3F4,
-            0xE8F1,
-            0xE3C9,
-            0xE41A,
-            0xE8D4,
-            0xE53B,
-            0xE873,
-            0xE873,
+            0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
+            0xE873, 0xE873,
         }};
         const bool custom_enabled = state.display.screen_layout == "custom";
         std::array<std::string, 10> values{};
@@ -1531,21 +1557,23 @@ void BuildMenu(const State& state) {
             const bool focused = state.content_focused && state.content_focus == row;
             const bool enabled = row != 4 || custom_enabled;
             Rect(ContentX, y, ContentW, RowH,
-                 focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
-                         : std::array<float, 4>{1, 1, 1, 0.045f});
+                  focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                          : std::array<float, 4>{1, 1, 1, 0.045f});
             if (focused) {
                 FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
             } else {
                 Border(ContentX, y, ContentW, RowH, 1.0f, {1, 1, 1, 0.10f});
             }
-            IconCentered(ContentX + 24, y + RowH * 0.5f, 20, enabled ? Cyan : Muted, icons[row]);
+            IconCentered(ContentX + 24, y + RowH * 0.5f, 20,
+                         enabled ? Cyan : Muted, icons[row]);
             Text(ContentX + 46, y + 30, 18, enabled ? White : Muted, labels[row]);
             if (row == 0 || row == 1 || row == 3 || row == 5 || row == 6) {
-                SelectorValue(ContentX, y, ContentW, RowH, values[row], enabled ? Cyan : Muted);
+                SelectorValue(ContentX, y, ContentW, RowH, values[row],
+                              enabled ? Cyan : Muted);
             } else {
                 const bool is_button = row == 4 || row == 7 || row == 8 || row == 9;
-                TextRight(ContentX + ContentW - (is_button ? 46.0f : 18.0f), y + 29, 17,
-                          enabled ? Cyan : Muted, values[row]);
+                TextRight(ContentX + ContentW - (is_button ? 46.0f : 18.0f),
+                          y + 29, 17, enabled ? Cyan : Muted, values[row]);
                 if (is_button) {
                     IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
                                  enabled ? Cyan : Muted, 0xE5CC);
@@ -1553,10 +1581,37 @@ void BuildMenu(const State& state) {
             }
         }
     } else if (item == Item::Cheats) {
-        Rect(ContentX, 184, ContentW, 58, {1, 1, 1, 0.045f});
-        Border(ContentX, 184, ContentW, 58, 1, {1, 1, 1, 0.10f});
-        Text(ContentX + 20, 221, 21, Muted, "暂无金手指");
-        Text(ContentX, 300, 20, Muted, "金手指功能将在后续版本提供");
+        const int count = static_cast<int>(state.cheats.size());
+        if (count == 0) {
+            Rect(ContentX, 184, ContentW, 58, {1, 1, 1, 0.045f});
+            Border(ContentX, 184, ContentW, 58, 1, {1, 1, 1, 0.10f});
+            Text(ContentX + 20, 221, 21, Muted, "暂无金手指");
+            Text(ContentX, 300, 20, Muted, "已加载的金手指会在这里显示");
+        } else {
+            constexpr float RowH = 42.0f;
+            constexpr float RowGap = 4.0f;
+            constexpr int VisibleRows = 10;
+            const int first = std::clamp(state.content_focus - VisibleRows / 2, 0,
+                                         std::max(0, count - VisibleRows));
+            for (int row = 0; row < std::min(VisibleRows, count - first); ++row) {
+                const int index = first + row;
+                const auto& cheat = state.cheats[index];
+                const float y = 176.0f + row * (RowH + RowGap);
+                const bool focused = state.content_focused && state.content_focus == index;
+                Rect(ContentX, y, 660, RowH,
+                     focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                             : std::array<float, 4>{0.176f, 0.176f, 0.188f, 0.58f});
+                if (focused) {
+                    FlowBorder(ContentX, y, 660, RowH, 3.0f);
+                } else {
+                    Border(ContentX, y, 660, RowH, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
+                }
+                Text(ContentX + 16, y + 28, 19, White,
+                     cheat.name.empty() ? "未命名金手指" : cheat.name);
+                TextRight(ContentX + 634, y + 27, 17,
+                           cheat.enabled ? Cyan : Muted, cheat.enabled ? "开启" : "关闭");
+            }
+        }
     } else {
         const char* body = "按 A 继续游戏";
         if (item == Item::Reset) body = "按 A 重置游戏，未保存的进度可能丢失";
@@ -1625,9 +1680,10 @@ bool Init(const Vulkan::Instance& instance) {
     return true;
 }
 
-void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent, vk::Format format,
-          const State& state) {
-    if (!initialized || extent.width == 0 || extent.height == 0 || !EnsureRenderObjects(format)) {
+void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent,
+          vk::Format format, const State& state) {
+    if (!initialized || extent.width == 0 || extent.height == 0 ||
+        !EnsureRenderObjects(format)) {
         return;
     }
     EnsureOverlayTexture(state);
@@ -1645,10 +1701,6 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
         BuildMenu(state);
     } else {
         DrawToast(state);
-    }
-    if (overlay_active) {
-        DrawFpsIndicator(state);
-        DrawShaderCompileIndicator(state);
     }
     DrawFastForwardIndicator(state);
     TransformVertices(extent);

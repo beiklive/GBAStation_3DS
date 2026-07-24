@@ -106,22 +106,25 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     }
 
     // Fallback to (a)synchronous compilation
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto queued_at = std::chrono::steady_clock::now();
+    worker->QueueWork([this, queued_at] {
+        const auto queue_wait_ns = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - queued_at)
+                .count());
+        AddGraphicsPipelineQueueWaitDiagnostics(queue_wait_ns);
+        Build();
+    });
+#else
     worker->QueueWork([this] { Build(); });
+#endif
     is_pending = true;
     return wait_built;
 }
 
 bool GraphicsPipeline::Build(bool fail_on_compile_required) {
     MICROPROFILE_SCOPE(Vulkan_Pipeline);
-#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
-    const auto diagnostic_started = std::chrono::steady_clock::now();
-    const auto elapsed_ns = [&] {
-        return static_cast<u64>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - diagnostic_started)
-                .count());
-    };
-#endif
 
     const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
     std::array<vk::VertexInputBindingDescription, MAX_VERTEX_BINDINGS> bindings;
@@ -296,12 +299,21 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         pipeline_info.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
     }
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto diagnostic_started = std::chrono::steady_clock::now();
+#endif
     auto result = instance.GetDevice().createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto elapsed_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - diagnostic_started)
+            .count());
+#endif
     if (result.result == vk::Result::eSuccess) {
         pipeline = std::move(result.value);
     } else if (result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
-        AddGraphicsPipelineBuildDiagnostics(true, elapsed_ns());
+        AddGraphicsPipelineBuildDiagnostics(fail_on_compile_required, true, elapsed_ns);
 #endif
         return false;
     } else {
@@ -310,7 +322,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
 
     MarkDone();
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
-    AddGraphicsPipelineBuildDiagnostics(false, elapsed_ns());
+    AddGraphicsPipelineBuildDiagnostics(fail_on_compile_required, false, elapsed_ns);
 #endif
     return true;
 }

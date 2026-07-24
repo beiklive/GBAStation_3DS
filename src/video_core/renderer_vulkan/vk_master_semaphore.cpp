@@ -6,6 +6,10 @@
 #include "common/thread.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+#include <chrono>
+#include "video_core/renderer_vulkan/vk_texture_runtime.h"
+#endif
 
 namespace Vulkan {
 
@@ -98,7 +102,16 @@ void MasterSemaphoreTimeline::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore
     };
 
     try {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+        const auto submit_started = std::chrono::steady_clock::now();
+#endif
         instance.GetGraphicsQueue().submit(submit_info);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+        AddVulkanQueueSubmitDiagnostics(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - submit_started)
+                .count()));
+#endif
     } catch (vk::DeviceLostError& err) {
         UNREACHABLE_MSG("Device lost during submit: {}", err.what());
     }
@@ -161,7 +174,16 @@ void MasterSemaphoreFence::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wa
     const vk::Fence fence = GetFreeFence();
 
     try {
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+        const auto submit_started = std::chrono::steady_clock::now();
+#endif
         instance.GetGraphicsQueue().submit(submit_info, fence);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+        AddVulkanQueueSubmitDiagnostics(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - submit_started)
+                .count()));
+#endif
     } catch (vk::DeviceLostError& err) {
         UNREACHABLE_MSG("Device lost during submit: {}", err.what());
     }

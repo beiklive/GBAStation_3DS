@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -14,7 +15,6 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
-#include <queue>
 
 #include "common/logging/log.h"
 #include "common/polyfill_thread.h"
@@ -60,7 +60,15 @@ inline void PinWorkerThread(std::string_view name, std::size_t index) {
 
 template <class StateType = void>
 class StatefulThreadWorker {
+public:
+    enum class QueueOrder {
+        Fifo,
+        RecentFirstWithFifoFairness,
+    };
+
+private:
     static constexpr bool with_state = !std::is_same_v<StateType, void>;
+    static constexpr std::size_t RecentFirstBurst = 8;
 
     struct DummyCallable {
         int operator()(std::size_t) const noexcept {
@@ -75,8 +83,9 @@ class StatefulThreadWorker {
 
 public:
     explicit StatefulThreadWorker(std::size_t num_workers, std::string_view name,
-                                  StateMaker func = {})
-        : workers_queued{num_workers}, thread_name{name} {
+                                  StateMaker func = {},
+                                  QueueOrder queue_order_ = QueueOrder::Fifo)
+        : workers_queued{num_workers}, queue_order{queue_order_}, thread_name{name} {
         const auto lambda = [this, func](std::stop_token stop_token, std::size_t index) {
             Common::SetCurrentThreadName(thread_name.data());
 #ifdef __SWITCH__
@@ -84,6 +93,7 @@ public:
 #endif
             {
                 [[maybe_unused]] std::conditional_t<with_state, StateType, int> state{func(index)};
+                std::size_t recent_first_count{};
                 while (!stop_token.stop_requested()) {
                     Task task;
                     {
@@ -96,8 +106,18 @@ public:
                         if (stop_token.stop_requested()) {
                             break;
                         }
-                        task = std::move(requests.front());
-                        requests.pop();
+                        const bool take_oldest =
+                            queue_order == QueueOrder::Fifo ||
+                            recent_first_count >= RecentFirstBurst;
+                        if (take_oldest) {
+                            task = std::move(requests.front());
+                            requests.pop_front();
+                            recent_first_count = 0;
+                        } else {
+                            task = std::move(requests.back());
+                            requests.pop_back();
+                            ++recent_first_count;
+                        }
                     }
                     if constexpr (with_state) {
                         task(&state);
@@ -125,7 +145,7 @@ public:
     void QueueWork(Task work) {
         {
             std::unique_lock lock{queue_mutex};
-            requests.emplace(std::move(work));
+            requests.emplace_back(std::move(work));
             ++work_scheduled;
         }
         condition.notify_one();
@@ -147,7 +167,7 @@ public:
         {
             std::scoped_lock lock{queue_mutex};
             while (!requests.empty()) {
-                requests.pop();
+                requests.pop_front();
             }
             for (auto& thread : threads) {
                 thread.request_stop();
@@ -168,7 +188,7 @@ public:
     }
 
 private:
-    std::queue<Task> requests;
+    std::deque<Task> requests;
     std::mutex queue_mutex;
     std::condition_variable_any condition;
     std::condition_variable wait_condition;
@@ -176,6 +196,7 @@ private:
     std::atomic<std::size_t> work_done{};
     std::atomic<std::size_t> workers_stopped{};
     std::atomic<std::size_t> workers_queued{};
+    QueueOrder queue_order;
     std::string_view thread_name;
     std::vector<std::jthread> threads;
 };

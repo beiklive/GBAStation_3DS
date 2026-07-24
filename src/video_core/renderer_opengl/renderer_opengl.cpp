@@ -715,15 +715,20 @@ void RendererOpenGL::DrawScreens(const Layout::FramebufferLayout& layout, bool f
     }
 
     glUniform1i(uniform_layer, 0);
+    const bool apply_second_layer_opacity = !layout.additional_screen_enabled;
     if (!Settings::values.swap_screen.GetValue()) {
         DrawTopScreen(layout, top_screen);
         glUniform1i(uniform_layer, 0);
-        ApplySecondLayerOpacity(layout.bottom_opacity);
+        if (apply_second_layer_opacity) {
+            ApplySecondLayerOpacity(layout.bottom_opacity);
+        }
         DrawBottomScreen(layout, bottom_screen);
     } else {
         DrawBottomScreen(layout, bottom_screen);
         glUniform1i(uniform_layer, 0);
-        ApplySecondLayerOpacity(layout.top_opacity);
+        if (apply_second_layer_opacity) {
+            ApplySecondLayerOpacity(layout.top_opacity);
+        }
         DrawTopScreen(layout, top_screen);
     }
 

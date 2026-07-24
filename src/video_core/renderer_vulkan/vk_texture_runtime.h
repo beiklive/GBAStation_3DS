@@ -42,10 +42,24 @@ struct TextureRuntimeDiagnostics {
     u64 pipeline_builds{};
     u64 pipeline_compile_required{};
     u64 pipeline_build_ns{};
+    u64 pipeline_probe_count{};
+    u64 pipeline_probe_ns{};
+    u64 pipeline_probe_max_ns{};
+    u64 pipeline_compile_count{};
+    u64 pipeline_compile_ns{};
+    u64 pipeline_compile_max_ns{};
+    u64 pipeline_queue_wait_count{};
+    u64 pipeline_queue_wait_ns{};
+    u64 pipeline_queue_wait_max_ns{};
+    u64 queue_submit_count{};
+    u64 queue_submit_ns{};
+    u64 queue_submit_max_ns{};
 };
 
 TextureRuntimeDiagnostics GetAndResetTextureRuntimeDiagnostics();
-void AddGraphicsPipelineBuildDiagnostics(bool compile_required, u64 elapsed_ns);
+void AddGraphicsPipelineBuildDiagnostics(bool probe, bool compile_required, u64 elapsed_ns);
+void AddGraphicsPipelineQueueWaitDiagnostics(u64 elapsed_ns);
+void AddVulkanQueueSubmitDiagnostics(u64 elapsed_ns);
 
 enum Type {
     Current = -1,

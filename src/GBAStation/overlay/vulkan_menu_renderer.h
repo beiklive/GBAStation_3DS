@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "GBAStation/display_settings.h"
+#include "GBAStation/overlay/overlay_ui.h"
 #include "common/common_types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -56,6 +57,7 @@ struct State {
     std::string file_preview_path;
     std::string toast;
     std::array<bool, 10> occupied{};
+    std::vector<OverlayUI::CheatEntry> cheats;
     GBAStationDisplaySettings display{};
 };
 
