@@ -10,7 +10,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-switch:
@@ -44,3 +44,11 @@ jobs:
           path: GBAStation3DSStub.nro
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload Nintendo Switch build to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: GBAStation3DSStub.nro
