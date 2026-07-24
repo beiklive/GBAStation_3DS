@@ -2428,6 +2428,30 @@ std::string FormatFloat(float value) {
     return text;
 }
 
+void SyncSwitchDisplaySettings(const SwitchFrontend::GBAStationDisplaySettings& display) {
+    Settings::values.use_integer_scaling.SetValue(display.integer_scale);
+    Settings::values.screen_gap.SetValue(std::clamp(display.screen_gap, 0, 256));
+    const bool upright = display.screen_orientation == 90 || display.screen_orientation == 270;
+    Settings::values.upright_screen.SetValue(upright);
+    Settings::values.screen_rotation_180.SetValue(display.screen_orientation == 180 ||
+                                                  display.screen_orientation == 270);
+}
+
+void SyncSwitchHostLayoutSettings(const SwitchFrontend::GBAStationDisplaySettings& display) {
+    Settings::values.use_integer_scaling.SetValue(display.integer_scale);
+    Settings::values.screen_gap.SetValue(std::clamp(display.screen_gap, 0, 256));
+}
+
+void LogSwitchDisplaySettings(const char* reason,
+                              const SwitchFrontend::GBAStationDisplaySettings& display) {
+    DebugLog("display settings %s: layout=%s orientation=%d resolution=%d integer=%d gap=%d "
+             "top_scale=%.2f bottom_scale=%.2f bottom_opacity=%.2f overlay=%d",
+             reason, display.screen_layout.c_str(), display.screen_orientation,
+             display.internal_resolution, display.integer_scale ? 1 : 0, display.screen_gap,
+             display.top_scale, display.bottom_scale, display.bottom_opacity,
+             display.overlay_enabled ? 1 : 0);
+}
+
 void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& settings,
                                     bool include_screen, bool include_overlay) {
     using SwitchFrontend::GBAStationConfig::GetConfigValue;
@@ -2722,6 +2746,7 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: creating NWindow frontend");
     SwitchFrontend::EmuWindowSwitch window{nwindowGetDefault()};
+    SyncSwitchDisplaySettings(launch_options.display_settings);
     window.SetDisplaySettings(launch_options.display_settings);
     DebugLog("loading ROM: %s", rom_path.c_str());
     const Core::System::ResultStatus load_result = system.Load(window, rom_path);
@@ -2821,6 +2846,7 @@ int Run(int argc, char** argv) {
         });
 
     SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);
+    SyncSwitchDisplaySettings(launch_options.display_settings);
     bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(
         static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer()));
     bool show_fps_overlay = ParseConfigBool(
@@ -2855,8 +2881,6 @@ int Run(int argc, char** argv) {
     s32 last_heartbeat_frame = last_logged_frame;
     bool menu_was_visible = false;
     bool block_game_input_until_release = false;
-    bool menu_audio_muted = false;
-    float menu_restore_volume = Settings::values.volume.GetValue();
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
     bool previous_mic_input_combo = false;
@@ -2880,6 +2904,23 @@ int Run(int argc, char** argv) {
         Clock::time_point signal_time{};
     };
     PendingStateRequest pending_state_request{};
+    bool display_settings_dirty = false;
+    auto apply_pending_display_settings = [&](const char* reason) {
+        if (!display_settings_dirty) {
+            return;
+        }
+        const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+        SyncSwitchDisplaySettings(display);
+        if (Settings::values.resolution_factor.GetValue() !=
+            static_cast<u32>(display.internal_resolution)) {
+            Settings::values.resolution_factor.SetValue(
+                static_cast<u16>(display.internal_resolution));
+            system.ApplySettings();
+        }
+        window.SetDisplaySettings(display);
+        LogSwitchDisplaySettings(reason, display);
+        display_settings_dirty = false;
+    };
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
     u64 diagnostic_runloop_count = 0;
     double diagnostic_runloop_ms_total = 0.0;
@@ -2965,14 +3006,6 @@ int Run(int argc, char** argv) {
         }
         if (menu_visible != menu_was_visible) {
             block_game_input_until_release = true;
-            if (menu_visible) {
-                menu_restore_volume = Settings::values.volume.GetValue();
-                Settings::values.volume.SetValue(0.0f);
-                menu_audio_muted = true;
-            } else if (menu_audio_muted) {
-                Settings::values.volume.SetValue(menu_restore_volume);
-                menu_audio_muted = false;
-            }
             DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
             menu_was_visible = menu_visible;
         }
@@ -3062,23 +3095,27 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::DisplaySettingsChanged) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
-            if (Settings::values.resolution_factor.GetValue() !=
-                static_cast<u32>(display.internal_resolution)) {
-                Settings::values.resolution_factor.SetValue(
-                    static_cast<u16>(display.internal_resolution));
-                system.ApplySettings();
-            }
+            SyncSwitchHostLayoutSettings(display);
             window.SetDisplaySettings(display);
+            display_settings_dirty = true;
+            LogSwitchDisplaySettings("preview", display);
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
             SwitchFrontend::OverlayUI::ShowToast(saved ? "画面设置已保存" : "画面设置保存失败");
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutChanged) {
-            window.SetDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
+            const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            SyncSwitchHostLayoutSettings(display);
+            window.SetDisplaySettings(display);
+            display_settings_dirty = true;
+            LogSwitchDisplaySettings("custom-preview", display);
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutCommitted) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            SyncSwitchHostLayoutSettings(display);
             window.SetDisplaySettings(display);
+            display_settings_dirty = true;
+            LogSwitchDisplaySettings("custom-commit-preview", display);
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
             SwitchFrontend::OverlayUI::ShowToast(saved ? "自定义布局已保存"
@@ -3126,6 +3163,7 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncDisplaySettings) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            SyncSwitchDisplaySettings(display);
             window.SetDisplaySettings(display);
             if (Settings::values.resolution_factor.GetValue() !=
                 static_cast<u32>(display.internal_resolution)) {
@@ -3172,6 +3210,10 @@ int Run(int argc, char** argv) {
             break;
         }
 
+        if (!menu_visible) {
+            apply_pending_display_settings("apply-after-menu-close");
+        }
+
         if (pending_state_request.operation != PendingStateOperation::None &&
             !SwitchFrontend::VulkanOverlay::IsVisible()) {
             if (pending_state_request.delay_frames > 0) {
@@ -3212,15 +3254,6 @@ int Run(int argc, char** argv) {
             Common::RequestFastShutdown();
             ExitLog("fallback exit: RequestFastShutdown done");
             break;
-        }
-
-        const bool pause_for_menu =
-            menu_initialized && SwitchFrontend::VulkanOverlay::IsVisible() && pause_frame_ready;
-        if (pause_for_menu) {
-            static_cast<Vulkan::RendererVulkan&>(renderer).PresentLastFrame();
-            ++loop_count;
-            svcSleepThread(16666667);
-            continue;
         }
 
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
@@ -3289,6 +3322,7 @@ int Run(int argc, char** argv) {
              run_result == Core::System::ResultStatus::ErrorSavestate) &&
             system.IsPoweredOn()) {
             auto& reset_renderer = system.GPU().Renderer();
+            SyncSwitchDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
             SwitchFrontend::VulkanOverlay::SetDisplaySettings(
                 SwitchFrontend::VulkanOverlay::GetDisplaySettings());
             menu_initialized = SwitchFrontend::VulkanOverlay::Init(
@@ -3773,10 +3807,6 @@ int Run(int argc, char** argv) {
         ExitLog("shutdown step: VulkanOverlay::PrepareForShutdown begin");
         SwitchFrontend::VulkanOverlay::PrepareForShutdown();
         ExitLog("shutdown step: VulkanOverlay::PrepareForShutdown done");
-    }
-    if (menu_audio_muted) {
-        Settings::values.volume.SetValue(menu_restore_volume);
-        menu_audio_muted = false;
     }
     if (force_input_suppressed_during_shutdown) {
         window.SetInputSuppressed(true);

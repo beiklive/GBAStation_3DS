@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -87,6 +88,7 @@ vk::RenderPass render_pass;
 vk::Format render_format{vk::Format::eUndefined};
 vk::Sampler font_sampler;
 vk::Sampler gradient_sampler;
+vk::Sampler image_sampler;
 ImageResource atlas_image;
 ImageResource gradient_image;
 BufferResource atlas_staging;
@@ -101,6 +103,7 @@ vk::Extent2D framebuffer_extent{};
 bool atlas_uploaded{};
 bool overlay_uploaded{};
 bool overlay_active{};
+u8 overlay_skip_draw_frames{};
 u32 overlay_width{};
 u32 overlay_height{};
 u32 overlay_vertex_count{};
@@ -125,6 +128,8 @@ std::vector<int> codepoints;
 std::vector<stbtt_packedchar> packed_chars;
 std::unordered_map<int, std::size_t> glyph_indices;
 std::vector<Vertex> vertices;
+
+float MeasureText(std::string_view text, float size);
 
 constexpr std::array<const char*, static_cast<int>(Item::Count)> ItemLabels{{
     "返回游戏", "保存状态", "读取状态", "金手指", "画面设置", "重置游戏", "退出游戏",
@@ -201,6 +206,171 @@ std::vector<int> DecodeUtf8(std::string_view text) {
         i += length;
     }
     return output;
+}
+
+struct OverlayAlphaSanitizeStats {
+    std::size_t cleared_alpha_pixels{};
+    std::size_t filled_transparent_rgb_pixels{};
+};
+
+OverlayAlphaSanitizeStats SanitizeOverlayAlphaPixels(u8* pixels, int width, int height) {
+    OverlayAlphaSanitizeStats stats{};
+    if (!pixels || width <= 0 || height <= 0) {
+        return stats;
+    }
+
+    constexpr u8 AlphaCutoff = 32;
+    const std::size_t count = static_cast<std::size_t>(width) * height;
+    std::vector<std::array<u8, 3>> propagated_rgb(count);
+    std::vector<u8> has_rgb(count);
+
+    for (std::size_t i = 0; i < count; ++i) {
+        u8* px = pixels + i * 4;
+        if (px[3] <= AlphaCutoff) {
+            px[3] = 0;
+            ++stats.cleared_alpha_pixels;
+        } else {
+            propagated_rgb[i] = {px[0], px[1], px[2]};
+            has_rgb[i] = 1;
+        }
+    }
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * width + x;
+            if (has_rgb[i]) {
+                continue;
+            }
+            if (x > 0 && has_rgb[i - 1]) {
+                propagated_rgb[i] = propagated_rgb[i - 1];
+                has_rgb[i] = 1;
+            } else if (y > 0 && has_rgb[i - width]) {
+                propagated_rgb[i] = propagated_rgb[i - width];
+                has_rgb[i] = 1;
+            }
+        }
+    }
+
+    for (int y = height - 1; y >= 0; --y) {
+        for (int x = width - 1; x >= 0; --x) {
+            const std::size_t i = static_cast<std::size_t>(y) * width + x;
+            if (!has_rgb[i]) {
+                if (x + 1 < width && has_rgb[i + 1]) {
+                    propagated_rgb[i] = propagated_rgb[i + 1];
+                    has_rgb[i] = 1;
+                } else if (y + 1 < height && has_rgb[i + width]) {
+                    propagated_rgb[i] = propagated_rgb[i + width];
+                    has_rgb[i] = 1;
+                }
+            }
+            if (pixels[i * 4 + 3] == 0) {
+                u8* px = pixels + i * 4;
+                if (has_rgb[i]) {
+                    px[0] = propagated_rgb[i][0];
+                    px[1] = propagated_rgb[i][1];
+                    px[2] = propagated_rgb[i][2];
+                    ++stats.filled_transparent_rgb_pixels;
+                } else {
+                    px[0] = 0;
+                    px[1] = 0;
+                    px[2] = 0;
+                }
+            }
+        }
+    }
+
+    return stats;
+}
+
+std::string EncodeUtf8(int codepoint) {
+    std::string output;
+    if (codepoint < 0x80) {
+        output.push_back(static_cast<char>(codepoint));
+    } else if (codepoint < 0x800) {
+        output.push_back(static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F)));
+        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint < 0x10000) {
+        output.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+        output.push_back(static_cast<char>(0xF0 | ((codepoint >> 18) & 0x07)));
+        output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    }
+    return output;
+}
+
+std::string JoinUtf8(const std::vector<int>& codepoints, std::size_t first, std::size_t count) {
+    const std::size_t begin = std::min(first, codepoints.size());
+    const std::size_t end = std::min(begin + count, codepoints.size());
+    std::string output;
+    for (std::size_t i = begin; i < end; ++i) {
+        output += EncodeUtf8(codepoints[i]);
+    }
+    return output;
+}
+
+std::string EllipsizeUtf8(std::string_view text, float max_width, float size) {
+    if (MeasureText(text, size) <= max_width) {
+        return std::string{text};
+    }
+    constexpr std::string_view Ellipsis{"..."};
+    const float ellipsis_width = MeasureText(Ellipsis, size);
+    if (ellipsis_width >= max_width) {
+        return std::string{Ellipsis};
+    }
+    const std::vector<int> codepoints = DecodeUtf8(text);
+    std::string output;
+    for (int cp : codepoints) {
+        const std::string next = output + EncodeUtf8(cp);
+        if (MeasureText(next, size) + ellipsis_width > max_width) {
+            break;
+        }
+        output = next;
+    }
+    if (output.empty()) {
+        return std::string{Ellipsis};
+    }
+    output += Ellipsis;
+    return output;
+}
+
+std::string ScrollUtf8(std::string_view text, float max_width, float size) {
+    if (MeasureText(text, size) <= max_width) {
+        return std::string{text};
+    }
+    const std::vector<int> codepoints = DecodeUtf8(text);
+    if (codepoints.empty()) {
+        return {};
+    }
+    std::size_t visible_count = 0;
+    float width = 0.0f;
+    while (visible_count < codepoints.size()) {
+        const float next_width = MeasureText(EncodeUtf8(codepoints[visible_count]), size);
+        if (width + next_width > max_width) {
+            break;
+        }
+        width += next_width;
+        ++visible_count;
+    }
+    if (visible_count == 0) {
+        return EllipsizeUtf8(text, max_width, size);
+    }
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const float elapsed_ms =
+        static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+    const float cycle_ms = std::max(1200.0f, static_cast<float>(codepoints.size()) * 220.0f);
+    const std::size_t max_start = codepoints.size() > visible_count
+                                      ? codepoints.size() - visible_count
+                                      : 0;
+    const std::size_t start = max_start == 0
+                                  ? 0
+                                  : static_cast<std::size_t>(
+                                        std::fmod(elapsed_ms / cycle_ms, 1.0f) *
+                                        static_cast<float>(max_start + 1));
+    return JoinUtf8(codepoints, start, visible_count);
 }
 
 bool BuildFontAtlas() {
@@ -587,6 +757,16 @@ bool CreateDescriptors() {
         .maxLod = 1.0f,
     };
     gradient_sampler = device.createSampler(gradient_sampler_info);
+    const vk::SamplerCreateInfo image_sampler_info{
+        .magFilter = vk::Filter::eLinear,
+        .minFilter = vk::Filter::eLinear,
+        .mipmapMode = vk::SamplerMipmapMode::eNearest,
+        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
+        .maxLod = 1.0f,
+    };
+    image_sampler = device.createSampler(image_sampler_info);
     const std::array image_infos{
         vk::DescriptorImageInfo{
             .sampler = font_sampler,
@@ -616,6 +796,11 @@ bool CreateDescriptors() {
         },
     };
     device.updateDescriptorSets(static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    const vk::DescriptorImageInfo default_image_info{
+        .sampler = image_sampler,
+        .imageView = gradient_image.view,
+        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+    };
     const std::array overlay_writes{
         vk::WriteDescriptorSet{
             .dstSet = overlay_descriptor_set,
@@ -629,7 +814,7 @@ bool CreateDescriptors() {
             .dstBinding = 1,
             .descriptorCount = 1,
             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .pImageInfo = &image_infos[1],
+            .pImageInfo = &default_image_info,
         },
     };
     device.updateDescriptorSets(static_cast<u32>(overlay_writes.size()), overlay_writes.data(),
@@ -647,7 +832,7 @@ bool CreateDescriptors() {
             .dstBinding = 1,
             .descriptorCount = 1,
             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .pImageInfo = &image_infos[1],
+            .pImageInfo = &default_image_info,
         },
     };
     device.updateDescriptorSets(static_cast<u32>(preview_writes.size()), preview_writes.data(),
@@ -862,7 +1047,9 @@ void UploadImage(vk::CommandBuffer command_buffer, vk::Buffer staging, vk::Image
 bool EnsureOverlayTexture(const State& state) {
     const bool wanted = state.display.overlay_enabled && !state.display.overlay_path.empty();
     if (!wanted) {
+        overlay_uploaded = false;
         overlay_active = false;
+        overlay_skip_draw_frames = 0;
         return true;
     }
     if (loaded_overlay_path == state.display.overlay_path && overlay_image.image) {
@@ -877,6 +1064,7 @@ bool EnsureOverlayTexture(const State& state) {
     if (!pixels || width <= 0 || height <= 0) {
         if (pixels) stbi_image_free(pixels);
         overlay_active = false;
+        overlay_skip_draw_frames = 0;
         LOG_ERROR(Render_Vulkan, "{} failed to load overlay {}", Tag,
                   state.display.overlay_path);
         return false;
@@ -900,14 +1088,16 @@ bool EnsureOverlayTexture(const State& state) {
         DestroyBuffer(overlay_staging);
         DestroyImage(overlay_image);
         overlay_active = false;
+        overlay_skip_draw_frames = 0;
         return false;
     }
+    const auto alpha_stats = SanitizeOverlayAlphaPixels(pixels, width, height);
     std::memcpy(overlay_staging.mapped, pixels, byte_size);
     armDCacheFlush(overlay_staging.mapped, byte_size);
     stbi_image_free(pixels);
 
     const vk::DescriptorImageInfo overlay_info{
-        .sampler = gradient_sampler,
+        .sampler = image_sampler,
         .imageView = overlay_image.view,
         .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
     };
@@ -923,14 +1113,19 @@ bool EnsureOverlayTexture(const State& state) {
     overlay_height = static_cast<u32>(height);
     overlay_uploaded = false;
     overlay_active = true;
+    overlay_skip_draw_frames = 0;
     loaded_overlay_path = state.display.overlay_path;
-    LOG_INFO(Render_Vulkan, "{} loaded overlay {} size={}x{}", Tag,
-             loaded_overlay_path, overlay_width, overlay_height);
+    LOG_INFO(Render_Vulkan,
+             "{} loaded overlay {} size={}x{} cleared_alpha_pixels={} "
+             "filled_transparent_rgb_pixels={}",
+             Tag, loaded_overlay_path, overlay_width, overlay_height,
+             alpha_stats.cleared_alpha_pixels, alpha_stats.filled_transparent_rgb_pixels);
     return true;
 }
 
 bool EnsurePreviewTexture(const State& state) {
     if (!state.file_preview || state.file_preview_path.empty()) {
+        preview_uploaded = false;
         preview_active = false;
         return true;
     }
@@ -977,7 +1172,7 @@ bool EnsurePreviewTexture(const State& state) {
     stbi_image_free(pixels);
 
     const vk::DescriptorImageInfo preview_info{
-        .sampler = gradient_sampler,
+        .sampler = image_sampler,
         .imageView = preview_image.view,
         .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
     };
@@ -1008,6 +1203,7 @@ void UploadTextures(vk::CommandBuffer command_buffer) {
         UploadImage(command_buffer, overlay_staging.buffer, overlay_image.image,
                     overlay_width, overlay_height);
         overlay_uploaded = true;
+        overlay_skip_draw_frames = 2;
     }
     if (preview_active && preview_image.image && !preview_uploaded) {
         UploadImage(command_buffer, preview_staging.buffer, preview_image.image,
@@ -1202,6 +1398,15 @@ void DrawFastForwardIndicator(const State& state) {
     char value[20]{};
     std::snprintf(value, sizeof(value), "%.1fx", state.display.fast_forward_multiplier);
     Text(54, 41, 18, {0.94f, 0.97f, 1.0f, 0.94f}, value);
+}
+
+void DrawFpsIndicator(const State& state) {
+    if (!state.show_fps || state.current_fps <= 0.0f) {
+        return;
+    }
+    char value[24]{};
+    std::snprintf(value, sizeof(value), "FPS: %.1f", state.current_fps);
+    Text(12, 30, 18, {0.20f, 1.0f, 0.24f, 0.96f}, value);
 }
 
 const char* DisplayLayoutLabel(std::string_view layout) {
@@ -1494,8 +1699,10 @@ void BuildMenu(const State& state) {
     constexpr float ContentY = 110.0f;
     constexpr float ContentW = 790.0f;
     const Item item = static_cast<Item>(selected);
-    Text(ContentX, ContentY + 28, 24, White, ItemLabels[selected]);
-    Rect(ContentX, ContentY + 50, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+    if (item != Item::Display) {
+        Text(ContentX, ContentY + 28, 24, White, ItemLabels[selected]);
+        Rect(ContentX, ContentY + 50, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+    }
 
     if (item == Item::SaveState || item == Item::LoadState) {
         const float row_h = 42.0f;
@@ -1547,13 +1754,42 @@ void BuildMenu(const State& state) {
         values[7] = state.display.overlay_enabled ? "已开启" : "设置";
         values[8] = "执行";
         values[9] = "执行";
-        constexpr float RowH = 40.0f;
-        constexpr std::array<float, 10> RowY{{178, 222, 266, 330, 374, 418, 462, 526, 570, 614}};
-        Text(ContentX, 164, 16, Cyan, "基础画面设置");
-        Text(ContentX, 316, 16, Cyan, "布局设置");
-        Text(ContentX, 512, 16, Cyan, "个性化设置");
+        constexpr float HeaderY = 150.0f;
+        constexpr float HeaderSize = 27.0f;
+        constexpr float SectionSize = 18.0f;
+        constexpr float LabelSize = 20.0f;
+        constexpr float ValueSize = 18.0f;
+        constexpr float RowH = 48.0f;
+        constexpr float ViewTop = 176.0f;
+        constexpr float ViewBottom = 664.0f;
+        constexpr float TargetCenter = 420.0f;
+        constexpr std::array<float, 10> RowY{{214.0f, 272.0f, 330.0f, 418.0f, 476.0f,
+                                              534.0f, 592.0f, 680.0f, 738.0f, 796.0f}};
+        constexpr std::array<float, 3> SectionY{{176.0f, 390.0f, 650.0f}};
+        const int focus = state.content_focused
+                              ? std::clamp(state.content_focus, 0,
+                                            static_cast<int>(RowY.size()) - 1)
+                              : 0;
+        const float focused_center = RowY[focus] + RowH * 0.5f;
+        const float max_scroll = std::max(0.0f, RowY.back() + RowH - ViewBottom);
+        const float scroll_y = std::clamp(focused_center - TargetCenter, 0.0f, max_scroll);
+        Text(ContentX, HeaderY, HeaderSize, White, ItemLabels[selected]);
+        Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+        auto draw_section = [&](int index, const char* title) {
+            const float y = SectionY[index] - scroll_y;
+            if (y < ViewTop - 24.0f || y > ViewBottom) {
+                return;
+            }
+            Text(ContentX, y, SectionSize, Cyan, title);
+        };
+        draw_section(0, "基础画面设置");
+        draw_section(1, "布局设置");
+        draw_section(2, "个性化设置");
         for (int row = 0; row < 10; ++row) {
-            const float y = RowY[row];
+            const float y = RowY[row] - scroll_y;
+            if (y + RowH < ViewTop || y > ViewBottom) {
+                continue;
+            }
             const bool focused = state.content_focused && state.content_focus == row;
             const bool enabled = row != 4 || custom_enabled;
             Rect(ContentX, y, ContentW, RowH,
@@ -1566,14 +1802,14 @@ void BuildMenu(const State& state) {
             }
             IconCentered(ContentX + 24, y + RowH * 0.5f, 20,
                          enabled ? Cyan : Muted, icons[row]);
-            Text(ContentX + 46, y + 30, 18, enabled ? White : Muted, labels[row]);
+            Text(ContentX + 46, y + 32, LabelSize, enabled ? White : Muted, labels[row]);
             if (row == 0 || row == 1 || row == 3 || row == 5 || row == 6) {
                 SelectorValue(ContentX, y, ContentW, RowH, values[row],
                               enabled ? Cyan : Muted);
             } else {
                 const bool is_button = row == 4 || row == 7 || row == 8 || row == 9;
                 TextRight(ContentX + ContentW - (is_button ? 46.0f : 18.0f),
-                          y + 29, 17, enabled ? Cyan : Muted, values[row]);
+                          y + 30, ValueSize, enabled ? Cyan : Muted, values[row]);
                 if (is_button) {
                     IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
                                  enabled ? Cyan : Muted, 0xE5CC);
@@ -1606,8 +1842,11 @@ void BuildMenu(const State& state) {
                 } else {
                     Border(ContentX, y, 660, RowH, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
                 }
+                constexpr float NameMaxWidth = 548.0f;
+                const std::string name = cheat.name.empty() ? "未命名金手指" : cheat.name;
                 Text(ContentX + 16, y + 28, 19, White,
-                     cheat.name.empty() ? "未命名金手指" : cheat.name);
+                     focused ? ScrollUtf8(name, NameMaxWidth, 19.0f)
+                             : EllipsizeUtf8(name, NameMaxWidth, 19.0f));
                 TextRight(ContentX + 634, y + 27, 17,
                            cheat.enabled ? Cyan : Muted, cheat.enabled ? "开启" : "关闭");
             }
@@ -1693,7 +1932,12 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     overlay_vertex_count = 0;
     preview_vertex_first = 0;
     preview_vertex_count = 0;
-    if (overlay_active) {
+    const bool draw_overlay =
+        overlay_active && overlay_uploaded && overlay_skip_draw_frames == 0;
+    if (overlay_active && overlay_uploaded && overlay_skip_draw_frames > 0) {
+        --overlay_skip_draw_frames;
+    }
+    if (draw_overlay) {
         AddQuad(0, 0, 1280, 720, 0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
         overlay_vertex_count = 6;
     }
@@ -1702,6 +1946,7 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     } else {
         DrawToast(state);
     }
+    DrawFpsIndicator(state);
     DrawFastForwardIndicator(state);
     TransformVertices(extent);
     const vk::Framebuffer framebuffer = GetFramebuffer(image, extent);
@@ -1777,6 +2022,7 @@ void Shutdown() {
     DestroyImage(preview_image);
     if (font_sampler) device.destroySampler(font_sampler);
     if (gradient_sampler) device.destroySampler(gradient_sampler);
+    if (image_sampler) device.destroySampler(image_sampler);
     if (pipeline_layout) device.destroyPipelineLayout(pipeline_layout);
     if (descriptor_pool) device.destroyDescriptorPool(descriptor_pool);
     if (descriptor_set_layout) device.destroyDescriptorSetLayout(descriptor_set_layout);
@@ -1784,6 +2030,7 @@ void Shutdown() {
     if (fragment_shader) device.destroyShaderModule(fragment_shader);
     font_sampler = VK_NULL_HANDLE;
     gradient_sampler = VK_NULL_HANDLE;
+    image_sampler = VK_NULL_HANDLE;
     pipeline_layout = VK_NULL_HANDLE;
     descriptor_pool = VK_NULL_HANDLE;
     descriptor_set_layout = VK_NULL_HANDLE;
@@ -1804,6 +2051,7 @@ void Shutdown() {
     atlas_uploaded = false;
     overlay_uploaded = false;
     overlay_active = false;
+    overlay_skip_draw_frames = 0;
     overlay_width = 0;
     overlay_height = 0;
     overlay_vertex_count = 0;

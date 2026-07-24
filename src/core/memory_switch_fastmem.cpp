@@ -11,6 +11,7 @@
 #include <cstring>
 #include <vector>
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/memory.h"
@@ -213,7 +214,9 @@ void SwitchFastmemArena::Clear(PageTable& page_table) {
 }
 
 struct SwitchCodeAliasBuffer::Impl final {
-    explicit Impl(size_t size_) : source(MakePageAlignedBuffer(size_)), size(size_) {
+    explicit Impl(size_t size_)
+        : requested_size(size_), size(Common::AlignUp(size_, CITRA_PAGE_SIZE)),
+          source(MakePageAlignedBuffer(size)) {
         std::memset(source.get(), 0, size);
 
         virtmemLock();
@@ -239,12 +242,15 @@ struct SwitchCodeAliasBuffer::Impl final {
         virtmemUnlock();
 
         if (alias) {
-            LOG_INFO(HW_Memory, "Switch guest RAM alias: source={} alias={} size={}",
-                     static_cast<void*>(source.get()), static_cast<void*>(alias), size);
+            LOG_INFO(HW_Memory,
+                     "Switch guest RAM alias: source={} alias={} requested_size={} mapped_size={}",
+                     static_cast<void*>(source.get()), static_cast<void*>(alias), requested_size,
+                     size);
         } else {
             LOG_WARNING(HW_Memory,
-                        "Switch guest RAM alias unavailable: size={} map_rc={:08x} perm_rc={:08x}",
-                        size, map_result, permission_result);
+                        "Switch guest RAM alias unavailable: requested_size={} mapped_size={} "
+                        "map_rc={:08x} perm_rc={:08x}",
+                        requested_size, size, map_result, permission_result);
         }
     }
 
@@ -260,8 +266,9 @@ struct SwitchCodeAliasBuffer::Impl final {
         }
     }
 
-    PageAlignedBuffer source;
+    size_t requested_size{};
     size_t size{};
+    PageAlignedBuffer source;
     u8* alias{};
     u32 map_result{1};
     u32 permission_result{1};

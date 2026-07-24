@@ -22,6 +22,7 @@
 #include "audio_core/libnx_sink.h"
 #include "common/logging/log.h"
 #include "common/settings.h"
+#include "video_core/overlay.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_present_window.h"
@@ -70,6 +71,8 @@ std::atomic<float> display_bottom_opacity{1.0f};
 std::atomic_bool display_overlay_enabled{};
 std::atomic_bool overlay_sidebar{};
 std::atomic_int overlay_focus{};
+std::atomic_bool fps_visible{};
+std::atomic<float> fps_value{};
 std::atomic_bool file_picker{};
 std::atomic_int file_picker_focus{};
 std::atomic_bool file_preview{};
@@ -303,6 +306,8 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     VulkanMenuRenderer::State state{};
     state.menu_visible = visible.load(std::memory_order_acquire);
     state.fast_forward_active = fast_forward_active.load(std::memory_order_acquire);
+    state.show_fps = fps_visible.load(std::memory_order_acquire);
+    state.current_fps = fps_value.load(std::memory_order_acquire);
     state.item = static_cast<VulkanMenuRenderer::Item>(std::clamp(
         selected_item.load(std::memory_order_relaxed), 0, MenuItemCount - 1));
     state.content_focused = content_focused.load(std::memory_order_relaxed);
@@ -326,7 +331,7 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     }
     state.cheats = OverlayUI::GetCheats();
     state.display = GetDisplaySettings();
-    if (!state.menu_visible && !state.fast_forward_active &&
+    if (!state.menu_visible && !state.fast_forward_active && !state.show_fps &&
         !state.display.overlay_enabled && state.toast.empty()) {
         return;
     }
@@ -912,8 +917,10 @@ void SetFastForwardActive(bool active) {
     fast_forward_active.store(active, std::memory_order_release);
 }
 
-void SetFpsOverlay([[maybe_unused]] bool visible, [[maybe_unused]] float fps) {
-    // f94d29a9 menu style did not draw the FPS overlay inside this renderer.
+void SetFpsOverlay(bool visible, float fps) {
+    fps_visible.store(visible, std::memory_order_release);
+    fps_value.store(fps, std::memory_order_release);
+    VideoCore::SetFpsOverlayState(false, fps);
 }
 
 void PrepareForShutdown() {
