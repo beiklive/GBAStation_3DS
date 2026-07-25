@@ -350,8 +350,11 @@ private:
 
     std::shared_ptr<Kernel::Event> completion_event;
     Core::TimingEventType* completion_signal_event;
+    Core::TimingEventType* movie_detect_stop_event;
     ConversionConfiguration conversion{};
     DitheringWeightParams dithering_weight_params{};
+    s64 movie_detect_last_call_tick = 0;
+    int movie_detect_burst_count = 0;
     bool temporal_dithering_enabled = false;
     bool transfer_end_interrupt_enabled = false;
     bool spacial_dithering_enabled = false;

@@ -327,8 +327,12 @@ void RO::LoadCRO(Kernel::HLERequestContext& ctx, bool link_on_load_bug_fix) {
 
     system.InvalidateCacheRange(cro_address, cro_size);
 
-    LOG_INFO(Service_LDR, "CRO \"{}\" loaded at 0x{:08X}, fixed_end=0x{:08X}", cro.ModuleName(),
+    const std::string module_name = cro.ModuleName();
+    LOG_INFO(Service_LDR, "CRO \"{}\" loaded at 0x{:08X}, fixed_end=0x{:08X}", module_name,
              cro_address, cro_address + fix_size);
+    if (module_name == "MovieLib") {
+        system.SetMoviePlaying(true);
+    }
 
     rb.Push(ResultSuccess, fix_size);
 }
@@ -366,7 +370,11 @@ void RO::UnloadCRO(Kernel::HLERequestContext& ctx) {
         return;
     }
 
-    LOG_INFO(Service_LDR, "Unloading CRO \"{}\"", cro.ModuleName());
+    const std::string module_name = cro.ModuleName();
+    LOG_INFO(Service_LDR, "Unloading CRO \"{}\"", module_name);
+    if (module_name == "MovieLib") {
+        system.SetMoviePlaying(false);
+    }
 
     u32 fixed_size = cro.GetFixedSize();
 

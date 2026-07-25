@@ -10,6 +10,7 @@
 #include "common/logging/log.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/event.h"
 #include "core/hle/kernel/process.h"
@@ -27,6 +28,8 @@ void Y2R_U::serialize(Archive& ar, const unsigned int) {
     ar & completion_event;
     ar & conversion;
     ar & dithering_weight_params;
+    ar & movie_detect_last_call_tick;
+    ar & movie_detect_burst_count;
     ar & temporal_dithering_enabled;
     ar & transfer_end_interrupt_enabled;
     ar & spacial_dithering_enabled;
@@ -536,6 +539,25 @@ void Y2R_U::StartConversion(Kernel::HLERequestContext& ctx) {
 
     HW::Y2R::PerformConversion(system.Memory(), conversion);
 
+    constexpr s64 kMovieDetectGapTicks = msToCycles(300);
+    constexpr int kMovieDetectBurstThreshold = 3;
+    constexpr s64 kMovieDetectStopDelayTicks = msToCycles(500);
+
+    const s64 movie_detect_now = system.CoreTiming().GetTicks();
+    if (movie_detect_last_call_tick != 0 &&
+        (movie_detect_now - movie_detect_last_call_tick) <= kMovieDetectGapTicks) {
+        ++movie_detect_burst_count;
+    } else {
+        movie_detect_burst_count = 1;
+    }
+    movie_detect_last_call_tick = movie_detect_now;
+
+    if (movie_detect_burst_count >= kMovieDetectBurstThreshold) {
+        system.SetMoviePlaying(true);
+    }
+    system.CoreTiming().UnscheduleEvent(movie_detect_stop_event, 0);
+    system.CoreTiming().ScheduleEvent(kMovieDetectStopDelayTicks, movie_detect_stop_event);
+
     if (is_busy_conversion) {
         system.CoreTiming().RemoveEvent(completion_signal_event);
     }
@@ -733,6 +755,11 @@ Y2R_U::Y2R_U(Core::System& system) : ServiceFramework("y2r:u", 1), system(system
         system.CoreTiming().RegisterEvent("Y2R Completion Signal Event", [this](uintptr_t, s64) {
             completion_event->Signal();
             is_busy_conversion = false;
+        });
+    movie_detect_stop_event = system.CoreTiming().RegisterEvent(
+        "Y2R Movie Detect Stop Event", [this](uintptr_t, s64) {
+            movie_detect_burst_count = 0;
+            this->system.SetMoviePlaying(false);
         });
 }
 

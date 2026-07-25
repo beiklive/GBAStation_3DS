@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -436,6 +437,24 @@ public:
         info_led_color_changed = func;
     }
 
+    void RegisterMoviePlaybackStateChanged(const std::function<void(bool)>& func) {
+        movie_playback_state_changed = func;
+    }
+
+    void SetMoviePlaying(bool playing) {
+        if (movie_playing == playing) {
+            return;
+        }
+        movie_playing = playing;
+        if (movie_playback_state_changed) {
+            movie_playback_state_changed(playing);
+        }
+    }
+
+    bool IsMoviePlaying() const {
+        return movie_playing;
+    }
+
     void SetDebugNextProcessFlag() {
         debug_next_process = true;
     }
@@ -562,6 +581,8 @@ private:
 
     Common::Vec3<u8> info_led_color;
     std::function<void()> info_led_color_changed;
+    std::function<void(bool)> movie_playback_state_changed;
+    bool movie_playing = false;
 
     bool debug_next_process;
     int override_gdb_port = -1;

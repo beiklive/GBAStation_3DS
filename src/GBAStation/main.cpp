@@ -2400,6 +2400,49 @@ bool ParseConfigBool(std::string_view value, bool fallback) {
     return fallback;
 }
 
+bool ConfigBool(std::string_view key, bool fallback) {
+    return ParseConfigBool(SwitchFrontend::GBAStationConfig::GetConfigValue(key), fallback);
+}
+
+int ConfigInt(std::string_view key, int fallback) {
+    int value = fallback;
+    if (TryParseInt(SwitchFrontend::GBAStationConfig::GetConfigValue(key), value)) {
+        return value;
+    }
+    return fallback;
+}
+
+struct VideoStreamOptions {
+    bool movie_cpu_throttle = true;
+    int movie_throttle_clock = 50;
+};
+
+VideoStreamOptions LoadVideoStreamOptions() {
+    VideoStreamOptions options;
+    options.movie_cpu_throttle = ConfigBool("movie_cpu_throttle", true);
+    options.movie_throttle_clock = std::clamp(ConfigInt("movie_throttle_clock", 50), 10, 100);
+    return options;
+}
+
+void RegisterMovieCpuThrottle(Core::System& system, bool enabled, int throttle_clock) {
+    system.RegisterMoviePlaybackStateChanged(
+        [&system, enabled, throttle_clock, saved_clock = 100](bool playing) mutable {
+            if (!enabled) {
+                return;
+            }
+            if (playing) {
+                saved_clock = Settings::values.cpu_clock_percentage.GetValue();
+                Settings::values.cpu_clock_percentage.SetValue(throttle_clock);
+                system.ApplySettings();
+                DebugLog("movie CPU throttle on: clock=%d saved=%d", throttle_clock, saved_clock);
+            } else {
+                Settings::values.cpu_clock_percentage.SetValue(saved_clock);
+                system.ApplySettings();
+                DebugLog("movie CPU throttle off: restored=%d", saved_clock);
+            }
+        });
+}
+
 bool ApplySwitchFastmemConfig() {
     using SwitchFrontend::GBAStationConfig::GetConfigValue;
     std::string configured = GetConfigValue("switch_fastmem");
@@ -2657,6 +2700,7 @@ int Run(int argc, char** argv) {
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
     SwitchFrontend::GBAStationConfig::ApplyConfig();
+    const VideoStreamOptions video_stream_options = LoadVideoStreamOptions();
     const bool switch_fastmem_enabled = ApplySwitchFastmemConfig();
     const bool switch_jit_fast_dispatch_enabled = ApplySwitchJitFastDispatchConfig();
     ApplyConfiguredDisplayDefaults(launch_options.display_settings,
@@ -2670,7 +2714,7 @@ int Run(int argc, char** argv) {
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
@@ -2679,7 +2723,9 @@ int Run(int argc, char** argv) {
              Settings::values.resolution_factor.GetValue(),
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
              switch_fastmem_enabled ? 1 : 0,
-             switch_jit_fast_dispatch_enabled ? 1 : 0);
+             switch_jit_fast_dispatch_enabled ? 1 : 0,
+             video_stream_options.movie_cpu_throttle ? 1 : 0,
+             video_stream_options.movie_throttle_clock);
     StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
     FileUtil::SetUserPath(std::string{SystemDir} + "/");
     StartupLog("Run: Common::Log init");
@@ -2694,6 +2740,8 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: Core::System::GetInstance");
     auto& system = Core::System::GetInstance();
+    RegisterMovieCpuThrottle(system, video_stream_options.movie_cpu_throttle,
+                             video_stream_options.movie_throttle_clock);
     StartupLog("Run: frontend applets/image interface");
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
     Frontend::RegisterDefaultApplets(system);
@@ -3801,6 +3849,7 @@ int Run(int argc, char** argv) {
     }
     SwitchFrontend::VulkanOverlay::SetFastForwardActive(false);
     Settings::ResetTemporaryFrameLimit();
+    system.SetMoviePlaying(false);
     ExitLog("shutdown step: restore temporary settings done");
     const auto shutdown_started = Clock::now();
     if (menu_initialized) {
