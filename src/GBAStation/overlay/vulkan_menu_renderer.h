@@ -57,6 +57,7 @@ struct State {
     bool file_preview{};
     std::string file_preview_path;
     std::string toast;
+    bool quick_state_occupied{};
     std::array<bool, 10> occupied{};
     std::vector<OverlayUI::CheatEntry> cheats;
     GBAStationDisplaySettings display{};

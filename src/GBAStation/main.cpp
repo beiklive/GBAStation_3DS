@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <csignal>
 #include <cstdarg>
 #include <cstddef>
@@ -1168,8 +1169,11 @@ struct CiaBrowserEntry {
 struct CiaInstallState {
     std::atomic_bool active{false};
     std::atomic_bool done{false};
+    std::atomic_bool cancel_requested{false};
     std::atomic_size_t written{0};
     std::atomic_size_t total{0};
+    std::atomic_size_t batch_index{1};
+    std::atomic_size_t batch_total{1};
     Service::AM::InstallStatus result{Service::AM::InstallStatus::ErrorInvalid};
     std::string source_path;
     std::string installed_path;
@@ -1315,6 +1319,41 @@ const char* CiaTitleKindName(CiaTitleKind kind) {
 
 bool ShouldAddCiaToGameDb(CiaTitleKind kind) {
     return kind == CiaTitleKind::Application || kind == CiaTitleKind::Demo;
+}
+
+int CiaInstallPriority(CiaTitleKind kind) {
+    switch (kind) {
+    case CiaTitleKind::Application:
+    case CiaTitleKind::Demo:
+        return 0;
+    case CiaTitleKind::Update:
+        return 1;
+    case CiaTitleKind::AddOnContent:
+        return 2;
+    case CiaTitleKind::System:
+        return 3;
+    default:
+        return 4;
+    }
+}
+
+std::vector<CiaBrowserEntry> BuildCiaInstallQueue(const std::vector<CiaBrowserEntry>& entries) {
+    std::vector<CiaBrowserEntry> queue;
+    for (const CiaBrowserEntry& entry : entries) {
+        if (entry.type == CiaBrowserEntry::Type::Cia && entry.readable) {
+            queue.push_back(entry);
+        }
+    }
+    std::stable_sort(queue.begin(), queue.end(), [](const CiaBrowserEntry& left,
+                                                      const CiaBrowserEntry& right) {
+        const int left_priority = CiaInstallPriority(left.kind);
+        const int right_priority = CiaInstallPriority(right.kind);
+        if (left_priority != right_priority) {
+            return left_priority < right_priority;
+        }
+        return Common::ToLower(left.name) < Common::ToLower(right.name);
+    });
+    return queue;
 }
 
 std::string FormatTitleVersion(u16 version) {
@@ -1830,22 +1869,33 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
     }
 
     if (!notice.empty()) {
-        canvas.Text(54, 674, canvas.Truncate(notice, 20, 780), 20, accent);
+        canvas.Text(54, 674, canvas.Truncate(notice, 20, 560), 20, accent);
     }
-    canvas.Text(760, 674, "A 确认   B 返回上级   X 删除源文件   + 返回主程序", 19, dim);
+    canvas.Text(640, 656, "A 确认   B 返回/取消安装", 18, dim);
+    canvas.Text(640, 688, "X 删除源文件   Y 全部安装   + 返回", 18, dim);
 
     if (install_state.active.load(std::memory_order_acquire)) {
         const std::size_t written = install_state.written.load(std::memory_order_acquire);
         const std::size_t total = install_state.total.load(std::memory_order_acquire);
+        const std::size_t batch_index = install_state.batch_index.load(std::memory_order_acquire);
+        const std::size_t batch_total = install_state.batch_total.load(std::memory_order_acquire);
         canvas.FillRect(0, 0, 1280, 720, {0, 0, 0, 150});
         canvas.FillRect(360, 278, 560, 150, {28, 34, 45, 255});
         canvas.Border(360, 278, 560, 150, {80, 96, 120, 255});
-        canvas.Text(390, 326, canvas.Truncate("正在安装 " + install_state.title, 22, 500), 22,
-                    text);
+        std::string title = "正在安装 ";
+        if (batch_total > 1) {
+            title += std::to_string(batch_index) + "/" + std::to_string(batch_total) + " ";
+        }
+        title += install_state.title;
+        canvas.Text(390, 326, canvas.Truncate(title, 22, 500), 22, text);
         canvas.FillRect(390, 350, 500, 12, {52, 62, 78, 255});
         const int fill = total == 0 ? 0 : static_cast<int>(500ULL * written / total);
         canvas.FillRect(390, 350, std::clamp(fill, 0, 500), 12, accent);
         canvas.Text(390, 396, FormatBytes(written) + " / " + FormatBytes(total), 19, dim);
+        canvas.Text(390, 418, install_state.cancel_requested.load(std::memory_order_acquire)
+                                 ? "正在取消当前安装..."
+                                 : "按 B 取消当前安装",
+                    18, accent);
     }
     canvas.End();
 }
@@ -1862,6 +1912,43 @@ void DrawCiaMessage(CiaInstallerCanvas& canvas, const std::string& title,
     canvas.Text(360, 360, canvas.Truncate(message, 22, 560), 22, {172, 184, 200, 255});
     canvas.Text(360, 420, "按 A 或 B 返回文件列表", 20, {74, 170, 255, 255});
     canvas.End();
+}
+
+void DrawCiaInstallAllConfirm(CiaInstallerCanvas& canvas, std::size_t count, bool delete_source) {
+    if (!canvas.Begin()) {
+        return;
+    }
+    constexpr Rgba text{238, 243, 250, 255};
+    constexpr Rgba dim{172, 184, 200, 255};
+    constexpr Rgba accent{74, 170, 255, 255};
+    canvas.FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
+    canvas.FillRect(260, 216, 760, 288, {28, 34, 45, 255});
+    canvas.Border(260, 216, 760, 288, {80, 96, 120, 255});
+    canvas.Text(304, 276, "全部安装", 32, text);
+    canvas.Text(304, 328, "是否安装当前目录中的 " + std::to_string(count) + " 个CIA文件？", 24,
+                dim);
+    canvas.Text(304, 372, "安装顺序：游戏 > 更新 > DLC > 系统/其他", 21, accent);
+    canvas.Text(304, 412,
+                std::string{"安装成功后删除源文件："} + (delete_source ? "开" : "关"), 21,
+                delete_source ? accent : dim);
+    canvas.Text(304, 466, "A 全部安装   B 取消", 21, accent);
+    canvas.End();
+}
+
+bool ConfirmCiaInstallAll(CiaInstallerCanvas& canvas, std::size_t count, bool delete_source) {
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        const u64 down = padGetButtonsDown(&pad);
+        DrawCiaInstallAllConfirm(canvas, count, delete_source);
+        if (down & HidNpadButton_A) {
+            return true;
+        }
+        if (down & HidNpadButton_B) {
+            return false;
+        }
+        svcSleepThread(16'000'000);
+    }
+    return false;
 }
 
 int RunCiaInstaller(const LaunchOptions& options) {
@@ -1885,6 +1972,12 @@ int RunCiaInstaller(const LaunchOptions& options) {
     CiaInstallState install_state;
     std::thread install_thread;
     bool install_keep_awake = false;
+    std::vector<CiaBrowserEntry> batch_queue;
+    std::size_t batch_index{};
+    std::size_t batch_success{};
+    std::size_t batch_failed{};
+    bool batch_active = false;
+    bool batch_delete_source = false;
 
     const auto set_install_keep_awake = [&](bool enabled, const char* reason) {
         if (install_keep_awake == enabled) {
@@ -1916,7 +2009,21 @@ int RunCiaInstaller(const LaunchOptions& options) {
         scroll = std::clamp(scroll, 0, std::max(0, selected));
     };
 
-    const auto start_install = [&](const CiaBrowserEntry& entry) {
+    const auto acknowledge_result = [&](const std::string& title, const std::string& message) {
+        while (appletMainLoop()) {
+            padUpdate(&pad);
+            const u64 message_down = padGetButtonsDown(&pad);
+            DrawCiaMessage(canvas, title, message);
+            if (message_down & (HidNpadButton_A | HidNpadButton_B)) {
+                break;
+            }
+            svcSleepThread(16'000'000);
+        }
+    };
+
+    const auto start_install = [&](const CiaBrowserEntry& entry, bool delete_after_install,
+                                   std::size_t current_batch_index,
+                                   std::size_t current_batch_total) {
         if (!entry.readable) {
             notice = entry.name + ": 不是有效的CIA";
             return;
@@ -1934,10 +2041,12 @@ int RunCiaInstaller(const LaunchOptions& options) {
         install_state.result = Service::AM::InstallStatus::ErrorInvalid;
         install_state.total = static_cast<std::size_t>(entry.size);
         install_state.written = 0;
+        install_state.batch_index = current_batch_index;
+        install_state.batch_total = current_batch_total;
+        install_state.cancel_requested = false;
         install_state.done = false;
         install_state.active = true;
         notice.clear();
-        const bool delete_after_install = delete_source;
         install_thread = std::thread([&, entry, metadata = std::move(metadata),
                                       delete_after_install] {
             PinCurrentThreadToCore(0, "cia-install-worker");
@@ -1949,7 +2058,9 @@ int RunCiaInstaller(const LaunchOptions& options) {
                     install_state.written = written;
                     install_state.total = total;
                 },
-                true);
+                true, [&install_state] {
+                    return install_state.cancel_requested.load(std::memory_order_acquire);
+                });
             const bool installed_ok =
                 install_state.result == Service::AM::InstallStatus::Success;
             install_state.success = installed_ok;
@@ -1975,8 +2086,16 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         "类型未添加到数据库";
                 }
                 if (install_state.success && delete_after_install) {
-                    const int remove_rc = std::remove(entry.path.c_str());
-                    DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(), remove_rc);
+                    if (install_state.cancel_requested.load(std::memory_order_acquire)) {
+                        install_state.message += "，已取消删除源文件";
+                    } else {
+                        const int remove_rc = std::remove(entry.path.c_str());
+                        DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(),
+                                 remove_rc);
+                        if (remove_rc != 0) {
+                            install_state.message += "，删除源文件失败";
+                        }
+                    }
                 }
             }
             if (!installed_ok) {
@@ -1994,23 +2113,53 @@ int RunCiaInstaller(const LaunchOptions& options) {
         padUpdate(&pad);
         const u64 down = padGetButtonsDown(&pad);
         if (install_state.active.load(std::memory_order_acquire)) {
+            if ((down & HidNpadButton_B) &&
+                !install_state.done.load(std::memory_order_acquire)) {
+                install_state.cancel_requested = true;
+                notice = batch_active ? "正在取消当前安装，随后停止全部安装" : "正在取消当前安装";
+                DebugLog("CIA install cancel requested path=%s", install_state.source_path.c_str());
+            }
             if (install_state.done.load(std::memory_order_acquire)) {
                 join_install_thread("install-done");
                 install_state.active = false;
                 notice = install_state.message;
                 refresh();
-                while (appletMainLoop()) {
-                    padUpdate(&pad);
-                    const u64 msg_down = padGetButtonsDown(&pad);
-                    DrawCiaMessage(canvas,
-                                   install_state.success ? "安装成功" : "安装失败",
-                                   install_state.message);
-                    if (msg_down & (HidNpadButton_A | HidNpadButton_B)) {
-                        break;
+                const bool cancelled = install_state.cancel_requested.load(std::memory_order_acquire) ||
+                                       install_state.result == Service::AM::InstallStatus::ErrorAborted;
+                if (!batch_active) {
+                    acknowledge_result(cancelled ? "安装已取消"
+                                                : install_state.success ? "安装成功" : "安装失败",
+                                       install_state.message);
+                    refresh();
+                } else {
+                    if (install_state.success) {
+                        ++batch_success;
+                    } else if (!cancelled) {
+                        ++batch_failed;
                     }
-                    svcSleepThread(16'000'000);
+                    if (cancelled) {
+                        const std::size_t remaining =
+                            batch_queue.size() - batch_index - (install_state.success ? 1 : 0);
+                        batch_active = false;
+                        acknowledge_result(
+                            "全部安装已取消",
+                            "已成功 " + std::to_string(batch_success) + " 个，失败 " +
+                                std::to_string(batch_failed) + " 个，剩余 " +
+                                std::to_string(remaining) + " 个未安装");
+                    } else {
+                        ++batch_index;
+                        if (batch_index < batch_queue.size()) {
+                            start_install(batch_queue[batch_index], batch_delete_source,
+                                          batch_index + 1, batch_queue.size());
+                        } else {
+                            batch_active = false;
+                            acknowledge_result(
+                                batch_failed == 0 ? "全部安装完成" : "全部安装完成（有失败）",
+                                "成功 " + std::to_string(batch_success) + " 个，失败 " +
+                                    std::to_string(batch_failed) + " 个");
+                        }
+                    }
                 }
-                refresh();
             }
             DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
                              install_state, notice);
@@ -2023,6 +2172,26 @@ int RunCiaInstaller(const LaunchOptions& options) {
         }
         if (down & HidNpadButton_X) {
             delete_source = !delete_source;
+        }
+        if (down & HidNpadButton_Y) {
+            std::vector<CiaBrowserEntry> queue = BuildCiaInstallQueue(entries);
+            if (queue.empty()) {
+                notice = "当前目录没有可安装的CIA/zCIA文件";
+            } else if (ConfirmCiaInstallAll(canvas, queue.size(), delete_source)) {
+                batch_queue = std::move(queue);
+                batch_index = 0;
+                batch_success = 0;
+                batch_failed = 0;
+                batch_active = true;
+                batch_delete_source = delete_source;
+                start_install(batch_queue.front(), batch_delete_source, 1, batch_queue.size());
+            } else {
+                notice = "已取消全部安装";
+            }
+            DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
+                             install_state, notice);
+            svcSleepThread(16'000'000);
+            continue;
         }
         if (down & HidNpadButton_B) {
             if (!ParentDirectory(directory).empty()) {
@@ -2050,7 +2219,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                     scroll = 0;
                     refresh();
                 } else {
-                    start_install(entry);
+                    start_install(entry, delete_source, 1, 1);
                 }
             }
         }
@@ -2575,6 +2744,18 @@ void SyncSwitchHostLayoutSettings(const SwitchFrontend::GBAStationDisplaySetting
     Settings::values.screen_gap.SetValue(std::clamp(display.screen_gap, 0, 256));
 }
 
+void MirrorScreenSides(SwitchFrontend::GBAStationDisplaySettings& display) {
+    if (display.screen_layout == "top") {
+        display.screen_layout = "bottom";
+        return;
+    }
+    if (display.screen_layout == "bottom") {
+        display.screen_layout = "top";
+        return;
+    }
+    Settings::values.swap_screen.SetValue(!Settings::values.swap_screen.GetValue());
+}
+
 void LogSwitchDisplaySettings(const char* reason,
                               const SwitchFrontend::GBAStationDisplaySettings& display) {
     DebugLog("display settings %s: layout=%s orientation=%d resolution=%d integer=%d gap=%d "
@@ -2810,6 +2991,7 @@ int Run(int argc, char** argv) {
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
     Settings::values.swap_screen.SetValue(false);
+    Settings::values.small_screen_position.SetValue(Settings::SmallScreenPosition::MiddleRight);
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
@@ -2950,7 +3132,7 @@ int Run(int argc, char** argv) {
     if (system.GetAppLoader().ReadProgramId(program_id) == Loader::ResultStatus::Success) {
         const u64 movie_id = system.Movie().GetCurrentMovieID();
         for (const Core::SaveStateInfo& state : Core::ListSaveStates(program_id, movie_id)) {
-            if (state.slot > 0 && state.slot <= SwitchFrontend::OverlayUI::StateSlotCount) {
+            if (state.slot <= SwitchFrontend::OverlayUI::StateSlotCount) {
                 (*slot_state_cache)[state.slot].store(true, std::memory_order_relaxed);
             }
         }
@@ -2958,7 +3140,7 @@ int Run(int argc, char** argv) {
     SwitchFrontend::OverlayUI::SetGameTitle(launch_options.title);
     SwitchFrontend::OverlayUI::SetSlotOccupiedCallback(
         [slot_state_cache](int slot) {
-            return slot > 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
+            return slot >= 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
                    (*slot_state_cache)[slot].load(std::memory_order_acquire);
         });
     auto cheat_settings_dirty = std::make_shared<std::atomic_bool>(false);
@@ -3057,10 +3239,12 @@ int Run(int argc, char** argv) {
     bool block_game_input_until_release = false;
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
+    bool previous_swap_screens_combo = false;
     bool previous_mic_input_combo = false;
     bool mic_input_simulated = false;
     AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
     bool last_fast_forward_active = false;
+    float last_fast_forward_multiplier = launch_options.display_settings.fast_forward_multiplier;
     bool fast_forward_compile_throttled = false;
     bool force_input_suppressed_during_shutdown = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
@@ -3175,7 +3359,10 @@ int Run(int argc, char** argv) {
         Settings::is_temporary_frame_limit = fast_forward_active;
         Settings::temporary_frame_limit =
             fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
-        if (fast_forward_active != last_fast_forward_active) {
+        const bool fast_forward_multiplier_changed =
+            std::fabs(fast_forward_multiplier - last_fast_forward_multiplier) > 0.001f;
+        if (fast_forward_active != last_fast_forward_active ||
+            (fast_forward_active && fast_forward_multiplier_changed)) {
             Settings::values.use_vsync.SetValue(fast_forward_active ? false : normal_vsync);
             SwitchFrontend::VulkanOverlay::SetFastForwardActive(fast_forward_active);
             vulkan_renderer.SetFastForward(fast_forward_active, fast_forward_multiplier);
@@ -3184,6 +3371,7 @@ int Run(int argc, char** argv) {
                      Settings::temporary_frame_limit);
             last_fast_forward_active = fast_forward_active;
         }
+        last_fast_forward_multiplier = fast_forward_multiplier;
         if (menu_visible != menu_was_visible) {
             block_game_input_until_release = true;
             DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
@@ -3205,6 +3393,20 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = false;
         }
         bool suppress_game_input = menu_visible || block_game_input_until_release;
+        const bool swap_screens_combo =
+            SwitchFrontend::InputMapping::SwapScreensHotkeyPressed(pad);
+        if (!suppress_game_input && swap_screens_combo && !previous_swap_screens_combo) {
+            auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            MirrorScreenSides(display);
+            SwitchFrontend::VulkanOverlay::SetDisplaySettings(display);
+            window.SetDisplaySettings(display);
+            SwitchFrontend::OverlayUI::ShowToast("已交换上下屏");
+            DebugLog("hotkey swap screens: layout=%s swap=%d", display.screen_layout.c_str(),
+                     Settings::values.swap_screen.GetValue() ? 1 : 0);
+            block_game_input_until_release = true;
+            suppress_game_input = true;
+        }
+        previous_swap_screens_combo = swap_screens_combo;
         const bool mic_input_combo = SwitchFrontend::InputMapping::MicInputHotkeyPressed(pad);
         if (!suppress_game_input && mic_input_combo && !previous_mic_input_combo) {
             if (!mic_input_simulated) {
@@ -3260,9 +3462,14 @@ int Run(int argc, char** argv) {
                     }
                 }
                 char message[64]{};
-                std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
-                                                              : "准备读取存档位 %d",
-                              slot);
+                if (slot == 0) {
+                    std::snprintf(message, sizeof(message),
+                                  saving ? "准备快速存档" : "准备快速读档");
+                } else {
+                    std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
+                                                                    : "准备读取存档位 %d",
+                                  slot);
+                }
                 SwitchFrontend::OverlayUI::ShowToast(message);
                 DebugLog("menu queued %s state slot=%d", saving ? "save" : "load", slot);
             } else {
@@ -3542,8 +3749,14 @@ int Run(int argc, char** argv) {
                     last_heartbeat_frame = pause_frame_baseline;
                 }
                 char message[64]{};
-                std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
-                                                                  : "已读取存档位 %d", slot);
+                if (slot == 0) {
+                    std::snprintf(message, sizeof(message),
+                                  saving ? "快速存档完成" : "快速读档完成");
+                } else {
+                    std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
+                                                                    : "已读取存档位 %d",
+                                  slot);
+                }
                 SwitchFrontend::OverlayUI::ShowToast(message);
                 pending_state_request = {};
             } else if (request_status != Core::System::SaveStateStatus::NONE &&

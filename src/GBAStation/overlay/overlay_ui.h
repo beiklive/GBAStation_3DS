@@ -16,6 +16,8 @@ enum class Action {
     Resume,
     Reset,
     Exit,
+    QuickSaveState,
+    QuickLoadState,
     SaveStateSlot1,
     SaveStateSlot2,
     SaveStateSlot3,

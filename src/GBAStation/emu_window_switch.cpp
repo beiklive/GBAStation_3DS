@@ -88,29 +88,36 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
         } else {
             layout.bottom_opacity = opacity;
         }
+        if (Settings::values.swap_screen.GetValue()) {
+            std::swap(layout.top_screen, layout.bottom_screen);
+        }
     } else if (settings.screen_layout == "horizontal") {
-        layout = Layout::LargeFrameLayout(width, height, false, false, 1.0f,
+        layout = Layout::LargeFrameLayout(width, height,
+                                          Settings::values.swap_screen.GetValue(), false, 1.0f,
                                           Settings::SmallScreenPosition::MiddleRight);
     } else if (settings.screen_layout == "priority_top") {
         layout = Layout::LargeFrameLayout(
-            width, height, false, false,
+            width, height, Settings::values.swap_screen.GetValue(), false,
             std::clamp(Settings::values.large_screen_proportion.GetValue(), 1.0f, 16.0f),
-            Settings::SmallScreenPosition::BelowLarge);
+            Settings::SmallScreenPosition::MiddleRight);
     } else if (settings.screen_layout == "priority_bottom") {
         layout = Layout::LargeFrameLayout(
-            width, height, true, false,
+            width, height, !Settings::values.swap_screen.GetValue(), false,
             std::clamp(Settings::values.large_screen_proportion.GetValue(), 1.0f, 16.0f),
-            Settings::SmallScreenPosition::BelowLarge);
+            Settings::SmallScreenPosition::MiddleRight);
     } else if (settings.screen_layout == "hybrid") {
-        layout = Layout::HybridScreenLayout(width, height, false, false);
+        layout = Layout::HybridScreenLayout(width, height,
+                                            Settings::values.swap_screen.GetValue(), false);
     } else if (settings.screen_layout == "top") {
         layout = Layout::SingleFrameLayout(width, height, false, false);
     } else if (settings.screen_layout == "bottom") {
         layout = Layout::SingleFrameLayout(width, height, true, false);
     } else if (settings.screen_layout == "vertical") {
-        layout = Layout::DefaultFrameLayout(width, height, false, false);
+        layout = Layout::DefaultFrameLayout(width, height,
+                                            Settings::values.swap_screen.GetValue(), false);
     } else {
-        layout = Layout::DefaultFrameLayout(width, height, false, false);
+        layout = Layout::DefaultFrameLayout(width, height,
+                                            Settings::values.swap_screen.GetValue(), false);
     }
     if (settings.screen_layout != "custom") {
         layout.top_opacity = 1.0f;

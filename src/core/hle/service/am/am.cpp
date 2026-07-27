@@ -84,6 +84,39 @@ struct TicketInfo {
 
 static_assert(sizeof(TicketInfo) == 0x18, "Ticket info structure size is wrong");
 
+std::optional<std::string> BackupExistingInstallFile(const std::string& path) {
+    if (!FileUtil::Exists(path)) {
+        return std::string{};
+    }
+    for (u32 attempt = 0; attempt < 1024; ++attempt) {
+        const std::string backup_path =
+            path + ".cia-install-backup" + (attempt == 0 ? "" : "." + std::to_string(attempt));
+        if (FileUtil::Exists(backup_path)) {
+            continue;
+        }
+        if (FileUtil::Rename(path, backup_path)) {
+            return backup_path;
+        }
+        LOG_ERROR(Service_AM, "Failed to back up existing install file {}", path);
+        return std::nullopt;
+    }
+    LOG_ERROR(Service_AM, "Could not allocate an install backup path for {}", path);
+    return std::nullopt;
+}
+
+void RestoreInstallFile(const std::string& path, const std::string& backup_path) {
+    FileUtil::Delete(path);
+    if (!backup_path.empty() && !FileUtil::Rename(backup_path, path)) {
+        LOG_ERROR(Service_AM, "Failed to restore interrupted install backup {}", backup_path);
+    }
+}
+
+void DeleteInstallBackup(const std::string& backup_path) {
+    if (!backup_path.empty()) {
+        FileUtil::Delete(backup_path);
+    }
+}
+
 class CIAFile::DecryptionState {
 public:
     std::vector<CryptoPP::CBC_Mode<CryptoPP::AES>::Decryption> content;
@@ -468,12 +501,19 @@ CIAFile::InstallResult CIAFile::WriteTicket() {
     }
 
     const auto& ticket = container.GetTicket();
-    const auto ticket_path = GetTicketPath(ticket.GetTitleID(), ticket.GetTicketID());
+    ticket_path = GetTicketPath(ticket.GetTitleID(), ticket.GetTicketID());
 
     // Create ticket folder if it does not exist
     std::string ticket_folder;
     Common::SplitPath(ticket_path, &ticket_folder, nullptr, nullptr);
     FileUtil::CreateFullPath(ticket_folder);
+
+    const auto backup_path = BackupExistingInstallFile(ticket_path);
+    if (!backup_path) {
+        res.result = FileSys::ResultFileNotFound;
+        return res;
+    }
+    ticket_backup_path = *backup_path;
 
     // Save ticket
     res.install_full_path = ticket_path;
@@ -512,12 +552,19 @@ CIAFile::InstallResult CIAFile::WriteTitleMetadata(std::span<const u8> tmd_data,
         is_update = true;
     }
 
-    std::string tmd_path = GetTitleMetadataPath(media_type, tmd.GetTitleID(), is_update);
+    tmd_path = GetTitleMetadataPath(media_type, tmd.GetTitleID(), is_update);
 
     // Create content/ folder if it doesn't exist
     std::string tmd_folder;
     Common::SplitPath(tmd_path, &tmd_folder, nullptr, nullptr);
     FileUtil::CreateFullPath(tmd_folder);
+
+    const auto backup_path = BackupExistingInstallFile(tmd_path);
+    if (!backup_path) {
+        res.result = FileSys::ResultFileNotFound;
+        return res;
+    }
+    tmd_backup_path = *backup_path;
 
     // Save TMD so that we can start getting new .app paths
     res.install_full_path = tmd_path;
@@ -704,9 +751,15 @@ Result CIAFile::PrepareToImportContent(const FileSys::TitleMetadata& tmd) {
     current_content_file.reset();
     current_content_index = -1;
     content_file_paths.clear();
+    content_file_backups.clear();
     for (std::size_t i = 0; i < content_count; i++) {
         auto path = GetTitleContentPath(media_type, tmd.GetTitleID(), i, is_update);
+        const auto backup_path = BackupExistingInstallFile(path);
+        if (!backup_path) {
+            return FileSys::ResultFileNotFound;
+        }
         content_file_paths.emplace_back(path);
+        content_file_backups.emplace_back(*backup_path);
     }
 
     if (container.GetTitleMetadata().HasEncryptedContent(from_cdn ? nullptr
@@ -884,16 +937,26 @@ bool CIAFile::Close() {
                                     }));
     }
 
-    // Install aborted
+    const auto rollback_install = [this] {
+        current_content_file.reset();
+        for (std::size_t i = 0; i < content_file_paths.size(); ++i) {
+            const std::string backup_path =
+                i < content_file_backups.size() ? content_file_backups[i] : std::string{};
+            RestoreInstallFile(content_file_paths[i], backup_path);
+        }
+        if (!tmd_path.empty()) {
+            RestoreInstallFile(tmd_path, tmd_backup_path);
+        }
+        if (!ticket_path.empty()) {
+            RestoreInstallFile(ticket_path, ticket_backup_path);
+        }
+    };
+
+    // Install aborted. Restore pre-existing files instead of recursively deleting the title's
+    // content directory: a cancelled update must not remove the game that was already installed.
     if (!complete) {
         LOG_ERROR(Service_AM, "CIAFile closed prematurely or cancelled, aborting install...");
-        if (!is_additional_content) {
-            // Only delete the content folder as there may be user save data in the title folder.
-            const std::string title_content_path =
-                GetTitlePath(media_type, container.GetTitleMetadata().GetTitleID()) + "content/";
-            current_content_file.reset();
-            FileUtil::DeleteDirRecursively(title_content_path);
-        }
+        rollback_install();
         return true;
     }
 
@@ -935,6 +998,11 @@ bool CIAFile::Close() {
 
         FileUtil::Delete(old_tmd_path);
     }
+    for (const std::string& backup_path : content_file_backups) {
+        DeleteInstallBackup(backup_path);
+    }
+    DeleteInstallBackup(tmd_backup_path);
+    DeleteInstallBackup(ticket_backup_path);
     return true;
 }
 
@@ -1070,7 +1138,7 @@ void ContentFile::Cancel(FS::MediaType media_type, u64 title_id) {
 }
 
 InstallStatus InstallCIA(const std::string& path, std::function<ProgressCallback>&& update_callback,
-                         bool authorize_decryption) {
+                         bool authorize_decryption, std::function<bool()>&& cancel_callback) {
     LOG_INFO(Service_AM, "Installing {}...", path);
 
     if (!FileUtil::Exists(path)) {
@@ -1106,19 +1174,36 @@ InstallStatus InstallCIA(const std::string& path, std::function<ProgressCallback
         auto file_size = in_file->GetSize();
         std::size_t total_bytes_read = 0;
         while (total_bytes_read != file_size) {
+            if (cancel_callback && cancel_callback()) {
+                LOG_INFO(Service_AM, "CIA file installation cancelled by user: {}", path);
+                installFile.Cancel();
+                return InstallStatus::ErrorAborted;
+            }
             std::size_t bytes_read = in_file->ReadBytes(buffer.data(), buffer.size());
+            if (bytes_read == 0) {
+                LOG_ERROR(Service_AM, "CIA file installation stopped on an unexpected EOF: {}",
+                          path);
+                installFile.Cancel();
+                return InstallStatus::ErrorAborted;
+            }
             auto result = installFile.Write(static_cast<u64>(total_bytes_read), bytes_read, true,
                                             false, static_cast<u8*>(buffer.data()));
 
-            if (update_callback) {
-                update_callback(total_bytes_read, file_size);
-            }
             if (result.Failed()) {
                 LOG_ERROR(Service_AM, "CIA file installation aborted with error code {:08x}",
                           result.Code().raw);
+                installFile.Cancel();
                 return InstallStatus::ErrorAborted;
             }
             total_bytes_read += bytes_read;
+            if (update_callback) {
+                update_callback(total_bytes_read, file_size);
+            }
+        }
+        if (cancel_callback && cancel_callback()) {
+            LOG_INFO(Service_AM, "CIA file installation cancelled before commit: {}", path);
+            installFile.Cancel();
+            return InstallStatus::ErrorAborted;
         }
         installFile.Close();
 

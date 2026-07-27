@@ -28,14 +28,19 @@ bool IsActionInRange(Action action, Action first, Action last) {
 } // namespace
 
 bool IsSaveStateAction(Action action) {
-    return IsActionInRange(action, Action::SaveStateSlot1, Action::SaveStateSlot10);
+    return action == Action::QuickSaveState ||
+           IsActionInRange(action, Action::SaveStateSlot1, Action::SaveStateSlot10);
 }
 
 bool IsLoadStateAction(Action action) {
-    return IsActionInRange(action, Action::LoadStateSlot1, Action::LoadStateSlot10);
+    return action == Action::QuickLoadState ||
+           IsActionInRange(action, Action::LoadStateSlot1, Action::LoadStateSlot10);
 }
 
 int GetStateSlotForAction(Action action) {
+    if (action == Action::QuickSaveState || action == Action::QuickLoadState) {
+        return 0;
+    }
     if (IsSaveStateAction(action)) {
         return static_cast<int>(action) - static_cast<int>(Action::SaveStateSlot1) + 1;
     }

@@ -59,7 +59,7 @@ std::atomic_int custom_layout_focus{};
 std::atomic_int display_layout{2};
 std::atomic_int display_orientation{};
 std::atomic_int display_internal_resolution{1};
-std::atomic<float> fast_forward_multiplier{4.0f};
+std::atomic<float> fast_forward_multiplier{2.0f};
 std::atomic_bool display_integer_scale{true};
 std::atomic_int display_gap{};
 std::atomic<float> display_top_scale{1.0f};
@@ -348,6 +348,7 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
             state.file_entries = file_entries;
             state.file_preview_path = file_preview_path;
         }
+        state.quick_state_occupied = OverlayUI::IsSlotOccupied(0);
         for (int slot = 0; slot < static_cast<int>(state.occupied.size()); ++slot) {
             state.occupied[slot] = OverlayUI::IsSlotOccupied(slot + 1);
         }
@@ -373,7 +374,7 @@ void HandleDisplayAdjustment(int row, int direction) {
     switch (row) {
     case 0:
     {
-        int index = 8;
+        int index = 6;
         const float current = fast_forward_multiplier.load(std::memory_order_relaxed);
         for (int i = 0; i < static_cast<int>(FastForwardValues.size()); ++i) {
             if (std::fabs(FastForwardValues[i] - current) < 0.01f) {
@@ -804,7 +805,7 @@ void Update(PadState* pad) {
             int count = 1;
             if (item == VulkanMenuRenderer::Item::SaveState ||
                 item == VulkanMenuRenderer::Item::LoadState) {
-                count = 10;
+                count = 11;
             } else if (item == VulkanMenuRenderer::Item::Display) {
                 count = DisplayControlCount;
             } else if (item == VulkanMenuRenderer::Item::Runtime) {
@@ -847,11 +848,16 @@ void Update(PadState* pad) {
             } else if (accept && !previous_navigation.accept) {
                 if (item == VulkanMenuRenderer::Item::SaveState) {
                     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
-                    PublishAction(SaveAction(focus), true);
+                    PublishAction(focus == 0 ? OverlayUI::Action::QuickSaveState
+                                             : SaveAction(focus - 1),
+                                  true);
                 } else if (item == VulkanMenuRenderer::Item::LoadState) {
-                    if (OverlayUI::IsSlotOccupied(focus + 1)) {
+                    const int slot = focus;
+                    if (OverlayUI::IsSlotOccupied(slot)) {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
-                        PublishAction(LoadAction(focus), true);
+                        PublishAction(focus == 0 ? OverlayUI::Action::QuickLoadState
+                                                 : LoadAction(focus - 1),
+                                      true);
                     } else {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
                         OverlayUI::ShowToast("该存档位为空");
