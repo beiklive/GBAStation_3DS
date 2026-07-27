@@ -17,10 +17,10 @@ Use a fine-grained personal access token scoped only to
 Never expose this workflow on `pull_request_target` and never pass the token
 as a command-line argument.
 
-After the first trusted `switchvk-nxvk-26.1.4-r1` release, copy the archive
-SHA-256 into `ci/switchvk.lock`, or set the non-secret repository variable
-`SWITCHVK_SHA256`. The repository variable takes precedence and avoids a
-follow-up source commit.
+The trusted `switchvk-nxvk-26.1.4-r1` archive SHA-256 is pinned in
+`ci/switchvk.lock`. A non-secret repository variable named `SWITCHVK_SHA256`
+can override that value for a one-off rebuild, but normal builds should use
+the repository lock.
 
 ## Local MSYS2 build
 
