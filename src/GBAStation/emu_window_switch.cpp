@@ -202,6 +202,21 @@ void EmuWindowSwitch::SetDisplaySettings(const GBAStationDisplaySettings& settin
     RefreshDimensions();
 }
 
+void EmuWindowSwitch::UpdateCurrentFramebufferLayout(unsigned width, unsigned height,
+                                                     bool is_portrait_mode) {
+    if (width == 0 || height == 0) {
+        RefreshDimensions();
+        return;
+    }
+    framebuffer_width = width;
+    framebuffer_height = height;
+    NotifyFramebufferLayoutChanged(BuildDisplayLayout(framebuffer_width, framebuffer_height,
+                                                      display_settings));
+    last_render_3d_mode = get3DMode();
+    display_layout_dirty = false;
+    (void)is_portrait_mode;
+}
+
 void EmuWindowSwitch::RefreshDimensions() {
     constexpr auto DimensionPollInterval = std::chrono::milliseconds{250};
     const auto now = std::chrono::steady_clock::now();

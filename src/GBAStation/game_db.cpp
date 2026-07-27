@@ -67,8 +67,9 @@ std::string DefaultSavePathForInstalledTitle(const std::string& rom_path) {
 }
 
 bool IsKnownLayout(const std::string& layout) {
-    constexpr std::array<const char*, 7> Layouts{{
-        "vertical", "horizontal", "priority_top", "hybrid", "top", "bottom", "custom",
+    constexpr std::array<const char*, 8> Layouts{{
+        "vertical", "horizontal", "priority_top", "priority_bottom", "hybrid", "top",
+        "bottom", "custom",
     }};
     return std::find(Layouts.begin(), Layouts.end(), layout) != Layouts.end();
 }

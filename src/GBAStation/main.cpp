@@ -2403,6 +2403,65 @@ bool ParseConfigBool(std::string_view value, bool fallback) {
     return fallback;
 }
 
+std::optional<std::string> NormalizeSwitchScreenLayout(std::string_view value) {
+    const std::string lower = LowerCopy(value);
+    if (lower == "vertical" || lower == "default" || lower == "original" ||
+        lower == "stacked") {
+        return "vertical";
+    }
+    if (lower == "horizontal" || lower == "side" || lower == "side_by_side" ||
+        lower == "side_screen") {
+        return "horizontal";
+    }
+    if (lower == "priority_top" || lower == "large" || lower == "large_screen" ||
+        lower == "large_inverted" || lower == "large_screen_inverted") {
+        return "priority_top";
+    }
+    if (lower == "priority_bottom") {
+        return "priority_bottom";
+    }
+    if (lower == "hybrid" || lower == "hybrid_screen" || lower == "hybrid_inverted" ||
+        lower == "hybrid_screen_inverted") {
+        return "hybrid";
+    }
+    if (lower == "top" || lower == "top_only" || lower == "single" ||
+        lower == "single_screen") {
+        return "top";
+    }
+    if (lower == "bottom" || lower == "bottom_only") {
+        return "bottom";
+    }
+    if (lower == "custom" || lower == "custom_layout") {
+        return "custom";
+    }
+    return std::nullopt;
+}
+
+std::optional<int> NormalizeSwitchScreenOrientation(std::string_view value) {
+    int degrees = 0;
+    if (TryParseInt(value, degrees)) {
+        if (degrees == 0 || degrees == 90 || degrees == 180 || degrees == 270) {
+            return degrees;
+        }
+        return std::nullopt;
+    }
+
+    const std::string lower = LowerCopy(value);
+    if (lower == "horizontal" || lower == "landscape" || lower == "default") {
+        return 0;
+    }
+    if (lower == "vertical" || lower == "portrait") {
+        return 90;
+    }
+    if (lower == "horizontal_inverted" || lower == "landscape_inverted") {
+        return 180;
+    }
+    if (lower == "vertical_inverted" || lower == "portrait_inverted") {
+        return 270;
+    }
+    return std::nullopt;
+}
+
 bool ConfigBool(std::string_view key, bool fallback) {
     return ParseConfigBool(SwitchFrontend::GBAStationConfig::GetConfigValue(key), fallback);
 }
@@ -2534,11 +2593,17 @@ void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& s
 
     if (include_screen) {
         const std::string layout = GetConfigValue("ndsScreenLayout");
-        if (!layout.empty()) {
-            settings.screen_layout = layout;
+        const std::string screen_layout = layout.empty() ? GetConfigValue("screen_layout") : layout;
+        const std::string azahar_layout =
+            screen_layout.empty() ? GetConfigValue("layout") : screen_layout;
+        if (const auto normalized = NormalizeSwitchScreenLayout(azahar_layout)) {
+            settings.screen_layout = *normalized;
         }
-        if (TryParseInt(GetConfigValue("ndsScreenOrientation"), parsed_int)) {
-            settings.screen_orientation = parsed_int;
+        const std::string orientation = GetConfigValue("ndsScreenOrientation");
+        const std::string display_orientation =
+            orientation.empty() ? GetConfigValue("display_orientation") : orientation;
+        if (const auto normalized = NormalizeSwitchScreenOrientation(display_orientation)) {
+            settings.screen_orientation = *normalized;
         }
         if (TryParseInt(GetConfigValue("ndsInternalResolution"), parsed_int)) {
             settings.internal_resolution = std::clamp(parsed_int, 1, 4);
@@ -2750,11 +2815,13 @@ int Run(int argc, char** argv) {
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
              launch_options.display_settings_from_game_db ? 1 : 0,
+             launch_options.display_settings.screen_layout.c_str(),
+             launch_options.display_settings.screen_orientation,
              launch_options.display_settings.internal_resolution,
              Settings::values.resolution_factor.GetValue(),
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
@@ -2868,6 +2935,8 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: ApplySettings");
     system.ApplySettings();
+    window.SetDisplaySettings(launch_options.display_settings);
+    LogSwitchDisplaySettings("post-apply-settings", launch_options.display_settings);
     SwitchFrontend::GameDatabase::UpdatePlayStats(
         launch_options.rom_path, launch_options.title, true, 0);
 

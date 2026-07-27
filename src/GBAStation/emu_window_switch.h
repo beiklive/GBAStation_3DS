@@ -19,6 +19,8 @@ public:
     explicit EmuWindowSwitch(NWindow* window = nwindowGetDefault());
 
     void PollEvents() override;
+    void UpdateCurrentFramebufferLayout(unsigned width, unsigned height,
+                                        bool is_portrait_mode = {}) override;
     CursorInfo GetCursorInfo() const override;
     void SetInputSuppressed(bool suppressed);
     bool IsControllerPointerEnabled() const;

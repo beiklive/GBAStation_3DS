@@ -33,7 +33,7 @@ namespace {
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
 constexpr int DisplayControlCount = 10;
-constexpr int RuntimeControlCount = 8;
+constexpr int RuntimeControlCount = 5;
 constexpr int CustomLayoutControlCount = 7;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
@@ -429,39 +429,25 @@ void HandleRuntimeAdjustment(int row, int direction) {
                                   std::memory_order_release);
         break;
     case 1:
-        runtime_custom_textures.store(!runtime_custom_textures.load(std::memory_order_relaxed),
-                                      std::memory_order_release);
-        break;
-    case 2:
-        runtime_texture_filter.store(
-            (runtime_texture_filter.load(std::memory_order_relaxed) + direction + 6) % 6,
-            std::memory_order_release);
-        break;
-    case 3:
         runtime_disable_right_eye.store(
             !runtime_disable_right_eye.load(std::memory_order_relaxed),
             std::memory_order_release);
         break;
-    case 4:
+    case 2:
         runtime_cpu_clock.store(
             std::clamp(runtime_cpu_clock.load(std::memory_order_relaxed) + direction * 25, 25,
                        400),
             std::memory_order_release);
         break;
-    case 5:
+    case 3:
         runtime_movie_cpu_throttle.store(
             !runtime_movie_cpu_throttle.load(std::memory_order_relaxed),
             std::memory_order_release);
         break;
-    case 6:
+    case 4:
         runtime_movie_throttle_clock.store(
             std::clamp(runtime_movie_throttle_clock.load(std::memory_order_relaxed) + direction,
                        10, 100),
-            std::memory_order_release);
-        break;
-    case 7:
-        runtime_controller_pointer.store(
-            !runtime_controller_pointer.load(std::memory_order_relaxed),
             std::memory_order_release);
         break;
     default:
