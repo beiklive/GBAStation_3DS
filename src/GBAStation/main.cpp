@@ -1437,21 +1437,7 @@ bool ReadCiaEntry(const std::string& path, CiaBrowserEntry& entry) {
     return true;
 }
 
-CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& fallback) {
-    CiaInstallMetadata metadata;
-    metadata.title = fallback;
-    std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
-    if (!file->IsOpen()) {
-        return metadata;
-    }
-    if (FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file.get()) != std::nullopt) {
-        file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(file));
-    }
-    FileSys::CIAContainer container;
-    if (container.Load(file.get()) != Loader::ResultStatus::Success || !container.GetSMDH()) {
-        return metadata;
-    }
-    const Loader::SMDH& smdh = *container.GetSMDH();
+void ApplySmdhMetadata(const Loader::SMDH& smdh, CiaInstallMetadata& metadata) {
     const auto try_language = [&smdh](Loader::SMDH::TitleLanguage language) {
         return CleanSmdhTitle(smdh.GetLongTitle(language));
     };
@@ -1476,7 +1462,82 @@ CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& f
             metadata.icon_rgba[i * 4 + 3] = 0xFF;
         }
     }
+}
+
+CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& fallback) {
+    CiaInstallMetadata metadata;
+    metadata.title = fallback;
+    std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
+    if (!file->IsOpen()) {
+        return metadata;
+    }
+    if (FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file.get()) != std::nullopt) {
+        file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(file));
+    }
+    FileSys::CIAContainer container;
+    if (container.Load(file.get()) != Loader::ResultStatus::Success || !container.GetSMDH()) {
+        return metadata;
+    }
+    ApplySmdhMetadata(*container.GetSMDH(), metadata);
+    DebugLog("CIA icon source=cia path=%s", path.c_str());
     return metadata;
+}
+
+bool ReadInstalledTitleMetadata(const std::string& path, CiaInstallMetadata& metadata) {
+    auto loader = Loader::GetLoader(path);
+    if (!loader) {
+        DebugLog("CIA installed icon loader unavailable path=%s", path.c_str());
+        return false;
+    }
+
+    std::vector<u8> smdh_bytes;
+    if (loader->ReadIcon(smdh_bytes) != Loader::ResultStatus::Success ||
+        !Loader::IsValidSMDH(smdh_bytes)) {
+        DebugLog("CIA installed icon SMDH unavailable path=%s size=%zu", path.c_str(),
+                 smdh_bytes.size());
+        return false;
+    }
+
+    Loader::SMDH smdh{};
+    std::memcpy(&smdh, smdh_bytes.data(), sizeof(smdh));
+    ApplySmdhMetadata(smdh, metadata);
+    DebugLog("CIA icon source=installed-content path=%s", path.c_str());
+    return !metadata.icon_rgba.empty();
+}
+
+std::vector<u8> MakeFallbackCiaIcon(u64 program_id) {
+    constexpr int width = 48;
+    constexpr int height = 48;
+    std::vector<u8> rgba(width * height * 4, 0xFF);
+    const u8 accent_r = static_cast<u8>(72 + ((program_id >> 8) & 0x3F));
+    const u8 accent_g = static_cast<u8>(108 + ((program_id >> 16) & 0x3F));
+    const u8 accent_b = static_cast<u8>(142 + ((program_id >> 24) & 0x3F));
+    const auto set_pixel = [&](int x, int y, u8 r, u8 g, u8 b) {
+        const std::size_t offset = static_cast<std::size_t>(y * width + x) * 4;
+        rgba[offset + 0] = r;
+        rgba[offset + 1] = g;
+        rgba[offset + 2] = b;
+        rgba[offset + 3] = 0xFF;
+    };
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            set_pixel(x, y, accent_r, accent_g, accent_b);
+        }
+    }
+    const auto draw_screen = [&](int left, int top, int right, int bottom) {
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                const bool border = x < left + 2 || x >= right - 2 || y < top + 2 ||
+                                    y >= bottom - 2;
+                set_pixel(x, y, border ? 244 : 32, border ? 247 : 41, border ? 250 : 52);
+            }
+        }
+    };
+    draw_screen(10, 8, 38, 23);
+    draw_screen(14, 27, 34, 40);
+    DebugLog("CIA icon source=fallback tid=%016llx",
+             static_cast<unsigned long long>(program_id));
+    return rgba;
 }
 
 std::string SaveCiaIconPng(const std::string& save_path, const std::vector<u8>& icon_rgba) {
@@ -2070,12 +2131,22 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         Service::AM::GetTitleMediaType(entry.program_id);
                     install_state.installed_path =
                         Service::AM::GetTitleContentPath(media, entry.program_id);
+                    CiaInstallMetadata installed_metadata = metadata;
+                    if (installed_metadata.icon_rgba.empty()) {
+                        ReadInstalledTitleMetadata(install_state.installed_path,
+                                                   installed_metadata);
+                    }
+                    if (installed_metadata.icon_rgba.empty()) {
+                        installed_metadata.icon_rgba = MakeFallbackCiaIcon(entry.program_id);
+                    }
                     const std::string save_path = InstalledTitleSavePath(entry.program_id);
-                    const std::string logo_path = SaveCiaIconPng(save_path, metadata.icon_rgba);
+                    const std::string logo_path =
+                        SaveCiaIconPng(save_path, installed_metadata.icon_rgba);
                     install_state.success =
                         !install_state.installed_path.empty() &&
+                        !logo_path.empty() &&
                         SwitchFrontend::GameDatabase::SaveInstalledGameRecord(
-                            install_state.installed_path, install_state.title,
+                            install_state.installed_path, installed_metadata.title,
                             options.display_settings, logo_path, save_path,
                             TitleIdString(entry.program_id));
                     install_state.message = install_state.success
