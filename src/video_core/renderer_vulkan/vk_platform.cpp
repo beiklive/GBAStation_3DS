@@ -16,6 +16,7 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -325,6 +326,12 @@ vk::UniqueInstance CreateInstance(const Common::DynamicLibrary& library,
                                   bool dump_command_buffers) {
 #if defined(__SWITCH__)
     (void)library;
+    // Release NVK rejects pre-Turing devices unless the embedding application explicitly
+    // opts into the non-conformant implementation. Tegra X1 is Maxwell, so this must be set
+    // before the first instance or physical-device entrypoint is called.
+    setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+    setenv("MESA_SHADER_CACHE_DISABLE", "1", 1);
+
     uint32_t icd_version = 7;
     vk_icdNegotiateLoaderICDInterfaceVersion(&icd_version);
 

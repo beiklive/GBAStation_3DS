@@ -16,10 +16,21 @@
 #endif
 #include "common/common_types.h"
 #include "video_core/shader/shader.h"
+#ifdef __SWITCH__
+#include <atomic>
+#include <mutex>
+#include "common/thread_worker.h"
+#include "video_core/pica/shader_setup.h"
+#endif
 
 namespace Pica::Shader {
 
+class InterpreterEngine;
 class JitShader;
+
+#ifdef __SWITCH__
+[[nodiscard]] std::size_t GetPendingJitCompilationCount() noexcept;
+#endif
 
 class JitEngine final : public ShaderEngine {
 public:
@@ -37,7 +48,26 @@ private:
     std::size_t pool_write_pos = 0;
 #endif
 
+#ifdef __SWITCH__
+    struct CacheEntry {
+        std::unique_ptr<JitShader> shader;
+        std::atomic<bool> ready{false};
+        bool installed{};
+    };
+
+    void CompileEntry(CacheEntry* entry, std::shared_ptr<const ProgramCode> program_code,
+                      std::shared_ptr<const SwizzleData> swizzle_data);
+    bool InstallCompiledShader(CacheEntry*& entry, u64 cache_key);
+
+    std::unordered_map<u64, std::unique_ptr<CacheEntry>> cache;
+    std::mutex cache_mutex;
+    std::atomic<bool> compile_memory_exhausted{false};
+    std::unique_ptr<InterpreterEngine> interpreter;
+    // Keep this last so its worker is joined before the cache and code pool are destroyed.
+    Common::ThreadWorker compile_worker;
+#else
     std::unordered_map<u64, std::unique_ptr<JitShader>> cache;
+#endif
 };
 
 } // namespace Pica::Shader

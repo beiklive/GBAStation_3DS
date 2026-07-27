@@ -54,7 +54,7 @@ endif()
 link_directories(${DEVKITPRO}/portlibs/switch/lib ${DEVKITPRO}/libnx/lib)
 
 set(SWITCH_NVK_ROOT "$ENV{SWITCH_NVK_ROOT}" CACHE PATH
-    "Mesa 25.3.6 raw NVK Switch package root (include/ and lib/libvulkan.a)")
+    "Mesa/NXVK Switch package root (include/ and lib/libvulkan.a)")
 set(SWITCH_VULKAN_LIBRARY "" CACHE FILEPATH
     "Legacy override for a standalone Switch libvulkan.a archive")
 
@@ -90,7 +90,7 @@ set_target_properties(switch_nvk_vulkan PROPERTIES
 # Mesa's generated dispatch tables intentionally hold weak references to the
 # concrete NVK/common/WSI entrypoints.  That works for a shared ICD, but a
 # static archive needs explicit undefined roots or the archive members are not
-# extracted.  Derive the exact Mesa 25.3.6 implementation set from this package
+# extracted. Derive the exact implementation set from this package
 # instead of whole-archiving it (the merged archive contains repeated members).
 if(NOT CMAKE_NM)
     set(CMAKE_NM "${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-gcc-nm")
@@ -108,20 +108,42 @@ endif()
 string(REPLACE "\r\n" "\n" _switch_nvk_nm_output "${_switch_nvk_nm_output}")
 string(REPLACE "\n" ";" _switch_nvk_nm_lines "${_switch_nvk_nm_output}")
 set(SWITCH_NVK_KEEP_SYMBOLS)
+set(SWITCH_NVK_DEFINED_SYMBOLS)
 foreach(_line IN LISTS _switch_nvk_nm_lines)
-    if(_line MATCHES "[ \t][TDBR][ \t]+((nvk|vk_common|wsi)_[A-Z][A-Za-z0-9_]*)$")
-        list(APPEND SWITCH_NVK_KEEP_SYMBOLS "${CMAKE_MATCH_1}")
+    if(_line MATCHES "[ \t][TDBR][ \t]+([A-Za-z_][A-Za-z0-9_]*)$")
+        set(_defined_symbol "${CMAKE_MATCH_1}")
+        list(APPEND SWITCH_NVK_DEFINED_SYMBOLS "${_defined_symbol}")
+        if(_defined_symbol MATCHES "^(nvk|vk_common|wsi)_[A-Z][A-Za-z0-9_]*$")
+            list(APPEND SWITCH_NVK_KEEP_SYMBOLS "${_defined_symbol}")
+        endif()
     endif()
 endforeach()
-list(APPEND SWITCH_NVK_KEEP_SYMBOLS
-    vk_icdGetInstanceProcAddr
-    vk_icdNegotiateLoaderICDInterfaceVersion
-    nvk_switch_image_layout
-    nvkmd_switch_sync_get_fence
-    nvkmd_switch_binary_sync_type
-    wsi_switch_init_wsi
-    wsi_switch_finish_wsi
+foreach(_symbol IN ITEMS
+        vk_icdGetInstanceProcAddr
+        vk_icdNegotiateLoaderICDInterfaceVersion
+        nvk_shader_cache_init
+        nvk_switch_image_layout
+        nvkmd_switch_sync_get_fence
+        nvkmd_switch_binary_sync_type
+        nvkmd_nvgpu_try_create_pdev
+        nvkmd_nvgpu_create_dev
+        nvkmd_nvgpu_create_ctx
+        nvkmd_nvgpu_alloc_mem
+        nvkmd_nvgpu_alloc_va
+        nvkmd_nvgpu_syncobj_type
+        nvkmd_nvgpu_syncobj_set_fence
+        wsi_switch_init_wsi
+        wsi_switch_finish_wsi
 )
+    list(FIND SWITCH_NVK_DEFINED_SYMBOLS "${_symbol}" _defined_index)
+    if(NOT _defined_index EQUAL -1)
+        list(APPEND SWITCH_NVK_KEEP_SYMBOLS "${_symbol}")
+    endif()
+endforeach()
+list(FIND SWITCH_NVK_DEFINED_SYMBOLS "nvkmd_nvgpu_try_create_pdev" _nvgpu_index)
+if(NOT _nvgpu_index EQUAL -1)
+    target_compile_definitions(gbastation PRIVATE GBASTATION_NXVK_NVGPU=1)
+endif()
 list(REMOVE_DUPLICATES SWITCH_NVK_KEEP_SYMBOLS)
 list(SORT SWITCH_NVK_KEEP_SYMBOLS)
 list(LENGTH SWITCH_NVK_KEEP_SYMBOLS _switch_nvk_keep_count)

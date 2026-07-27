@@ -54,8 +54,14 @@ fi
 if [[ -z "${SWITCH_NVK_ROOT:-}" ]]; then
     for sibling in "$ROOT/../switchVK" "$ROOT/../switch-nvk"; do
         [[ -d "$sibling" ]] || continue
-        candidate="$sibling/nvk-switch-25.3.6"
+        candidate="$sibling/nvk-switch-26.1.4"
         driver_script="$sibling/build_local.sh"
+
+        if (( ! REBUILD_SWITCHVK )) &&
+           [[ ! -f "$candidate/lib/libvulkan.a" ]] &&
+           [[ -f "$sibling/nvk-switch-25.3.6/lib/libvulkan.a" ]]; then
+            candidate="$sibling/nvk-switch-25.3.6"
+        fi
 
         if (( REBUILD_SWITCHVK )) || [[ ! -f "$candidate/lib/libvulkan.a" ]]; then
             if [[ -f "$driver_script" ]]; then

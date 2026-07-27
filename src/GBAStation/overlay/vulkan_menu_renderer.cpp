@@ -132,11 +132,11 @@ std::vector<Vertex> vertices;
 float MeasureText(std::string_view text, float size);
 
 constexpr std::array<const char*, static_cast<int>(Item::Count)> ItemLabels{{
-    "返回游戏", "保存状态", "读取状态", "金手指", "画面设置", "重置游戏", "退出游戏",
+    "返回游戏", "保存状态", "读取状态", "金手指", "画面设置", "运行设置", "重置游戏", "退出游戏",
 }};
 
 constexpr std::array<int, static_cast<int>(Item::Count)> ItemIcons{{
-    0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE5D5, 0xE879,
+    0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE8B8, 0xE5D5, 0xE879,
 }};
 
 constexpr int NintendoIconA = 0xE0E0;
@@ -418,6 +418,8 @@ bool BuildFontAtlas() {
         "自定义画面布局调整当前项上屏布局下屏布局缩放偏移"
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
         "同步遮罩同步画面设置执行已同步到个游戏失败"
+        "运行设置即时画面设置性能视频和输入显示自定义纹理滤镜禁用右眼渲染"
+        "CPU时钟频率视频节流手柄触摸指针"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
         "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
@@ -481,9 +483,9 @@ bool BuildFontAtlas() {
         NintendoIconA, NintendoIconB, NintendoIconX, NintendoIconL, NintendoIconR,
     };
     const std::vector<int> material_codepoints{
-        0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE5D5, 0xE879,
+        0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE8B8, 0xE5D5, 0xE879,
         0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
-        0xE5CC, 0xE2C7, 0xE873,
+        0xE5CC, 0xE2C7, 0xE873, 0xE8E5, 0xE3B7, 0xE8A1, 0xE8EF, 0xE55F,
     };
     codepoints = regular_codepoints;
     codepoints.insert(codepoints.end(), nintendo_codepoints.begin(), nintendo_codepoints.end());
@@ -1481,6 +1483,13 @@ void DrawCustomLayoutSidebar(const State& state) {
     row(6, 564, "透明度", opacityValue(state.display.bottom_opacity));
 }
 
+const char* TextureFilterLabel(int filter) {
+    constexpr std::array<const char*, 6> Labels{{
+        "关闭", "Anime4K", "Bicubic", "ScaleForce", "xBRZ", "MMPX",
+    }};
+    return Labels[std::clamp(filter, 0, static_cast<int>(Labels.size()) - 1)];
+}
+
 void DrawOverlaySidebar(const State& state) {
     constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
     constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.72f};
@@ -1671,8 +1680,8 @@ void BuildMenu(const State& state) {
     constexpr float LeftX = 48.0f;
     constexpr float LeftY = 116.0f;
     constexpr float MenuW = 336.0f;
-    constexpr float ItemH = 70.0f;
-    constexpr float Step = 80.0f;
+    constexpr float ItemH = 58.0f;
+    constexpr float Step = 64.0f;
     const int selected = std::clamp(static_cast<int>(state.item), 0,
                                     static_cast<int>(Item::Count) - 1);
     for (int i = 0; i < static_cast<int>(Item::Count); ++i) {
@@ -1690,16 +1699,16 @@ void BuildMenu(const State& state) {
         }
         IconCentered(LeftX + 34, y + ItemH * 0.5f, 25,
                      focused ? White : Muted, ItemIcons[i]);
-        Text(LeftX + 64, y + 44, 22, focused ? White : Muted, ItemLabels[i]);
+        Text(LeftX + 64, y + 38, 21, focused ? White : Muted, ItemLabels[i]);
     }
-    Rect(LeftX + 18, LeftY + 5 * Step - 14, MenuW - 36, 1, {1, 1, 1, 0.14f});
+    Rect(LeftX + 18, LeftY + 6 * Step - 9, MenuW - 36, 1, {1, 1, 1, 0.14f});
     Rect(404, 110, 1, 500, {1, 1, 1, 0.08f});
 
     constexpr float ContentX = 432.0f;
     constexpr float ContentY = 110.0f;
     constexpr float ContentW = 790.0f;
     const Item item = static_cast<Item>(selected);
-    if (item != Item::Display) {
+    if (item != Item::Display && item != Item::Runtime) {
         Text(ContentX, ContentY + 28, 24, White, ItemLabels[selected]);
         Rect(ContentX, ContentY + 50, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
     }
@@ -1814,6 +1823,58 @@ void BuildMenu(const State& state) {
                     IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
                                  enabled ? Cyan : Muted, 0xE5CC);
                 }
+            }
+        }
+    } else if (item == Item::Runtime) {
+        const std::array<const char*, 8> labels{{
+            "FPS 显示", "自定义纹理", "纹理滤镜", "禁用右眼渲染",
+            "CPU 时钟频率", "视频 CPU 节流", "视频节流时钟", "手柄触摸指针",
+        }};
+        const std::array<int, 8> icons{{
+            0xE8E5, 0xE3B7, 0xE3F4, 0xE8A1, 0xE8E5, 0xE8EF, 0xE8E5, 0xE55F,
+        }};
+        std::array<std::string, 8> values{};
+        values[0] = state.runtime.fps_counter ? "开启" : "关闭";
+        values[1] = state.runtime.custom_textures ? "开启" : "关闭";
+        values[2] = TextureFilterLabel(state.runtime.texture_filter);
+        values[3] = state.runtime.disable_right_eye ? "开启" : "关闭";
+        values[4] = std::to_string(state.runtime.cpu_clock_percentage) + "%";
+        values[5] = state.runtime.movie_cpu_throttle ? "开启" : "关闭";
+        values[6] = std::to_string(state.runtime.movie_throttle_clock) + "%";
+        values[7] = state.runtime.controller_pointer ? "开启" : "关闭";
+        constexpr float HeaderY = 150.0f;
+        constexpr float HeaderSize = 27.0f;
+        constexpr float SectionSize = 18.0f;
+        constexpr float LabelSize = 20.0f;
+        constexpr float ValueSize = 18.0f;
+        constexpr float RowH = 42.0f;
+        constexpr std::array<float, 8> RowY{{204.0f, 252.0f, 300.0f, 348.0f,
+                                              430.0f, 478.0f, 526.0f, 574.0f}};
+        const int focus = state.content_focused
+                              ? std::clamp(state.content_focus, 0,
+                                            static_cast<int>(RowY.size()) - 1)
+                              : 0;
+        Text(ContentX, HeaderY, HeaderSize, White, ItemLabels[selected]);
+        Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+        Text(ContentX, 176.0f, SectionSize, Cyan, "即时画面设置");
+        Text(ContentX, 392.0f, SectionSize, Cyan, "性能视频和输入");
+        for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
+            const float y = RowY[row];
+            const bool focused = state.content_focused && focus == row;
+            Rect(ContentX, y, ContentW, RowH,
+                 focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                         : std::array<float, 4>{1, 1, 1, 0.045f});
+            if (focused) {
+                FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
+            } else {
+                Border(ContentX, y, ContentW, RowH, 1.0f, {1, 1, 1, 0.10f});
+            }
+            IconCentered(ContentX + 24, y + RowH * 0.5f, 20, Cyan, icons[row]);
+            Text(ContentX + 46, y + 32, LabelSize, White, labels[row]);
+            if (row == 2 || row == 4 || row == 6) {
+                SelectorValue(ContentX, y, ContentW, RowH, values[row], Cyan);
+            } else {
+                TextRight(ContentX + ContentW - 18.0f, y + 30, ValueSize, Cyan, values[row]);
             }
         }
     } else if (item == Item::Cheats) {

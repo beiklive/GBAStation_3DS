@@ -120,9 +120,11 @@ ssize_t pread(int fd, void* buf, size_t count, off_t offset) {
 }
 
 // Horizon has no setuid/AT_SECURE process model, so getenv is the secure variant here.
+#ifndef GBASTATION_NXVK_NVGPU
 char* secure_getenv(const char* name) {
     return std::getenv(name);
 }
+#endif
 
 // Mesa's built-in driconf table supports regular-expression match fields even when XML
 // file parsing is disabled. Switch has the newlib declarations but no regex runtime; an

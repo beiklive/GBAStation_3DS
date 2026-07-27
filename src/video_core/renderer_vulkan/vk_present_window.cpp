@@ -23,6 +23,7 @@ namespace Vulkan {
 namespace {
 
 std::atomic<OverlayDrawCallback> overlay_draw_callback{};
+std::atomic<OverlayActiveCallback> overlay_active_callback{};
 std::atomic<OverlayResetCallback> overlay_reset_callback{};
 std::mutex overlay_callback_mutex;
 
@@ -123,6 +124,11 @@ bool CanBlitToSwapchain(const vk::PhysicalDevice& physical_device, vk::Format fo
 void SetOverlayDrawCallback(OverlayDrawCallback callback) {
     std::scoped_lock lock{overlay_callback_mutex};
     overlay_draw_callback.store(callback, std::memory_order_release);
+}
+
+void SetOverlayActiveCallback(OverlayActiveCallback callback) {
+    std::scoped_lock lock{overlay_callback_mutex};
+    overlay_active_callback.store(callback, std::memory_order_release);
 }
 
 void SetOverlayResetCallback(OverlayResetCallback callback) {
@@ -424,6 +430,11 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     }
 
     const vk::Image swapchain_image = swapchain.Image();
+    const auto draw_overlay = overlay_draw_callback.load(std::memory_order_acquire);
+    const auto overlay_active = overlay_active_callback.load(std::memory_order_acquire);
+    // Preserve the established presentation path until a frontend explicitly installs both
+    // callbacks. This covers renderer startup and every frontend without the fast-path contract.
+    const bool has_overlay = !draw_overlay || !overlay_active || overlay_active();
 
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
@@ -484,9 +495,11 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
         },
     };
     const vk::ImageMemoryBarrier present_barrier{
-        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+        .srcAccessMask = has_overlay ? vk::AccessFlagBits::eColorAttachmentWrite
+                                     : vk::AccessFlagBits::eTransferWrite,
         .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
-        .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .oldLayout = has_overlay ? vk::ImageLayout::eColorAttachmentOptimal
+                                 : vk::ImageLayout::eTransferDstOptimal,
         .newLayout = vk::ImageLayout::ePresentSrcKHR,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -515,11 +528,11 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
                          MakeImageCopy(frame->width, frame->height, extent.width, extent.height));
     }
 
-    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                           vk::DependencyFlagBits::eByRegion, {}, {}, overlay_barrier);
+    if (has_overlay) {
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, overlay_barrier);
 
-    {
         // ImGui's Vulkan backend may submit and wait on the graphics queue while
         // uploading a newly-created font/texture atlas.  Vulkan queues require
         // external synchronization, so serialize that work with every other
@@ -531,7 +544,8 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
         }
     }
 
-    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+    cmdbuf.pipelineBarrier(has_overlay ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+                                       : vk::PipelineStageFlagBits::eTransfer,
                            vk::PipelineStageFlagBits::eAllCommands,
                            vk::DependencyFlagBits::eByRegion, {}, {}, present_barrier);
 

@@ -100,9 +100,13 @@ void Scheduler::WaitWorker() {
         event_cv.wait(ql, [this] { return work_queue.empty(); });
     }
 
-    // Now wait for execution to finish.
-    // This needs to be done in the same order as WorkerThread.
-    std::scoped_lock el{execution_mutex};
+    // Keep a small amount of work in flight so CPU recording, worker submission, and GPU
+    // execution can overlap without allowing latency or resource pressure to grow unbounded.
+    static constexpr u64 MaxTicksAhead = 2;
+    const u64 issued_tick = master_semaphore->CurrentTick();
+    if (issued_tick > MaxTicksAhead) {
+        master_semaphore->Wait(issued_tick - MaxTicksAhead);
+    }
 }
 
 void Scheduler::Wait(u64 tick) {

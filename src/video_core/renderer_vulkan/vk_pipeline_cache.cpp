@@ -60,7 +60,7 @@ AttribLoadFlags MakeAttribLoadFlag(Pica::PipelineRegs::VertexAttributeFormat for
 
 std::size_t GetPipelineWorkerThreadCount() {
 #ifdef __SWITCH__
-    return 1;
+    return 2;
 #else
     return std::max(std::thread::hardware_concurrency(), 2U) / 2;
 #endif

@@ -50,6 +50,7 @@
 #include "core/cheats/cheat_base.h"
 #include "core/cheats/cheats.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/file_sys/cia_container.h"
 #include "core/loader/loader.h"
 #include "core/loader/smdh.h"
@@ -63,6 +64,7 @@
 #include "core/hle/service/am/am.h"
 #include "core/hw/y2r.h"
 #include "core/hle/service/cfg/cfg.h"
+#include "core/hle/service/mic/mic_u.h"
 #include "core/hle/service/service.h"
 #include "input_common/main.h"
 #include "input_common/switch_hid.h"
@@ -71,6 +73,7 @@
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_texture_runtime.h"
+#include "video_core/shader/shader_jit.h"
 
 #include <imstb_truetype.h>
 #include <lodepng.h>
@@ -2185,8 +2188,8 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
 
 void ConfigureSettings() {
     Settings::RestoreGlobalState(false);
-    setenv(SwitchFastmemEnv, "0", 1);
-    setenv(SwitchJitFastDispatchEnv, "0", 1);
+    setenv(SwitchFastmemEnv, "1", 1);
+    setenv(SwitchJitFastDispatchEnv, "1", 1);
     Settings::values.use_cpu_jit.SetValue(true);
     Settings::values.cpu_clock_percentage.SetValue(100);
     Settings::values.is_new_3ds.SetValue(true);
@@ -2424,23 +2427,51 @@ VideoStreamOptions LoadVideoStreamOptions() {
     return options;
 }
 
-void RegisterMovieCpuThrottle(Core::System& system, bool enabled, int throttle_clock) {
-    system.RegisterMoviePlaybackStateChanged(
-        [&system, enabled, throttle_clock, saved_clock = 100](bool playing) mutable {
-            if (!enabled) {
-                return;
-            }
-            if (playing) {
-                saved_clock = Settings::values.cpu_clock_percentage.GetValue();
-                Settings::values.cpu_clock_percentage.SetValue(throttle_clock);
-                system.ApplySettings();
-                DebugLog("movie CPU throttle on: clock=%d saved=%d", throttle_clock, saved_clock);
-            } else {
-                Settings::values.cpu_clock_percentage.SetValue(saved_clock);
-                system.ApplySettings();
-                DebugLog("movie CPU throttle off: restored=%d", saved_clock);
-            }
-        });
+struct MovieCpuThrottleState {
+    MovieCpuThrottleState(bool enabled_value, int throttle_clock_value, int requested_clock_value)
+        : enabled{enabled_value}, throttle_clock{throttle_clock_value},
+          requested_clock{requested_clock_value} {}
+
+    std::atomic_bool enabled;
+    std::atomic_int throttle_clock;
+    std::atomic_int requested_clock;
+    std::atomic_bool playback_active{};
+};
+
+int GetEffectiveCpuClock(const MovieCpuThrottleState& state) {
+    const bool should_throttle = state.playback_active.load(std::memory_order_acquire) &&
+                                 state.enabled.load(std::memory_order_acquire);
+    return should_throttle ? state.throttle_clock.load(std::memory_order_acquire)
+                           : state.requested_clock.load(std::memory_order_acquire);
+}
+
+void ApplyEffectiveCpuClock(Core::System& system, MovieCpuThrottleState& state) {
+    const int clock = std::clamp(GetEffectiveCpuClock(state), 5, 400);
+    if (Settings::values.cpu_clock_percentage.GetValue() == clock) {
+        return;
+    }
+    Settings::values.cpu_clock_percentage.SetValue(clock);
+    if (system.IsPoweredOn()) {
+        system.CoreTiming().UpdateClockSpeed(static_cast<u32>(clock));
+    }
+}
+
+void RegisterMovieCpuThrottle(Core::System& system, MovieCpuThrottleState& state) {
+    system.RegisterMoviePlaybackStateChanged([&system, &state](bool is_playing) {
+        state.playback_active.store(is_playing, std::memory_order_release);
+        ApplyEffectiveCpuClock(system, state);
+        DebugLog("movie CPU throttle: playing=%d enabled=%d effective=%d requested=%d",
+                 is_playing ? 1 : 0, state.enabled.load(std::memory_order_acquire) ? 1 : 0,
+                 GetEffectiveCpuClock(state),
+                 state.requested_clock.load(std::memory_order_acquire));
+    });
+}
+
+const char* TextureFilterConfigValue(int filter) {
+    constexpr std::array<const char*, 6> Values{{
+        "none", "anime4k", "bicubic", "scaleforce", "xbrz", "mmpx",
+    }};
+    return Values[std::clamp(filter, 0, static_cast<int>(Values.size()) - 1)];
 }
 
 bool ApplySwitchFastmemConfig() {
@@ -2449,7 +2480,7 @@ bool ApplySwitchFastmemConfig() {
     if (configured.empty()) {
         configured = GetConfigValue("dynarmic_fastmem");
     }
-    const bool enabled = ParseConfigBool(configured, false);
+    const bool enabled = ParseConfigBool(configured, true);
     setenv(SwitchFastmemEnv, enabled ? "1" : "0", 1);
     return enabled;
 }
@@ -2460,7 +2491,7 @@ bool ApplySwitchJitFastDispatchConfig() {
     if (configured.empty()) {
         configured = GetConfigValue("dynarmic_fast_dispatch");
     }
-    const bool enabled = ParseConfigBool(configured, false);
+    const bool enabled = ParseConfigBool(configured, true);
     setenv(SwitchJitFastDispatchEnv, enabled ? "1" : "0", 1);
     return enabled;
 }
@@ -2700,6 +2731,11 @@ int Run(int argc, char** argv) {
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
     SwitchFrontend::GBAStationConfig::ApplyConfig();
+    const bool pause_when_menu_open = ConfigBool("pause_when_menu_open", true);
+    if (!DiagnosticLogsDefaultEnabled) {
+        EnableHeartbeatLogFile = ConfigBool("release_heartbeat", true);
+        HeartbeatOpen();
+    }
     const VideoStreamOptions video_stream_options = LoadVideoStreamOptions();
     const bool switch_fastmem_enabled = ApplySwitchFastmemConfig();
     const bool switch_jit_fast_dispatch_enabled = ApplySwitchJitFastDispatchConfig();
@@ -2740,8 +2776,10 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: Core::System::GetInstance");
     auto& system = Core::System::GetInstance();
-    RegisterMovieCpuThrottle(system, video_stream_options.movie_cpu_throttle,
-                             video_stream_options.movie_throttle_clock);
+    MovieCpuThrottleState movie_cpu_throttle{
+        video_stream_options.movie_cpu_throttle, video_stream_options.movie_throttle_clock,
+        std::clamp(Settings::values.cpu_clock_percentage.GetValue(), 25, 400)};
+    RegisterMovieCpuThrottle(system, movie_cpu_throttle);
     StartupLog("Run: frontend applets/image interface");
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
     Frontend::RegisterDefaultApplets(system);
@@ -2893,12 +2931,27 @@ int Run(int argc, char** argv) {
             return true;
         });
 
+    bool show_fps_overlay = ParseConfigBool(
+        SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
+    const auto capture_runtime_settings = [&]() {
+        SwitchFrontend::GBAStationRuntimeSettings settings;
+        settings.fps_counter = show_fps_overlay;
+        settings.custom_textures = Settings::values.custom_textures.GetValue();
+        settings.texture_filter = static_cast<int>(Settings::values.texture_filter.GetValue());
+        settings.disable_right_eye = Settings::values.disable_right_eye_render.GetValue();
+        settings.cpu_clock_percentage =
+            movie_cpu_throttle.requested_clock.load(std::memory_order_acquire);
+        settings.movie_cpu_throttle = movie_cpu_throttle.enabled.load(std::memory_order_acquire);
+        settings.movie_throttle_clock =
+            movie_cpu_throttle.throttle_clock.load(std::memory_order_acquire);
+        settings.controller_pointer = window.IsControllerPointerEnabled();
+        return settings;
+    };
     SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);
+    SwitchFrontend::VulkanOverlay::SetRuntimeSettings(capture_runtime_settings());
     SyncSwitchDisplaySettings(launch_options.display_settings);
     bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(
         static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer()));
-    bool show_fps_overlay = ParseConfigBool(
-        SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
     SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
     const bool show_shader_compile_notice = ParseConfigBool(
         SwitchFrontend::GBAStationConfig::GetConfigValue("show_shader_compile_notice", "1"), true);
@@ -2913,8 +2966,11 @@ int Run(int argc, char** argv) {
     raw_marker_enabled = false;
 
     using Clock = std::chrono::steady_clock;
+    const auto frontend_poll_interval = std::chrono::milliseconds{
+        std::clamp(ConfigInt("frontend_poll_ms", 4), 1, 16)};
     auto play_stats_checkpoint = Clock::now();
     auto last_keepalive = Clock::now();
+    auto next_frontend_poll = Clock::now();
     u64 loop_count = 0;
     u64 keepalive_count = 0;
     bool applet_loop_active = true;
@@ -2928,6 +2984,7 @@ int Run(int argc, char** argv) {
     u64 last_heartbeat_loop_count = loop_count;
     s32 last_heartbeat_frame = last_logged_frame;
     bool menu_was_visible = false;
+    bool menu_auto_muted = false;
     bool block_game_input_until_release = false;
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
@@ -2997,6 +3054,11 @@ int Run(int argc, char** argv) {
 
         auto& renderer = system.GPU().Renderer();
 
+        const bool poll_frontend = now >= next_frontend_poll;
+        if (poll_frontend) {
+            next_frontend_poll = now + frontend_poll_interval;
+        }
+
         if (!saw_guest_frame && now - last_keepalive >= std::chrono::seconds(2)) {
             keepalive_count++;
             DebugLog("startup keepalive present #%llu: renderer_frame=%d",
@@ -3007,10 +3069,11 @@ int Run(int argc, char** argv) {
             last_keepalive = now;
         }
 
-        padUpdate(&pad);
-
-        if (menu_initialized) {
-            SwitchFrontend::VulkanOverlay::Update(&pad);
+        if (poll_frontend) {
+            padUpdate(&pad);
+            if (menu_initialized) {
+                SwitchFrontend::VulkanOverlay::Update(&pad);
+            }
         }
         const bool menu_visible =
             menu_initialized && SwitchFrontend::VulkanOverlay::IsVisible();
@@ -3055,6 +3118,13 @@ int Run(int argc, char** argv) {
         if (menu_visible != menu_was_visible) {
             block_game_input_until_release = true;
             DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
+            if (pause_when_menu_open && menu_visible && !Settings::values.audio_muted) {
+                Settings::values.audio_muted = true;
+                menu_auto_muted = true;
+            } else if (!menu_visible && menu_auto_muted) {
+                Settings::values.audio_muted = false;
+                menu_auto_muted = false;
+            }
             menu_was_visible = menu_visible;
         }
         if (!menu_visible && cheat_settings_dirty->exchange(false, std::memory_order_acq_rel)) {
@@ -3080,7 +3150,7 @@ int Run(int argc, char** argv) {
                 SwitchFrontend::OverlayUI::ShowToast("已停止模拟麦克风输入");
                 DebugLog("hotkey microphone simulation off");
             }
-            system.ApplySettings();
+            Service::MIC::ReloadMic(system);
             block_game_input_until_release = true;
             suppress_game_input = true;
         }
@@ -3088,8 +3158,10 @@ int Run(int argc, char** argv) {
 
         window.SetInputSuppressed(suppress_game_input);
         InputCommon::SwitchHID::SetInputSuppressed(suppress_game_input);
-        window.PollEvents();
-        InputCommon::SwitchHID::Update();
+        if (poll_frontend) {
+            window.PollEvents();
+            InputCommon::SwitchHID::Update();
+        }
 
         const auto menu_action = static_cast<SwitchFrontend::OverlayUI::Action>(
             menu_initialized ? SwitchFrontend::VulkanOverlay::ConsumeAction() : 0);
@@ -3150,6 +3222,47 @@ int Run(int argc, char** argv) {
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
             SwitchFrontend::OverlayUI::ShowToast(saved ? "画面设置已保存" : "画面设置保存失败");
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::RuntimeSettingsChanged) {
+            const auto runtime = SwitchFrontend::VulkanOverlay::GetRuntimeSettings();
+            show_fps_overlay = runtime.fps_counter;
+            SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
+            Settings::values.custom_textures.SetValue(runtime.custom_textures);
+            Settings::values.texture_filter.SetValue(
+                static_cast<Settings::TextureFilter>(runtime.texture_filter));
+            Settings::values.disable_right_eye_render.SetValue(runtime.disable_right_eye);
+            movie_cpu_throttle.enabled.store(runtime.movie_cpu_throttle,
+                                             std::memory_order_release);
+            movie_cpu_throttle.throttle_clock.store(runtime.movie_throttle_clock,
+                                                    std::memory_order_release);
+            movie_cpu_throttle.requested_clock.store(runtime.cpu_clock_percentage,
+                                                     std::memory_order_release);
+            window.SetControllerPointerEnabled(runtime.controller_pointer);
+            ApplyEffectiveCpuClock(system, movie_cpu_throttle);
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "display.showFps", runtime.fps_counter ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "custom_textures", runtime.custom_textures ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "texture_filter", TextureFilterConfigValue(runtime.texture_filter));
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "disable_right_eye", runtime.disable_right_eye ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "cpu_clock", std::to_string(runtime.cpu_clock_percentage));
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "movie_cpu_throttle", runtime.movie_cpu_throttle ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "movie_throttle_clock", std::to_string(runtime.movie_throttle_clock));
+            const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
+            SwitchFrontend::OverlayUI::ShowToast(saved ? "运行设置已保存" : "运行设置保存失败");
+            DebugLog("runtime menu settings: fps=%d custom_textures=%d texture_filter=%d "
+                     "right_eye_disabled=%d cpu_clock=%d movie_throttle=%d movie_clock=%d "
+                     "pointer=%d saved=%d",
+                     runtime.fps_counter ? 1 : 0, runtime.custom_textures ? 1 : 0,
+                     runtime.texture_filter, runtime.disable_right_eye ? 1 : 0,
+                     runtime.cpu_clock_percentage, runtime.movie_cpu_throttle ? 1 : 0,
+                     runtime.movie_throttle_clock, runtime.controller_pointer ? 1 : 0,
+                     saved ? 1 : 0);
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutChanged) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
@@ -3212,13 +3325,13 @@ int Run(int argc, char** argv) {
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncDisplaySettings) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
             SyncSwitchDisplaySettings(display);
-            window.SetDisplaySettings(display);
             if (Settings::values.resolution_factor.GetValue() !=
                 static_cast<u32>(display.internal_resolution)) {
                 Settings::values.resolution_factor.SetValue(
                     static_cast<u16>(display.internal_resolution));
                 system.ApplySettings();
             }
+            window.SetDisplaySettings(display);
             const bool current_saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
             int count = 0;
@@ -3307,7 +3420,18 @@ int Run(int argc, char** argv) {
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const auto runloop_started = Clock::now();
 #endif
-        const Core::System::ResultStatus run_result = system.RunLoop();
+        const bool pause_for_menu =
+            pause_when_menu_open && menu_initialized &&
+            SwitchFrontend::VulkanOverlay::IsVisible() &&
+            pending_state_request.operation == PendingStateOperation::None && pause_frame_ready;
+        const Core::System::ResultStatus run_result = [&] {
+            if (!pause_for_menu) {
+                return system.RunLoop();
+            }
+            vulkan_renderer.PresentLastFrame();
+            std::this_thread::sleep_for(std::chrono::milliseconds{16});
+            return Core::System::ResultStatus::Success;
+        }();
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const double runloop_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - runloop_started).count();
@@ -3373,6 +3497,7 @@ int Run(int argc, char** argv) {
             SyncSwitchDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
             SwitchFrontend::VulkanOverlay::SetDisplaySettings(
                 SwitchFrontend::VulkanOverlay::GetDisplaySettings());
+            SwitchFrontend::VulkanOverlay::SetRuntimeSettings(capture_runtime_settings());
             menu_initialized = SwitchFrontend::VulkanOverlay::Init(
                 static_cast<Vulkan::RendererVulkan&>(reset_renderer));
             SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
@@ -3418,10 +3543,15 @@ int Run(int argc, char** argv) {
                                         : 0.0;
 #ifndef GBASTATION_HOTPATH_DIAGNOSTICS
             const auto stats = system.GetAndResetPerfStats();
-            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f powered=%d applet=%d keepalives=%llu",
+            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f res=%u poll_ms=%lld pending_compilations=%zu pica_jit_pending=%zu hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f powered=%d applet=%d keepalives=%llu",
                          static_cast<unsigned long long>(loop_count), loops_per_sec,
                          renderer_frame, frame_delta, frontend_fps, stats.system_fps,
-                         stats.game_fps, stats.emulation_speed, system.IsPoweredOn() ? 1 : 0,
+                         stats.game_fps, stats.emulation_speed, renderer.GetResolutionScaleFactor(),
+                         static_cast<long long>(frontend_poll_interval.count()), pending_compilations,
+                         Pica::Shader::GetPendingJitCompilationCount(),
+                         stats.time_hle_svc * 1000.0, stats.time_hle_ipc * 1000.0,
+                         stats.time_gpu * 1000.0, stats.time_swap * 1000.0,
+                         stats.time_remaining * 1000.0, system.IsPoweredOn() ? 1 : 0,
                          applet_loop_active ? 1 : 0,
                          static_cast<unsigned long long>(keepalive_count));
 #else

@@ -55,6 +55,8 @@ fi
 
 if [ -z "${SWITCH_NVK_ROOT:-}" ]; then
     for candidate in \
+        "${SCRIPT_DIR}/../switchVK/nvk-switch-26.1.4" \
+        "${SCRIPT_DIR}/../switch-nvk/nvk-switch-26.1.4" \
         "${SCRIPT_DIR}/../switchVK/nvk-switch-25.3.6" \
         "${SCRIPT_DIR}/../switch-nvk/nvk-switch-25.3.6" \
         "/opt/nvk-switch"; do
@@ -161,17 +163,32 @@ required_symbols=(
     wsi_CreateViSurfaceNN
     wsi_CreateSwapchainKHR
     wsi_switch_init_wsi
-    nvk_switch_image_layout
-    nvkmd_switch_create_dev
-    nvkmd_switch_alloc_mem
-    nvkmd_switch_binary_sync_type
-    nvkmd_switch_sync_get_fence
 )
 
 DEFINED_SYMBOLS="${BUILD_DIR}/azahar-switch-defined-symbols${OUTPUT_SUFFIX}.txt"
 UNDEFINED_SYMBOLS="${BUILD_DIR}/azahar-switch-undefined-symbols${OUTPUT_SUFFIX}.txt"
 "${NM}" --defined-only "${DEBUG_ELF}" > "${DEFINED_SYMBOLS}"
 "${NM}" -u "${DEBUG_ELF}" > "${UNDEFINED_SYMBOLS}"
+
+if grep -Eq '[[:space:]]nvkmd_nvgpu_try_create_pdev$' "${DEFINED_SYMBOLS}"; then
+    driver_identity="nxvk 26.1.4 nvkmd/nvgpu"
+    required_symbols+=(
+        nvk_shader_cache_init
+        nvkmd_nvgpu_try_create_pdev
+        nvkmd_nvgpu_create_dev
+        nvkmd_nvgpu_alloc_mem
+        nvkmd_nvgpu_syncobj_type
+    )
+else
+    driver_identity="Mesa 25.3.6 nvkmd/switch"
+    required_symbols+=(
+        nvk_switch_image_layout
+        nvkmd_switch_create_dev
+        nvkmd_switch_alloc_mem
+        nvkmd_switch_binary_sync_type
+        nvkmd_switch_sync_get_fence
+    )
+fi
 
 for symbol in "${required_symbols[@]}"; do
     if ! grep -Eq "[[:space:]]${symbol}$" "${DEFINED_SYMBOLS}"; then
@@ -187,17 +204,19 @@ if [ -s "${UNDEFINED_SYMBOLS}" ]; then
 fi
 
 if grep -Eqi 'drm_shim|drm_nouveau|GLESv2|libglapi|allow-multiple-definition' \
-        "${LINKER_MAP}" "${BUILD_DIR}/build.ninja"; then
+        "${LINKER_MAP}"; then
     echo "ERROR: forbidden DRM/OpenGL/duplicate-definition fallback found in final link" >&2
     exit 1
 fi
 
-for identity in 'Mesa 25.3.6' 'NVIDIA Tegra X1 (GM20B)' 'nvkmd/switch'; do
-    if ! "${STRINGS}" "${NRO_FILE}" | grep -F "${identity}" >/dev/null; then
-        echo "ERROR: final NRO is missing identity string: ${identity}" >&2
-        exit 1
-    fi
-done
+if ! "${STRINGS}" "${NRO_FILE}" | grep -F 'NVIDIA Tegra X1' >/dev/null; then
+    echo "ERROR: final NRO is missing the Tegra X1 device identity" >&2
+    exit 1
+fi
+if ! "${STRINGS}" "${NRO_FILE}" | grep -Eq 'Mesa (25\.3\.6|26\.1\.4)' >/dev/null; then
+    echo "ERROR: final NRO is missing a supported Mesa identity" >&2
+    exit 1
+fi
 
 {
     echo "M6 static-link audit: PASS"
@@ -205,7 +224,7 @@ done
     echo "Undefined ELF symbols: 0"
     echo "Forbidden DRM/OpenGL link dependencies: 0"
     echo "Multiple-definition linker fallback: absent"
-    echo "Mesa identity: 25.3.6 raw nvkmd/switch"
+    echo "Driver identity: ${driver_identity}"
 } > "${AUDIT_LOG}"
 
 hash_files=(

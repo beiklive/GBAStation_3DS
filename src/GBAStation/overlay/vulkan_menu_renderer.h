@@ -32,6 +32,7 @@ enum class Item {
     LoadState,
     Cheats,
     Display,
+    Runtime,
     Reset,
     Exit,
     Count,
@@ -59,6 +60,7 @@ struct State {
     std::array<bool, 10> occupied{};
     std::vector<OverlayUI::CheatEntry> cheats;
     GBAStationDisplaySettings display{};
+    GBAStationRuntimeSettings runtime{};
 };
 
 bool Init(const Vulkan::Instance& instance);

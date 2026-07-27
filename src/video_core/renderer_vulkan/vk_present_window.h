@@ -27,11 +27,13 @@ class RenderManager;
 using OverlayDrawCallback =
     void (*)(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent,
              vk::Format format);
+using OverlayActiveCallback = bool (*)();
 using OverlayResetCallback = void (*)();
 
 // The Switch frontend installs these callbacks while its in-game menu exists.
 // They are process-global because only one Vulkan presentation device is active.
 void SetOverlayDrawCallback(OverlayDrawCallback callback);
+void SetOverlayActiveCallback(OverlayActiveCallback callback);
 void SetOverlayResetCallback(OverlayResetCallback callback);
 
 struct Frame {

@@ -90,6 +90,9 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     // The pipeline is currently being compiled. We can either wait for it
     // or skip the draw.
     if (is_pending) {
+        if (wait_built) {
+            WaitDone();
+        }
         return wait_built;
     }
 
@@ -120,6 +123,9 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     worker->QueueWork([this] { Build(); });
 #endif
     is_pending = true;
+    if (wait_built) {
+        WaitDone();
+    }
     return wait_built;
 }
 

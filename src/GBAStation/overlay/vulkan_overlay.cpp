@@ -33,6 +33,7 @@ namespace {
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
 constexpr int DisplayControlCount = 10;
+constexpr int RuntimeControlCount = 8;
 constexpr int CustomLayoutControlCount = 7;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
@@ -69,6 +70,14 @@ std::atomic<float> display_bottom_offset_x{};
 std::atomic<float> display_bottom_offset_y{};
 std::atomic<float> display_bottom_opacity{1.0f};
 std::atomic_bool display_overlay_enabled{};
+std::atomic_bool runtime_fps_counter{};
+std::atomic_bool runtime_custom_textures{};
+std::atomic_int runtime_texture_filter{};
+std::atomic_bool runtime_disable_right_eye{true};
+std::atomic_int runtime_cpu_clock{100};
+std::atomic_bool runtime_movie_cpu_throttle{true};
+std::atomic_int runtime_movie_throttle_clock{50};
+std::atomic_bool runtime_controller_pointer{};
 std::atomic_bool overlay_sidebar{};
 std::atomic_int overlay_focus{};
 std::atomic_bool fps_visible{};
@@ -104,7 +113,7 @@ int navigation_repeat_direction{};
 
 bool ItemHasContent(int item) {
     return item >= static_cast<int>(VulkanMenuRenderer::Item::SaveState) &&
-           item <= static_cast<int>(VulkanMenuRenderer::Item::Display);
+           item <= static_cast<int>(VulkanMenuRenderer::Item::Runtime);
 }
 
 int LayoutIndex(const std::string& layout) {
@@ -308,34 +317,52 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     state.fast_forward_active = fast_forward_active.load(std::memory_order_acquire);
     state.show_fps = fps_visible.load(std::memory_order_acquire);
     state.current_fps = fps_value.load(std::memory_order_acquire);
-    state.item = static_cast<VulkanMenuRenderer::Item>(std::clamp(
-        selected_item.load(std::memory_order_relaxed), 0, MenuItemCount - 1));
-    state.content_focused = content_focused.load(std::memory_order_relaxed);
-    state.content_focus = content_focus.load(std::memory_order_relaxed);
-    state.custom_layout_sidebar = custom_layout_sidebar.load(std::memory_order_relaxed);
-    state.custom_layout_focus = custom_layout_focus.load(std::memory_order_relaxed);
-    state.overlay_sidebar = overlay_sidebar.load(std::memory_order_relaxed);
-    state.overlay_focus = overlay_focus.load(std::memory_order_relaxed);
-    state.file_picker = file_picker.load(std::memory_order_relaxed);
-    state.file_picker_focus = file_picker_focus.load(std::memory_order_relaxed);
-    state.file_preview = file_preview.load(std::memory_order_relaxed);
-    {
-        std::lock_guard lock{display_data_mutex};
-        state.file_picker_path = file_picker_path;
-        state.file_entries = file_entries;
-        state.file_preview_path = file_preview_path;
-    }
-    state.toast = OverlayUI::GetToast();
-    for (int slot = 0; slot < static_cast<int>(state.occupied.size()); ++slot) {
-        state.occupied[slot] = OverlayUI::IsSlotOccupied(slot + 1);
-    }
-    state.cheats = OverlayUI::GetCheats();
-    state.display = GetDisplaySettings();
+    const bool display_overlay_active = display_overlay_enabled.load(std::memory_order_acquire);
+    const bool transient_content = OverlayUI::HasTransientContent();
     if (!state.menu_visible && !state.fast_forward_active && !state.show_fps &&
-        !state.display.overlay_enabled && state.toast.empty()) {
+        !display_overlay_active && !transient_content) {
         return;
     }
+    if (transient_content) {
+        state.toast = OverlayUI::GetToast();
+    }
+    if (state.menu_visible || display_overlay_active) {
+        state.display = GetDisplaySettings();
+    }
+    if (state.menu_visible) {
+        state.runtime = GetRuntimeSettings();
+        state.item = static_cast<VulkanMenuRenderer::Item>(std::clamp(
+            selected_item.load(std::memory_order_relaxed), 0, MenuItemCount - 1));
+        state.content_focused = content_focused.load(std::memory_order_relaxed);
+        state.content_focus = content_focus.load(std::memory_order_relaxed);
+        state.custom_layout_sidebar = custom_layout_sidebar.load(std::memory_order_relaxed);
+        state.custom_layout_focus = custom_layout_focus.load(std::memory_order_relaxed);
+        state.overlay_sidebar = overlay_sidebar.load(std::memory_order_relaxed);
+        state.overlay_focus = overlay_focus.load(std::memory_order_relaxed);
+        state.file_picker = file_picker.load(std::memory_order_relaxed);
+        state.file_picker_focus = file_picker_focus.load(std::memory_order_relaxed);
+        state.file_preview = file_preview.load(std::memory_order_relaxed);
+        {
+            std::lock_guard lock{display_data_mutex};
+            state.file_picker_path = file_picker_path;
+            state.file_entries = file_entries;
+            state.file_preview_path = file_preview_path;
+        }
+        for (int slot = 0; slot < static_cast<int>(state.occupied.size()); ++slot) {
+            state.occupied[slot] = OverlayUI::IsSlotOccupied(slot + 1);
+        }
+        state.cheats = OverlayUI::GetCheats();
+    }
     VulkanMenuRenderer::Draw(command_buffer, image, extent, format, state);
+}
+
+bool HasDrawContent() {
+    return initialized.load(std::memory_order_acquire) &&
+           (visible.load(std::memory_order_acquire) ||
+            fast_forward_active.load(std::memory_order_acquire) ||
+            fps_visible.load(std::memory_order_acquire) ||
+            display_overlay_enabled.load(std::memory_order_acquire) ||
+            OverlayUI::HasTransientContent());
 }
 
 void ResetCallback() {
@@ -393,6 +420,55 @@ void HandleDisplayAdjustment(int row, int direction) {
     }
     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Slider);
     PublishAction(OverlayUI::Action::DisplaySettingsChanged, false);
+}
+
+void HandleRuntimeAdjustment(int row, int direction) {
+    switch (row) {
+    case 0:
+        runtime_fps_counter.store(!runtime_fps_counter.load(std::memory_order_relaxed),
+                                  std::memory_order_release);
+        break;
+    case 1:
+        runtime_custom_textures.store(!runtime_custom_textures.load(std::memory_order_relaxed),
+                                      std::memory_order_release);
+        break;
+    case 2:
+        runtime_texture_filter.store(
+            (runtime_texture_filter.load(std::memory_order_relaxed) + direction + 6) % 6,
+            std::memory_order_release);
+        break;
+    case 3:
+        runtime_disable_right_eye.store(
+            !runtime_disable_right_eye.load(std::memory_order_relaxed),
+            std::memory_order_release);
+        break;
+    case 4:
+        runtime_cpu_clock.store(
+            std::clamp(runtime_cpu_clock.load(std::memory_order_relaxed) + direction * 25, 25,
+                       400),
+            std::memory_order_release);
+        break;
+    case 5:
+        runtime_movie_cpu_throttle.store(
+            !runtime_movie_cpu_throttle.load(std::memory_order_relaxed),
+            std::memory_order_release);
+        break;
+    case 6:
+        runtime_movie_throttle_clock.store(
+            std::clamp(runtime_movie_throttle_clock.load(std::memory_order_relaxed) + direction,
+                       10, 100),
+            std::memory_order_release);
+        break;
+    case 7:
+        runtime_controller_pointer.store(
+            !runtime_controller_pointer.load(std::memory_order_relaxed),
+            std::memory_order_release);
+        break;
+    default:
+        return;
+    }
+    AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Slider);
+    PublishAction(OverlayUI::Action::RuntimeSettingsChanged, false);
 }
 
 void HandleOverlayToggle() {
@@ -488,6 +564,7 @@ bool Init(Vulkan::RendererVulkan& renderer) {
     navigation_repeat_last = 0;
     navigation_repeat_direction = 0;
     Vulkan::SetOverlayResetCallback(&ResetCallback);
+    Vulkan::SetOverlayActiveCallback(&HasDrawContent);
     Vulkan::SetOverlayDrawCallback(&DrawCallback);
     initialized.store(true, std::memory_order_release);
     LOG_INFO(Render_Vulkan, "{} NDS-style Vulkan menu initialized", Tag);
@@ -735,13 +812,17 @@ void Update(PadState* pad) {
         } else {
             const auto item = static_cast<VulkanMenuRenderer::Item>(selected);
             const int repeated_direction = UpdateHeldAdjustment(
-                item == VulkanMenuRenderer::Item::Display, shoulder_left, shoulder_right);
+                item == VulkanMenuRenderer::Item::Display ||
+                    item == VulkanMenuRenderer::Item::Runtime,
+                shoulder_left, shoulder_right);
             int count = 1;
             if (item == VulkanMenuRenderer::Item::SaveState ||
                 item == VulkanMenuRenderer::Item::LoadState) {
                 count = 10;
             } else if (item == VulkanMenuRenderer::Item::Display) {
                 count = DisplayControlCount;
+            } else if (item == VulkanMenuRenderer::Item::Runtime) {
+                count = RuntimeControlCount;
             } else if (item == VulkanMenuRenderer::Item::Cheats) {
                 count = std::max<int>(1, static_cast<int>(OverlayUI::GetCheats().size()));
             }
@@ -763,13 +844,19 @@ void Update(PadState* pad) {
 
             if ((cancel && !previous_navigation.cancel) ||
                 (left && !previous_navigation.left &&
-                 item != VulkanMenuRenderer::Item::Display)) {
+                 item != VulkanMenuRenderer::Item::Display &&
+                 item != VulkanMenuRenderer::Item::Runtime)) {
                 AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Back);
                 content_focused.store(false, std::memory_order_release);
             } else if (item == VulkanMenuRenderer::Item::Display &&
                        ((left && !previous_navigation.left) ||
                         (right && !previous_navigation.right) || repeated_direction != 0)) {
                 HandleDisplayAdjustment(
+                    focus, repeated_direction != 0 ? repeated_direction : (right ? 1 : -1));
+            } else if (item == VulkanMenuRenderer::Item::Runtime &&
+                       ((left && !previous_navigation.left) ||
+                        (right && !previous_navigation.right) || repeated_direction != 0)) {
+                HandleRuntimeAdjustment(
                     focus, repeated_direction != 0 ? repeated_direction : (right ? 1 : -1));
             } else if (accept && !previous_navigation.accept) {
                 if (item == VulkanMenuRenderer::Item::SaveState) {
@@ -819,6 +906,8 @@ void Update(PadState* pad) {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
                         PublishAction(OverlayUI::Action::SyncDisplaySettings, false);
                     }
+                } else if (item == VulkanMenuRenderer::Item::Runtime) {
+                    HandleRuntimeAdjustment(focus, 1);
                 } else {
                     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
                     OverlayUI::ShowToast("暂无可用金手指");
@@ -913,6 +1002,33 @@ GBAStationDisplaySettings GetDisplaySettings() {
     return settings;
 }
 
+void SetRuntimeSettings(const GBAStationRuntimeSettings& settings) {
+    runtime_fps_counter.store(settings.fps_counter, std::memory_order_release);
+    runtime_custom_textures.store(settings.custom_textures, std::memory_order_release);
+    runtime_texture_filter.store(std::clamp(settings.texture_filter, 0, 5),
+                                 std::memory_order_release);
+    runtime_disable_right_eye.store(settings.disable_right_eye, std::memory_order_release);
+    runtime_cpu_clock.store(std::clamp(settings.cpu_clock_percentage, 25, 400),
+                            std::memory_order_release);
+    runtime_movie_cpu_throttle.store(settings.movie_cpu_throttle, std::memory_order_release);
+    runtime_movie_throttle_clock.store(std::clamp(settings.movie_throttle_clock, 10, 100),
+                                       std::memory_order_release);
+    runtime_controller_pointer.store(settings.controller_pointer, std::memory_order_release);
+}
+
+GBAStationRuntimeSettings GetRuntimeSettings() {
+    GBAStationRuntimeSettings settings;
+    settings.fps_counter = runtime_fps_counter.load(std::memory_order_acquire);
+    settings.custom_textures = runtime_custom_textures.load(std::memory_order_acquire);
+    settings.texture_filter = runtime_texture_filter.load(std::memory_order_acquire);
+    settings.disable_right_eye = runtime_disable_right_eye.load(std::memory_order_acquire);
+    settings.cpu_clock_percentage = runtime_cpu_clock.load(std::memory_order_acquire);
+    settings.movie_cpu_throttle = runtime_movie_cpu_throttle.load(std::memory_order_acquire);
+    settings.movie_throttle_clock = runtime_movie_throttle_clock.load(std::memory_order_acquire);
+    settings.controller_pointer = runtime_controller_pointer.load(std::memory_order_acquire);
+    return settings;
+}
+
 void SetFastForwardActive(bool active) {
     fast_forward_active.store(active, std::memory_order_release);
 }
@@ -920,6 +1036,7 @@ void SetFastForwardActive(bool active) {
 void SetFpsOverlay(bool visible, float fps) {
     fps_visible.store(visible, std::memory_order_release);
     fps_value.store(fps, std::memory_order_release);
+    runtime_fps_counter.store(visible, std::memory_order_release);
     VideoCore::SetFpsOverlayState(false, fps);
 }
 
@@ -938,6 +1055,7 @@ void PrepareForShutdown() {
     navigation_repeat_direction = 0;
     if (initialized.load(std::memory_order_acquire)) {
         Vulkan::SetOverlayDrawCallback(nullptr);
+        Vulkan::SetOverlayActiveCallback(nullptr);
         Vulkan::SetOverlayResetCallback(nullptr);
     }
 }
@@ -947,6 +1065,7 @@ void Shutdown() {
         return;
     }
     Vulkan::SetOverlayDrawCallback(nullptr);
+    Vulkan::SetOverlayActiveCallback(nullptr);
     Vulkan::SetOverlayResetCallback(nullptr);
     if (device) {
         device.waitIdle();

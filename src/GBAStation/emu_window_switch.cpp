@@ -184,22 +184,54 @@ void EmuWindowSwitch::SetInputSuppressed(bool suppressed) {
     input_suppressed = suppressed;
 }
 
+bool EmuWindowSwitch::IsControllerPointerEnabled() const {
+    return cursor_visible;
+}
+
+void EmuWindowSwitch::SetControllerPointerEnabled(bool enabled) {
+    cursor_visible = enabled;
+    if (!cursor_visible && cursor_touch_pressed) {
+        TouchReleased();
+        cursor_touch_pressed = false;
+    }
+}
+
 void EmuWindowSwitch::SetDisplaySettings(const GBAStationDisplaySettings& settings) {
     display_settings = settings;
+    display_layout_dirty = true;
     RefreshDimensions();
 }
 
 void EmuWindowSwitch::RefreshDimensions() {
-    u32 width = DefaultWidth;
-    u32 height = DefaultHeight;
-    if (window) {
-        static_cast<void>(nwindowGetDimensions(window, &width, &height));
+    constexpr auto DimensionPollInterval = std::chrono::milliseconds{250};
+    const auto now = std::chrono::steady_clock::now();
+    const bool dimensions_uninitialized = framebuffer_width == 0 || framebuffer_height == 0;
+    bool dimensions_changed = false;
+    if (dimensions_uninitialized || now - last_dimensions_poll >= DimensionPollInterval) {
+        u32 width = DefaultWidth;
+        u32 height = DefaultHeight;
+        if (window) {
+            static_cast<void>(nwindowGetDimensions(window, &width, &height));
+        }
         if (width == 0 || height == 0) {
             width = DefaultWidth;
             height = DefaultHeight;
         }
+        dimensions_changed = width != framebuffer_width || height != framebuffer_height;
+        framebuffer_width = width;
+        framebuffer_height = height;
+        last_dimensions_poll = now;
     }
-    NotifyFramebufferLayoutChanged(BuildDisplayLayout(width, height, display_settings));
+
+    const Settings::StereoRenderOption render_3d_mode = get3DMode();
+    if (!display_layout_dirty && !dimensions_changed && render_3d_mode == last_render_3d_mode) {
+        return;
+    }
+
+    NotifyFramebufferLayoutChanged(
+        BuildDisplayLayout(framebuffer_width, framebuffer_height, display_settings));
+    last_render_3d_mode = render_3d_mode;
+    display_layout_dirty = false;
 }
 
 unsigned EmuWindowSwitch::ScaleTouchX(u32 touch_x) const {

@@ -28,4 +28,15 @@ struct GBAStationDisplaySettings {
     std::string overlay_path;
 };
 
+struct GBAStationRuntimeSettings {
+    bool fps_counter{};
+    bool custom_textures{};
+    int texture_filter{};
+    bool disable_right_eye{true};
+    int cpu_clock_percentage{100};
+    bool movie_cpu_throttle{true};
+    int movie_throttle_clock{50};
+    bool controller_pointer{};
+};
+
 } // namespace SwitchFrontend

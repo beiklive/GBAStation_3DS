@@ -37,6 +37,7 @@ enum class Action {
     LoadStateSlot9,
     LoadStateSlot10,
     DisplaySettingsChanged,
+    RuntimeSettingsChanged,
     CustomLayoutChanged,
     CustomLayoutCommitted,
     FastForwardMultiplierChanged,
