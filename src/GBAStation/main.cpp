@@ -2076,7 +2076,8 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         !install_state.installed_path.empty() &&
                         SwitchFrontend::GameDatabase::SaveInstalledGameRecord(
                             install_state.installed_path, install_state.title,
-                            options.display_settings, logo_path, save_path);
+                            options.display_settings, logo_path, save_path,
+                            TitleIdString(entry.program_id));
                     install_state.message = install_state.success
                                                 ? "安装成功，已添加到数据库"
                                                 : "安装成功，但写入数据库失败";
