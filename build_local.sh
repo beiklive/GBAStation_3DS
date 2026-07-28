@@ -51,15 +51,24 @@ if [[ ! -f "$ROOT/externals/dynarmic/CMakeLists.txt" ]]; then
     exit 1
 fi
 
+if [[ "$VARIANT" == diagnostic ]]; then
+    SWITCHVK_SDK_NAME=nvk-switch-25.3.6-diagnostic
+else
+    SWITCHVK_SDK_NAME=nvk-switch-25.3.6
+fi
+
 if [[ -z "${SWITCH_NVK_ROOT:-}" ]]; then
     for sibling in "$ROOT/../switchVK" "$ROOT/../switch-nvk"; do
         [[ -d "$sibling" ]] || continue
-        candidate="$sibling/nvk-switch-25.3.6"
+        candidate="$sibling/$SWITCHVK_SDK_NAME"
         driver_script="$sibling/build_local.sh"
 
         if (( REBUILD_SWITCHVK )) || [[ ! -f "$candidate/lib/libvulkan.a" ]]; then
             if [[ -f "$driver_script" ]]; then
                 driver_args=(-j "$SWITCHVK_JOBS")
+                if [[ "$VARIANT" == diagnostic ]]; then
+                    driver_args+=(--diagnostic)
+                fi
                 if (( REBUILD_SWITCHVK )); then
                     driver_args+=(--rebuild)
                 fi

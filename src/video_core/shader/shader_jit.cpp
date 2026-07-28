@@ -5,12 +5,14 @@
 #include "common/arch.h"
 #if CITRA_ARCH(x86_64) || CITRA_ARCH(arm64)
 
-#include <cstring>
+#include <exception>
+#include <new>
 #include "common/assert.h"
 #include "common/hash.h"
 #include "common/logging/log.h"
 #include "common/microprofile.h"
 #include "video_core/shader/shader.h"
+#include "video_core/shader/shader_interpreter.h"
 #include "video_core/shader/shader_jit.h"
 #if CITRA_ARCH(arm64)
 #include "video_core/shader/shader_jit_a64_compiler.h"
@@ -21,11 +23,7 @@
 
 namespace Pica::Shader {
 
-#if CITRA_ARCH(arm64)
-JitEngine::JitEngine() : code_pool(std::make_unique<oaknut::CodeBlock>(kCodePoolSize)) {}
-#else
-JitEngine::JitEngine() = default;
-#endif
+JitEngine::JitEngine() : interpreter{std::make_unique<InterpreterEngine>()} {}
 JitEngine::~JitEngine() = default;
 
 void JitEngine::SetupBatch(ShaderSetup& setup, u32 entry_point) {
@@ -40,56 +38,37 @@ void JitEngine::SetupBatch(ShaderSetup& setup, u32 entry_point) {
     auto iter = cache.find(cache_key);
     if (iter != cache.end()) {
         setup.cached_shader = iter->second.get();
-    } else {
-        auto shader = std::make_unique<JitShader>();
-        shader->Compile(&setup.GetProgramCode(), &setup.GetSwizzleData());
-
-#if CITRA_ARCH(arm64)
-        const std::size_t code_size = shader->GetCompiledSize();
-        // Align to 4 bytes (ARM64 instruction size).
-        const std::size_t aligned_size = (code_size + 3u) & ~3u;
-
-        if (pool_write_pos + aligned_size > kCodePoolSize) {
-            // Pool full — evict all cached shaders and reuse from the beginning.
-            // SetupBatch is always called immediately before Run for the same setup, so
-            // dangling cached_shader pointers in other setups are re-resolved on their
-            // next SetupBatch call before they are used.
-            LOG_WARNING(Render_Software,
-                        "Shader JIT pool full ({} shaders evicted), resetting",
-                        cache.size());
-            cache.clear();
-            pool_write_pos = 0;
-            iter = cache.end(); // cache is empty; use end() as emplace hint below
-        }
-
-        // The libnx JIT mapping is W^X: after any shader has executed the pool is RX, so
-        // every subsequent append must transition the whole pool back to writable first.
-        // Missing this transition faults on the first shader upload when jitCreate starts RX.
-        code_pool->unprotect();
-
-        // Copy compiled code into the shared pool's writable alias.
-        auto* const wptr = reinterpret_cast<std::byte*>(code_pool->wptr()) + pool_write_pos;
-        auto* const xptr = reinterpret_cast<std::byte*>(code_pool->xptr()) + pool_write_pos;
-        std::memcpy(wptr, shader->GetCompiledCode().data(), code_size);
-
-        // Flush the written range where required, then make the executable alias runnable.
-        // On Switch the cache maintenance is performed by jitTransitionToExecutable().
-        code_pool->invalidate(reinterpret_cast<std::uint32_t*>(xptr), code_size);
-        code_pool->protect();
-        shader->FinalizePool(xptr);
-
-        pool_write_pos += aligned_size;
-#endif
-
-        setup.cached_shader = shader.get();
-        cache.emplace_hint(iter, cache_key, std::move(shader));
+        return;
     }
+
+    std::unique_ptr<JitShader> shader;
+    if (!exec_memory_exhausted) {
+        try {
+            shader = std::make_unique<JitShader>();
+            shader->Compile(&setup.GetProgramCode(), &setup.GetSwizzleData());
+        } catch (const std::bad_alloc&) {
+            LOG_WARNING(HW_GPU, "Out of executable memory for the shader JIT, falling back to "
+                                "the interpreter for this and all subsequent shaders");
+            exec_memory_exhausted = true;
+            shader.reset();
+        } catch (const std::exception& e) {
+            LOG_ERROR(HW_GPU, "Failed to compile shader, falling back to the interpreter: {}",
+                      e.what());
+            shader.reset();
+        }
+    }
+
+    setup.cached_shader = shader.get();
+    cache.emplace_hint(iter, cache_key, std::move(shader));
 }
 
 MICROPROFILE_DECLARE(GPU_Shader);
 
 void JitEngine::Run(const ShaderSetup& setup, ShaderUnit& state) const {
-    ASSERT(setup.cached_shader != nullptr);
+    if (setup.cached_shader == nullptr) {
+        interpreter->Run(setup, state);
+        return;
+    }
 
     MICROPROFILE_SCOPE(GPU_Shader);
 

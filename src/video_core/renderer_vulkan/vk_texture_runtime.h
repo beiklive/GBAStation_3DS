@@ -164,6 +164,12 @@ public:
     /// Returns the removal threshold ticks for the garbage collector
     u32 RemoveThreshold();
 
+    /// Returns the tick which will cover commands currently being recorded.
+    u64 CurrentTick() const noexcept;
+
+    /// Returns whether all GPU work through the supplied tick has completed.
+    bool IsSafeToDestroy(u64 tick);
+
     /// Submits and waits for current GPU work.
     void Finish();
 

@@ -130,8 +130,9 @@ template <class T>
 void RasterizerCache<T>::RunGarbageCollector() {
     frame_tick++;
     for (auto it = sentenced.begin(); it != sentenced.end();) {
-        const auto [surface_id, tick] = *it;
-        if (frame_tick - tick <= runtime.RemoveThreshold()) {
+        const auto [surface_id, sentence_tick, gpu_tick] = *it;
+        if (frame_tick - sentence_tick <= runtime.RemoveThreshold() ||
+            !runtime.IsSafeToDestroy(gpu_tick)) {
             it++;
             continue;
         }
@@ -139,6 +140,11 @@ void RasterizerCache<T>::RunGarbageCollector() {
         slot_surfaces.erase(surface_id);
         it = sentenced.erase(it);
     }
+}
+
+template <class T>
+void RasterizerCache<T>::SentenceSurface(SurfaceId surface_id) {
+    sentenced.push_back({surface_id, frame_tick, runtime.CurrentTick()});
 }
 
 template <class T>
@@ -169,7 +175,7 @@ void RasterizerCache<T>::RemoveTextureCubeFace(SurfaceId surface_id) {
         }
         if (std::none_of(cube.face_ids.begin(), cube.face_ids.end(),
                          [](SurfaceId id) { return id; })) {
-            sentenced.emplace_back(cube.surface_id, frame_tick);
+            SentenceSurface(cube.surface_id);
             it = texture_cube_cache.erase(it);
         } else {
             it++;
@@ -599,7 +605,7 @@ SurfaceId RasterizerCache<T>::GetTextureSurface(const Pica::Texture::TextureInfo
         params.res_scale = src_surface.res_scale;
         SurfaceId tmp_surface_id = CreateSurface(params, initial_flags);
         Surface& tmp_surface = slot_surfaces[tmp_surface_id];
-        sentenced.emplace_back(tmp_surface_id, frame_tick);
+        SentenceSurface(tmp_surface_id);
 
         const TextureBlit blit = {
             .src_level = src_surface.LevelOf(params.addr),
@@ -1119,7 +1125,7 @@ bool RasterizerCache<T>::UploadCustomSurface(SurfaceId surface_id, SurfaceInterv
             const SurfaceId old_id =
                 slot_surfaces.swap_and_insert(surface_id, runtime, old_surface, material);
             slot_surfaces[old_id].flags &= ~SurfaceFlagBits::Registered;
-            sentenced.emplace_back(old_id, frame_tick);
+            SentenceSurface(old_id);
         }
         Surface& surface = slot_surfaces[surface_id];
         surface.UploadCustom(material, level);
@@ -1362,13 +1368,13 @@ template <class T>
 SurfaceId RasterizerCache<T>::CreateSurface(const SurfaceParams& params,
                                             const SurfaceFlagBits& initial_flags) {
     const SurfaceId surface_id = [&] {
-        const auto it = std::find_if(sentenced.begin(), sentenced.end(), [&](const auto& pair) {
-            return slot_surfaces[pair.first] == params;
+        const auto it = std::find_if(sentenced.begin(), sentenced.end(), [&](const auto& entry) {
+            return slot_surfaces[entry.surface_id] == params;
         });
         if (it == sentenced.end()) {
             return slot_surfaces.insert(runtime, params, initial_flags);
         }
-        const SurfaceId surface_id = it->first;
+        const SurfaceId surface_id = it->surface_id;
         sentenced.erase(it);
         return surface_id;
     }();
@@ -1418,7 +1424,7 @@ void RasterizerCache<T>::UnregisterSurface(SurfaceId surface_id) {
 
     if (surface.type != SurfaceType::Fill) {
         RemoveTextureCubeFace(surface_id);
-        sentenced.emplace_back(surface_id, frame_tick);
+        SentenceSurface(surface_id);
         return;
     }
 

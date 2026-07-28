@@ -503,6 +503,16 @@ u32 TextureRuntime::RemoveThreshold() {
     return num_swapchain_images;
 }
 
+u64 TextureRuntime::CurrentTick() const noexcept {
+    return scheduler.CurrentTick();
+}
+
+bool TextureRuntime::IsSafeToDestroy(u64 tick) {
+    auto* master_semaphore = scheduler.GetMasterSemaphore();
+    master_semaphore->Refresh();
+    return master_semaphore->IsFree(tick);
+}
+
 void TextureRuntime::Finish() {
     scheduler.Finish();
 }

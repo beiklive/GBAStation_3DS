@@ -45,6 +45,15 @@ public:
     /// Returns the removal threshold ticks for the garbage collector
     u32 RemoveThreshold();
 
+    /// OpenGL resource deletion is ordered by the current context.
+    u64 CurrentTick() const noexcept {
+        return 0;
+    }
+
+    bool IsSafeToDestroy(u64) const noexcept {
+        return true;
+    }
+
     /// Submits and waits for current GPU work.
     void Finish() {}
 

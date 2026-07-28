@@ -1010,9 +1010,23 @@ void JitShader::Compile(const std::array<u32, MAX_PROGRAM_CODE_LENGTH>* program_
     return_offsets.clear();
     return_offsets.shrink_to_fit();
 
-    // Record the entry offset within code_vec; JitEngine will copy code_vec into the
-    // shared pool and call FinalizePool() to set rx_base and program.
-    m_program_offset = static_cast<std::size_t>(program_offset);
+    // Copy to executable memory
+    const size_t code_size = code_vec.size() * sizeof(u32);
+
+    code_mem = std::make_unique<oaknut::CodeBlock>(code_size);
+    code_mem->unprotect();
+
+    program = reinterpret_cast<CompiledShader*>(reinterpret_cast<std::byte*>(code_mem->xptr()) +
+                                                program_offset);
+
+    std::memcpy(code_mem->wptr(), code_vec.data(), code_size);
+
+    // Memory is ready to execute
+    code_mem->protect();
+    code_mem->invalidate_all();
+
+    code_vec.clear();
+    code_vec.shrink_to_fit();
 }
 
 JitShader::JitShader() : oaknut::VectorCodeGenerator(code_vec) {}

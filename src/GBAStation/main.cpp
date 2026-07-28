@@ -112,6 +112,10 @@ constexpr const char* MemMapLogPath = "sdmc:/GBAStation/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
 constexpr const char* SwitchFastmemEnv = "GBASTATION_SWITCH_FASTMEM";
 constexpr const char* SwitchJitFastDispatchEnv = "GBASTATION_SWITCH_JIT_FAST_DISPATCH";
+constexpr const char* DisableNvkShaderCacheMarkerPath =
+    "sdmc:/GBAStation/3ds/disable_nvk_shader_cache";
+constexpr const char* NvkFullIdleCompletionMarkerPath =
+    "sdmc:/GBAStation/3ds/nvk_full_idle_completion";
 
 struct LaunchOptions {
     std::string rom_path;
@@ -181,6 +185,19 @@ void ApplyDiagnosticLogSwitchFromEnv() {
     EnableExitLogFile = enabled;
     EnableCommonLogFile = enabled;
     EnableBootMarkerFile = enabled;
+}
+
+void ApplyNvkDiagnosticSwitches() {
+#if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
+    struct stat marker_info {};
+    if (stat(DisableNvkShaderCacheMarkerPath, &marker_info) == 0) {
+        setenv("NVK_SWITCH_SHADER_CACHE_DISABLE", "1", 1);
+        setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
+    }
+    if (stat(NvkFullIdleCompletionMarkerPath, &marker_info) == 0) {
+        setenv("NVK_SWITCH_DIAGNOSTIC_FULL_IDLE_COMPLETION", "1", 1);
+    }
+#endif
 }
 
 void EnsureSystemDirs() {
@@ -4433,7 +4450,14 @@ int Run(int argc, char** argv) {
 
 extern "C" void userAppInit() {
     ApplyDiagnosticLogSwitchFromEnv();
+    ApplyNvkDiagnosticSwitches();
     WriteRawBootMarker("userAppInit: entry");
+    WriteRawBootMarker(std::getenv("NVK_SWITCH_SHADER_CACHE_DISABLE")
+                           ? "NVK diagnostic: shader caches disabled"
+                           : "NVK diagnostic: shader caches enabled");
+    WriteRawBootMarker(std::getenv("NVK_SWITCH_DIAGNOSTIC_FULL_IDLE_COMPLETION")
+                           ? "NVK diagnostic: full-idle completion enabled"
+                           : "NVK diagnostic: normal completion enabled");
     LogTlsLayoutEarly("userAppInit TLS");
     RotateDiagnosticLogs();
     OpenStartupLogIfNeeded("w");
