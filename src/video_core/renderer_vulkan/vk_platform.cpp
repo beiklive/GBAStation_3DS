@@ -17,6 +17,7 @@
 #endif
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -324,6 +325,10 @@ vk::UniqueInstance CreateInstance(const Common::DynamicLibrary& library,
                                   Frontend::WindowSystemType window_type, bool enable_validation,
                                   bool dump_command_buffers) {
 #if defined(__SWITCH__)
+    // Upstream NVK treats Tegra SoCs as non-conformant and hides them unless
+    // the embedding application explicitly opts in.
+    setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+
     (void)library;
     uint32_t icd_version = 7;
     vk_icdNegotiateLoaderICDInterfaceVersion(&icd_version);
