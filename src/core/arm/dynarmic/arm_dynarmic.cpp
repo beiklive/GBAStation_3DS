@@ -57,7 +57,10 @@ std::atomic<u32> dynarmic_last_read_callback_addr{};
 std::atomic<u32> dynarmic_last_write_callback_addr{};
 #endif
 
-constexpr std::size_t SwitchCodeCacheSize = 64 * 1024 * 1024;
+// libnx backs every JIT CodeMemory mapping with an equally sized writable allocation, while
+// Dynarmic also keeps per-block metadata. Four 64 MiB caches plus cached page-table variants
+// consume enough memory to make accelerated New 3DS workloads unstable.
+constexpr std::size_t SwitchCodeCacheSize = 32 * 1024 * 1024;
 
 } // namespace
 
@@ -438,7 +441,12 @@ void ARM_Dynarmic::InvalidateCacheRange(u32 start_address, std::size_t length) {
     dynarmic_cache_range_invalidations.fetch_add(1);
     dynarmic_cache_range_invalidation_bytes.fetch_add(static_cast<u64>(length));
 #endif
-    jit->InvalidateCacheRange(start_address, length);
+    // Each page table visited by this CPU core owns a separate Dynarmic JIT. Guest code ranges
+    // can be reused after CRO/app process changes, so invalidating only the active JIT leaves
+    // stale translations ready to execute when an older page table becomes active again.
+    for (const auto& cached_jit : jits) {
+        cached_jit.second->InvalidateCacheRange(start_address, length);
+    }
 }
 
 void ARM_Dynarmic::ClearExclusiveState() {
@@ -457,16 +465,18 @@ void ARM_Dynarmic::SetPageTable(const std::shared_ptr<Memory::PageTable>& page_t
     }
 
     auto iter = jits.find(current_page_table);
-    if (iter != jits.end()) {
-        jit = iter->second.get();
-        LoadContext(ctx);
-        return;
+    if (iter == jits.end()) {
+        iter = jits.emplace(current_page_table, MakeJit()).first;
     }
-
-    auto new_jit = MakeJit();
-    jit = new_jit.get();
+    jit = iter->second.get();
     LoadContext(ctx);
-    jits.emplace(current_page_table, std::move(new_jit));
+
+    // The constructor creates one JIT before a process page table exists. Once a real page
+    // table is installed that bootstrap JIT is unreachable, but retaining it wastes one full
+    // executable code cache per emulated CPU core.
+    if (current_page_table) {
+        jits.erase(nullptr);
+    }
 }
 
 void ARM_Dynarmic::ServeBreak([[maybe_unused]] int signal) {
