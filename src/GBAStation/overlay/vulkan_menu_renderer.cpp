@@ -2394,16 +2394,19 @@ void BuildMenu(const State& state) {
     DrawToast(state);
 }
 
-void TransformVertices(vk::Extent2D extent) {
-    for (Vertex& vertex : vertices) {
+void TransformVertices(vk::Extent2D extent, std::size_t first_rotated_vertex) {
+    for (std::size_t index = 0; index < vertices.size(); ++index) {
+        Vertex& vertex = vertices[index];
         float x = vertex.x;
         float y = vertex.y;
-        if (canvas_orientation == 90) {
-            x = vertex.y;
-            y = canvas_width - vertex.x;
-        } else if (canvas_orientation == 270) {
-            x = canvas_height - vertex.y;
-            y = vertex.x;
+        if (index >= first_rotated_vertex) {
+            if (canvas_orientation == 90) {
+                x = vertex.y;
+                y = canvas_width - vertex.x;
+            } else if (canvas_orientation == 270) {
+                x = canvas_height - vertex.y;
+                y = vertex.x;
+            }
         }
         vertex.x = x / static_cast<float>(extent.width) * 2.0f - 1.0f;
         vertex.y = y / static_cast<float>(extent.height) * 2.0f - 1.0f;
@@ -2477,7 +2480,8 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
         --overlay_skip_draw_frames;
     }
     if (draw_overlay) {
-        AddQuad(0, 0, canvas_width, canvas_height, 0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
+        AddQuad(0, 0, LandscapeCanvasWidth, LandscapeCanvasHeight, 0, 0, 1, 1,
+                {1, 1, 1, 1}, 2.0f);
         overlay_vertex_count = 6;
     }
     if (state.menu_visible) {
@@ -2487,7 +2491,9 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     }
     DrawFpsIndicator(state);
     DrawFastForwardIndicator(state);
-    TransformVertices(extent);
+    // Overlay images are authored for the physical framebuffer. Keep their
+    // vertices fixed while rotating menu and indicator vertices for portrait mode.
+    TransformVertices(extent, overlay_vertex_count);
     const vk::Framebuffer framebuffer = GetFramebuffer(image, extent);
     if (!framebuffer || vertices.empty() || vertices.size() * sizeof(Vertex) > VertexBufferSize) {
         return;
