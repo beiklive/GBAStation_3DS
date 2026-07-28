@@ -189,14 +189,6 @@ void ApplyDiagnosticLogSwitchFromEnv() {
 
 void ApplyNvkDiagnosticSwitches() {
 #if defined(GBASTATION_SWITCH_DIAGNOSTIC_LOGS)
-    // The raw Switch backend currently completes submissions with a 3D ROP syncpoint. That does
-    // not prove that compute work and non-ROP graphics accesses have retired. Use the stronger
-    // engine-idle completion in diagnostic builds so this build is a direct A/B test against the
-    // normal-completion crash captured in nvk_device_lost.txt.
-    if (!std::getenv("NVK_SWITCH_DIAGNOSTIC_FULL_IDLE_COMPLETION")) {
-        setenv("NVK_SWITCH_DIAGNOSTIC_FULL_IDLE_COMPLETION", "1", 1);
-    }
-
     struct stat marker_info {};
     if (stat(DisableNvkShaderCacheMarkerPath, &marker_info) == 0) {
         setenv("NVK_SWITCH_SHADER_CACHE_DISABLE", "1", 1);
