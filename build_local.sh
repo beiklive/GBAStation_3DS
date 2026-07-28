@@ -52,9 +52,9 @@ if [[ ! -f "$ROOT/externals/dynarmic/CMakeLists.txt" ]]; then
 fi
 
 if [[ "$VARIANT" == diagnostic ]]; then
-    SWITCHVK_SDK_NAME=nvk-switch-25.3.6-diagnostic
+    SWITCHVK_SDK_NAME=nvk-switch-26.1.4-diagnostic
 else
-    SWITCHVK_SDK_NAME=nvk-switch-25.3.6
+    SWITCHVK_SDK_NAME=nvk-switch-26.1.4
 fi
 
 if [[ -z "${SWITCH_NVK_ROOT:-}" ]]; then

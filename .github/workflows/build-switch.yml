@@ -22,23 +22,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch pinned private switchVK SDK
-        id: switchvk
+      - name: Fetch latest release switchVK SDK
+        id: switchvk-release
         shell: bash
         env:
           SWITCHVK_TOKEN: ${{ secrets.SWITCHVK_READ_TOKEN }}
-          SWITCHVK_SHA256: ${{ vars.SWITCHVK_SHA256 }}
-        run: bash ci/fetch-switchvk.sh "$RUNNER_TEMP/switchvk-sdk"
+          SWITCHVK_VARIANT: release
+        run: bash ci/fetch-switchvk.sh "$RUNNER_TEMP/switchvk-sdk-release"
 
       - name: Build release NRO
         shell: bash
         run: bash build_switch_nro.sh clean release
 
+      - name: Fetch latest diagnostic switchVK SDK
+        id: switchvk-diagnostic
+        shell: bash
+        env:
+          SWITCHVK_TOKEN: ${{ secrets.SWITCHVK_READ_TOKEN }}
+          SWITCHVK_VARIANT: diagnostic
+        run: bash ci/fetch-switchvk.sh "$RUNNER_TEMP/switchvk-sdk-diagnostic"
+
+      - name: Build diagnostic NRO
+        shell: bash
+        run: bash build_switch_nro.sh clean diagnostic
+
       - name: Upload Nintendo Switch build
         uses: actions/upload-artifact@v4
         with:
           name: GBAStation-3DS-Switch-${{ github.sha }}
-          path: GBAStation3DSStub.nro
+          path: |
+            GBAStation3DSStub.nro
+            GBAStation3DSStub-diagnostic.nro
           if-no-files-found: error
           retention-days: 30
 
@@ -48,4 +62,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          files: GBAStation3DSStub.nro
+          files: |
+            GBAStation3DSStub.nro
+            GBAStation3DSStub-diagnostic.nro

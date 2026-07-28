@@ -54,7 +54,7 @@ endif()
 link_directories(${DEVKITPRO}/portlibs/switch/lib ${DEVKITPRO}/libnx/lib)
 
 set(SWITCH_NVK_ROOT "$ENV{SWITCH_NVK_ROOT}" CACHE PATH
-    "Mesa 25.3.6 raw NVK Switch package root (include/ and lib/libvulkan.a)")
+    "Mesa 26.1.4 raw NVK Switch package root (include/ and lib/libvulkan.a)")
 set(SWITCH_VULKAN_LIBRARY "" CACHE FILEPATH
     "Legacy override for a standalone Switch libvulkan.a archive")
 
@@ -90,7 +90,7 @@ set_target_properties(switch_nvk_vulkan PROPERTIES
 # Mesa's generated dispatch tables intentionally hold weak references to the
 # concrete NVK/common/WSI entrypoints.  That works for a shared ICD, but a
 # static archive needs explicit undefined roots or the archive members are not
-# extracted.  Derive the exact Mesa 25.3.6 implementation set from this package
+# extracted.  Derive the exact Mesa 26.1.4 implementation set from this package
 # instead of whole-archiving it (the merged archive contains repeated members).
 if(NOT CMAKE_NM)
     set(CMAKE_NM "${DEVKITPRO}/devkitA64/bin/aarch64-none-elf-gcc-nm")
@@ -116,9 +116,8 @@ endforeach()
 list(APPEND SWITCH_NVK_KEEP_SYMBOLS
     vk_icdGetInstanceProcAddr
     vk_icdNegotiateLoaderICDInterfaceVersion
-    nvk_switch_image_layout
-    nvkmd_switch_sync_get_fence
-    nvkmd_switch_binary_sync_type
+    nvkmd_nvgpu_syncobj_get_fence
+    nvkmd_nvgpu_syncobj_type
     wsi_switch_init_wsi
     wsi_switch_finish_wsi
 )

@@ -34,9 +34,10 @@ def main() -> int:
                 self.send_error(401)
                 return
 
-            if self.path.endswith("/releases/tags/container-validation"):
+            if self.path.endswith("/releases/latest"):
                 payload = json.dumps(
                     {
+                        "tag_name": "switchvk-mesa-26.1.4-test",
                         "assets": [
                             {"name": archive_name, "url": f"{api_root}/assets/1"},
                             {"name": checksum_name, "url": f"{api_root}/assets/2"},
@@ -70,7 +71,9 @@ def main() -> int:
     thread.start()
 
     try:
-        with tempfile.TemporaryDirectory(prefix="switchvk-fetch-test-") as temp:
+        with tempfile.TemporaryDirectory(
+            prefix=".switchvk-fetch-test-", dir=repository
+        ) as temp:
             temp_path = pathlib.Path(temp)
             lock = temp_path / "switchvk.lock"
             destination = temp_path / "sdk"
@@ -78,11 +81,6 @@ def main() -> int:
                 "\n".join(
                     [
                         'SWITCHVK_REPOSITORY="beiklive/switchVK"',
-                        'SWITCHVK_TAG="container-validation"',
-                        f'SWITCHVK_ASSET="{archive_name}"',
-                        f'SWITCHVK_CHECKSUM_ASSET="{checksum_name}"',
-                        'SWITCHVK_ROOT_DIRECTORY="nvk-switch-25.3.6"',
-                        'SWITCHVK_SHA256=""',
                         "",
                     ]
                 ),
@@ -96,13 +94,33 @@ def main() -> int:
                     "SWITCHVK_TOKEN": expected_token,
                 }
             )
+            bash = env.get("BASH", "bash")
+            script = repository / "ci/fetch-switchvk.sh"
+            destination_arg = str(destination)
+            if pathlib.Path(bash).is_absolute():
+                bash_directory = pathlib.Path(bash).parent
+                env["PATH"] = f"{bash_directory}{os.pathsep}{env.get('PATH', '')}"
+                cygpath = bash_directory / "cygpath.exe"
+                if cygpath.is_file():
+                    def msys_path(path: pathlib.Path) -> str:
+                        return subprocess.check_output(
+                            [str(cygpath), "-u", str(path)], text=True
+                        ).strip()
+
+                    env["SWITCHVK_LOCK_FILE"] = msys_path(lock)
+                    script = msys_path(script)
+                    destination_arg = msys_path(destination)
             subprocess.run(
-                ["bash", str(repository / "ci/fetch-switchvk.sh"), str(destination)],
+                [
+                    bash,
+                    str(script),
+                    destination_arg,
+                ],
                 cwd=repository,
                 env=env,
                 check=True,
             )
-            library = destination / "nvk-switch-25.3.6/lib/libvulkan.a"
+            library = destination / "nvk-switch-26.1.4/lib/libvulkan.a"
             if not library.is_file():
                 raise RuntimeError("fetch test did not install libvulkan.a")
     finally:

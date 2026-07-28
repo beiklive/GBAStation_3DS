@@ -55,8 +55,8 @@ fi
 
 if [ -z "${SWITCH_NVK_ROOT:-}" ]; then
     for candidate in \
-        "${SCRIPT_DIR}/../switchVK/nvk-switch-25.3.6" \
-        "${SCRIPT_DIR}/../switch-nvk/nvk-switch-25.3.6" \
+        "${SCRIPT_DIR}/../switchVK/nvk-switch-26.1.4" \
+        "${SCRIPT_DIR}/../switch-nvk/nvk-switch-26.1.4" \
         "/opt/nvk-switch"; do
         if [ -f "${candidate}/lib/libvulkan.a" ]; then
             SWITCH_NVK_ROOT="$(cd "${candidate}" && pwd)"
@@ -161,11 +161,12 @@ required_symbols=(
     wsi_CreateViSurfaceNN
     wsi_CreateSwapchainKHR
     wsi_switch_init_wsi
-    nvk_switch_image_layout
-    nvkmd_switch_create_dev
-    nvkmd_switch_alloc_mem
-    nvkmd_switch_binary_sync_type
-    nvkmd_switch_sync_get_fence
+    nvkmd_nvgpu_create_dev
+    nvkmd_nvgpu_create_ctx
+    nvkmd_nvgpu_alloc_mem
+    nvkmd_nvgpu_alloc_va
+    nvkmd_nvgpu_syncobj_type
+    nvkmd_nvgpu_syncobj_get_fence
 )
 
 DEFINED_SYMBOLS="${BUILD_DIR}/azahar-switch-defined-symbols${OUTPUT_SUFFIX}.txt"
@@ -192,7 +193,7 @@ if grep -Eqi 'drm_shim|drm_nouveau|GLESv2|libglapi|allow-multiple-definition' \
     exit 1
 fi
 
-for identity in 'Mesa 25.3.6' 'NVIDIA Tegra X1 (GM20B)' 'nvkmd/switch'; do
+for identity in 'Mesa 26.1.4' 'NVIDIA Tegra X1'; do
     if ! "${STRINGS}" "${NRO_FILE}" | grep -F "${identity}" >/dev/null; then
         echo "ERROR: final NRO is missing identity string: ${identity}" >&2
         exit 1
@@ -205,7 +206,7 @@ done
     echo "Undefined ELF symbols: 0"
     echo "Forbidden DRM/OpenGL link dependencies: 0"
     echo "Multiple-definition linker fallback: absent"
-    echo "Mesa identity: 25.3.6 raw nvkmd/switch"
+    echo "Mesa identity: 26.1.4 raw nvkmd/nvgpu"
 } > "${AUDIT_LOG}"
 
 hash_files=(
