@@ -260,6 +260,11 @@ private:
     std::vector<u8> data;
     std::vector<u64> content_written;
     std::vector<std::string> content_file_paths;
+    std::vector<std::string> content_file_backups;
+    std::string ticket_path;
+    std::string ticket_backup_path;
+    std::string tmd_path;
+    std::string tmd_backup_path;
     u16 current_content_index = -1;
     std::unique_ptr<NCCHCryptoFile> current_content_file;
     InstallResult current_content_install_result{};
@@ -372,11 +377,14 @@ private:
  * Installs a CIA file from a specified file path.
  * @param path file path of the CIA file to install
  * @param update_callback callback function called during filesystem write
+ * @param authorize_decryption allow the direct installer to decrypt authorized content
+ * @param cancel_callback callback returning true when the install should be aborted
  * @returns bool whether the install was successful
  */
 InstallStatus InstallCIA(const std::string& path,
                          std::function<ProgressCallback>&& update_callback = nullptr,
-                         bool authorize_decryption = false);
+                         bool authorize_decryption = false,
+                         std::function<bool()>&& cancel_callback = nullptr);
 
 /**
  * Checks if the provided path is a valid CIA file

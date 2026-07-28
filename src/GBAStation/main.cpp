@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <csignal>
 #include <cstdarg>
 #include <cstddef>
@@ -50,6 +51,7 @@
 #include "core/cheats/cheat_base.h"
 #include "core/cheats/cheats.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/file_sys/cia_container.h"
 #include "core/loader/loader.h"
 #include "core/loader/smdh.h"
@@ -63,6 +65,7 @@
 #include "core/hle/service/am/am.h"
 #include "core/hw/y2r.h"
 #include "core/hle/service/cfg/cfg.h"
+#include "core/hle/service/mic/mic_u.h"
 #include "core/hle/service/service.h"
 #include "input_common/main.h"
 #include "input_common/switch_hid.h"
@@ -1165,8 +1168,11 @@ struct CiaBrowserEntry {
 struct CiaInstallState {
     std::atomic_bool active{false};
     std::atomic_bool done{false};
+    std::atomic_bool cancel_requested{false};
     std::atomic_size_t written{0};
     std::atomic_size_t total{0};
+    std::atomic_size_t batch_index{1};
+    std::atomic_size_t batch_total{1};
     Service::AM::InstallStatus result{Service::AM::InstallStatus::ErrorInvalid};
     std::string source_path;
     std::string installed_path;
@@ -1314,6 +1320,41 @@ bool ShouldAddCiaToGameDb(CiaTitleKind kind) {
     return kind == CiaTitleKind::Application || kind == CiaTitleKind::Demo;
 }
 
+int CiaInstallPriority(CiaTitleKind kind) {
+    switch (kind) {
+    case CiaTitleKind::Application:
+    case CiaTitleKind::Demo:
+        return 0;
+    case CiaTitleKind::Update:
+        return 1;
+    case CiaTitleKind::AddOnContent:
+        return 2;
+    case CiaTitleKind::System:
+        return 3;
+    default:
+        return 4;
+    }
+}
+
+std::vector<CiaBrowserEntry> BuildCiaInstallQueue(const std::vector<CiaBrowserEntry>& entries) {
+    std::vector<CiaBrowserEntry> queue;
+    for (const CiaBrowserEntry& entry : entries) {
+        if (entry.type == CiaBrowserEntry::Type::Cia && entry.readable) {
+            queue.push_back(entry);
+        }
+    }
+    std::stable_sort(queue.begin(), queue.end(), [](const CiaBrowserEntry& left,
+                                                      const CiaBrowserEntry& right) {
+        const int left_priority = CiaInstallPriority(left.kind);
+        const int right_priority = CiaInstallPriority(right.kind);
+        if (left_priority != right_priority) {
+            return left_priority < right_priority;
+        }
+        return Common::ToLower(left.name) < Common::ToLower(right.name);
+    });
+    return queue;
+}
+
 std::string FormatTitleVersion(u16 version) {
     char buffer[64]{};
     std::snprintf(buffer, sizeof(buffer), "v%u.%u.%u (%u)", (version >> 10) & 0x3F,
@@ -1362,6 +1403,11 @@ bool EndsWithCiaExtension(std::string_view name) {
     return EndsWithNoCase(name, ".cia") || EndsWithNoCase(name, ".zcia");
 }
 
+bool IsCartridgeImagePath(std::string_view name) {
+    return EndsWithNoCase(name, ".3ds") || EndsWithNoCase(name, ".z3ds") ||
+           EndsWithNoCase(name, ".cci") || EndsWithNoCase(name, ".zcci");
+}
+
 bool ReadCiaEntry(const std::string& path, CiaBrowserEntry& entry) {
     std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
     if (!file->IsOpen()) {
@@ -1395,21 +1441,7 @@ bool ReadCiaEntry(const std::string& path, CiaBrowserEntry& entry) {
     return true;
 }
 
-CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& fallback) {
-    CiaInstallMetadata metadata;
-    metadata.title = fallback;
-    std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
-    if (!file->IsOpen()) {
-        return metadata;
-    }
-    if (FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file.get()) != std::nullopt) {
-        file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(file));
-    }
-    FileSys::CIAContainer container;
-    if (container.Load(file.get()) != Loader::ResultStatus::Success || !container.GetSMDH()) {
-        return metadata;
-    }
-    const Loader::SMDH& smdh = *container.GetSMDH();
+void ApplySmdhMetadata(const Loader::SMDH& smdh, CiaInstallMetadata& metadata) {
     const auto try_language = [&smdh](Loader::SMDH::TitleLanguage language) {
         return CleanSmdhTitle(smdh.GetLongTitle(language));
     };
@@ -1434,7 +1466,82 @@ CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& f
             metadata.icon_rgba[i * 4 + 3] = 0xFF;
         }
     }
+}
+
+CiaInstallMetadata ReadCiaMetadata(const std::string& path, const std::string& fallback) {
+    CiaInstallMetadata metadata;
+    metadata.title = fallback;
+    std::unique_ptr<FileUtil::IOFile> file = std::make_unique<FileUtil::IOFile>(path, "rb");
+    if (!file->IsOpen()) {
+        return metadata;
+    }
+    if (FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file.get()) != std::nullopt) {
+        file = std::make_unique<FileUtil::Z3DSReadIOFile>(std::move(file));
+    }
+    FileSys::CIAContainer container;
+    if (container.Load(file.get()) != Loader::ResultStatus::Success || !container.GetSMDH()) {
+        return metadata;
+    }
+    ApplySmdhMetadata(*container.GetSMDH(), metadata);
+    DebugLog("CIA icon source=cia path=%s", path.c_str());
     return metadata;
+}
+
+bool ReadInstalledTitleMetadata(const std::string& path, CiaInstallMetadata& metadata) {
+    auto loader = Loader::GetLoader(path);
+    if (!loader) {
+        DebugLog("CIA installed icon loader unavailable path=%s", path.c_str());
+        return false;
+    }
+
+    std::vector<u8> smdh_bytes;
+    if (loader->ReadIcon(smdh_bytes) != Loader::ResultStatus::Success ||
+        !Loader::IsValidSMDH(smdh_bytes)) {
+        DebugLog("CIA installed icon SMDH unavailable path=%s size=%zu", path.c_str(),
+                 smdh_bytes.size());
+        return false;
+    }
+
+    Loader::SMDH smdh{};
+    std::memcpy(&smdh, smdh_bytes.data(), sizeof(smdh));
+    ApplySmdhMetadata(smdh, metadata);
+    DebugLog("CIA icon source=installed-content path=%s", path.c_str());
+    return !metadata.icon_rgba.empty();
+}
+
+std::vector<u8> MakeFallbackCiaIcon(u64 program_id) {
+    constexpr int width = 48;
+    constexpr int height = 48;
+    std::vector<u8> rgba(width * height * 4, 0xFF);
+    const u8 accent_r = static_cast<u8>(72 + ((program_id >> 8) & 0x3F));
+    const u8 accent_g = static_cast<u8>(108 + ((program_id >> 16) & 0x3F));
+    const u8 accent_b = static_cast<u8>(142 + ((program_id >> 24) & 0x3F));
+    const auto set_pixel = [&](int x, int y, u8 r, u8 g, u8 b) {
+        const std::size_t offset = static_cast<std::size_t>(y * width + x) * 4;
+        rgba[offset + 0] = r;
+        rgba[offset + 1] = g;
+        rgba[offset + 2] = b;
+        rgba[offset + 3] = 0xFF;
+    };
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            set_pixel(x, y, accent_r, accent_g, accent_b);
+        }
+    }
+    const auto draw_screen = [&](int left, int top, int right, int bottom) {
+        for (int y = top; y < bottom; ++y) {
+            for (int x = left; x < right; ++x) {
+                const bool border = x < left + 2 || x >= right - 2 || y < top + 2 ||
+                                    y >= bottom - 2;
+                set_pixel(x, y, border ? 244 : 32, border ? 247 : 41, border ? 250 : 52);
+            }
+        }
+    };
+    draw_screen(10, 8, 38, 23);
+    draw_screen(14, 27, 34, 40);
+    DebugLog("CIA icon source=fallback tid=%016llx",
+             static_cast<unsigned long long>(program_id));
+    return rgba;
 }
 
 std::string SaveCiaIconPng(const std::string& save_path, const std::vector<u8>& icon_rgba) {
@@ -1827,22 +1934,33 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
     }
 
     if (!notice.empty()) {
-        canvas.Text(54, 674, canvas.Truncate(notice, 20, 780), 20, accent);
+        canvas.Text(54, 674, canvas.Truncate(notice, 20, 560), 20, accent);
     }
-    canvas.Text(760, 674, "A 确认   B 返回上级   X 删除源文件   + 返回主程序", 19, dim);
+    canvas.Text(640, 656, "A 确认   B 返回/取消安装", 18, dim);
+    canvas.Text(640, 688, "X 删除源文件   Y 全部安装   + 返回", 18, dim);
 
     if (install_state.active.load(std::memory_order_acquire)) {
         const std::size_t written = install_state.written.load(std::memory_order_acquire);
         const std::size_t total = install_state.total.load(std::memory_order_acquire);
+        const std::size_t batch_index = install_state.batch_index.load(std::memory_order_acquire);
+        const std::size_t batch_total = install_state.batch_total.load(std::memory_order_acquire);
         canvas.FillRect(0, 0, 1280, 720, {0, 0, 0, 150});
         canvas.FillRect(360, 278, 560, 150, {28, 34, 45, 255});
         canvas.Border(360, 278, 560, 150, {80, 96, 120, 255});
-        canvas.Text(390, 326, canvas.Truncate("正在安装 " + install_state.title, 22, 500), 22,
-                    text);
+        std::string title = "正在安装 ";
+        if (batch_total > 1) {
+            title += std::to_string(batch_index) + "/" + std::to_string(batch_total) + " ";
+        }
+        title += install_state.title;
+        canvas.Text(390, 326, canvas.Truncate(title, 22, 500), 22, text);
         canvas.FillRect(390, 350, 500, 12, {52, 62, 78, 255});
         const int fill = total == 0 ? 0 : static_cast<int>(500ULL * written / total);
         canvas.FillRect(390, 350, std::clamp(fill, 0, 500), 12, accent);
         canvas.Text(390, 396, FormatBytes(written) + " / " + FormatBytes(total), 19, dim);
+        canvas.Text(390, 418, install_state.cancel_requested.load(std::memory_order_acquire)
+                                 ? "正在取消当前安装..."
+                                 : "按 B 取消当前安装",
+                    18, accent);
     }
     canvas.End();
 }
@@ -1859,6 +1977,43 @@ void DrawCiaMessage(CiaInstallerCanvas& canvas, const std::string& title,
     canvas.Text(360, 360, canvas.Truncate(message, 22, 560), 22, {172, 184, 200, 255});
     canvas.Text(360, 420, "按 A 或 B 返回文件列表", 20, {74, 170, 255, 255});
     canvas.End();
+}
+
+void DrawCiaInstallAllConfirm(CiaInstallerCanvas& canvas, std::size_t count, bool delete_source) {
+    if (!canvas.Begin()) {
+        return;
+    }
+    constexpr Rgba text{238, 243, 250, 255};
+    constexpr Rgba dim{172, 184, 200, 255};
+    constexpr Rgba accent{74, 170, 255, 255};
+    canvas.FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
+    canvas.FillRect(260, 216, 760, 288, {28, 34, 45, 255});
+    canvas.Border(260, 216, 760, 288, {80, 96, 120, 255});
+    canvas.Text(304, 276, "全部安装", 32, text);
+    canvas.Text(304, 328, "是否安装当前目录中的 " + std::to_string(count) + " 个CIA文件？", 24,
+                dim);
+    canvas.Text(304, 372, "安装顺序：游戏 > 更新 > DLC > 系统/其他", 21, accent);
+    canvas.Text(304, 412,
+                std::string{"安装成功后删除源文件："} + (delete_source ? "开" : "关"), 21,
+                delete_source ? accent : dim);
+    canvas.Text(304, 466, "A 全部安装   B 取消", 21, accent);
+    canvas.End();
+}
+
+bool ConfirmCiaInstallAll(CiaInstallerCanvas& canvas, std::size_t count, bool delete_source) {
+    while (appletMainLoop()) {
+        padUpdate(&pad);
+        const u64 down = padGetButtonsDown(&pad);
+        DrawCiaInstallAllConfirm(canvas, count, delete_source);
+        if (down & HidNpadButton_A) {
+            return true;
+        }
+        if (down & HidNpadButton_B) {
+            return false;
+        }
+        svcSleepThread(16'000'000);
+    }
+    return false;
 }
 
 int RunCiaInstaller(const LaunchOptions& options) {
@@ -1882,6 +2037,12 @@ int RunCiaInstaller(const LaunchOptions& options) {
     CiaInstallState install_state;
     std::thread install_thread;
     bool install_keep_awake = false;
+    std::vector<CiaBrowserEntry> batch_queue;
+    std::size_t batch_index{};
+    std::size_t batch_success{};
+    std::size_t batch_failed{};
+    bool batch_active = false;
+    bool batch_delete_source = false;
 
     const auto set_install_keep_awake = [&](bool enabled, const char* reason) {
         if (install_keep_awake == enabled) {
@@ -1913,7 +2074,21 @@ int RunCiaInstaller(const LaunchOptions& options) {
         scroll = std::clamp(scroll, 0, std::max(0, selected));
     };
 
-    const auto start_install = [&](const CiaBrowserEntry& entry) {
+    const auto acknowledge_result = [&](const std::string& title, const std::string& message) {
+        while (appletMainLoop()) {
+            padUpdate(&pad);
+            const u64 message_down = padGetButtonsDown(&pad);
+            DrawCiaMessage(canvas, title, message);
+            if (message_down & (HidNpadButton_A | HidNpadButton_B)) {
+                break;
+            }
+            svcSleepThread(16'000'000);
+        }
+    };
+
+    const auto start_install = [&](const CiaBrowserEntry& entry, bool delete_after_install,
+                                   std::size_t current_batch_index,
+                                   std::size_t current_batch_total) {
         if (!entry.readable) {
             notice = entry.name + ": 不是有效的CIA";
             return;
@@ -1931,10 +2106,12 @@ int RunCiaInstaller(const LaunchOptions& options) {
         install_state.result = Service::AM::InstallStatus::ErrorInvalid;
         install_state.total = static_cast<std::size_t>(entry.size);
         install_state.written = 0;
+        install_state.batch_index = current_batch_index;
+        install_state.batch_total = current_batch_total;
+        install_state.cancel_requested = false;
         install_state.done = false;
         install_state.active = true;
         notice.clear();
-        const bool delete_after_install = delete_source;
         install_thread = std::thread([&, entry, metadata = std::move(metadata),
                                       delete_after_install] {
             PinCurrentThreadToCore(0, "cia-install-worker");
@@ -1946,7 +2123,9 @@ int RunCiaInstaller(const LaunchOptions& options) {
                     install_state.written = written;
                     install_state.total = total;
                 },
-                true);
+                true, [&install_state] {
+                    return install_state.cancel_requested.load(std::memory_order_acquire);
+                });
             const bool installed_ok =
                 install_state.result == Service::AM::InstallStatus::Success;
             install_state.success = installed_ok;
@@ -1956,13 +2135,24 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         Service::AM::GetTitleMediaType(entry.program_id);
                     install_state.installed_path =
                         Service::AM::GetTitleContentPath(media, entry.program_id);
+                    CiaInstallMetadata installed_metadata = metadata;
+                    if (installed_metadata.icon_rgba.empty()) {
+                        ReadInstalledTitleMetadata(install_state.installed_path,
+                                                   installed_metadata);
+                    }
+                    if (installed_metadata.icon_rgba.empty()) {
+                        installed_metadata.icon_rgba = MakeFallbackCiaIcon(entry.program_id);
+                    }
                     const std::string save_path = InstalledTitleSavePath(entry.program_id);
-                    const std::string logo_path = SaveCiaIconPng(save_path, metadata.icon_rgba);
+                    const std::string logo_path =
+                        SaveCiaIconPng(save_path, installed_metadata.icon_rgba);
                     install_state.success =
                         !install_state.installed_path.empty() &&
+                        !logo_path.empty() &&
                         SwitchFrontend::GameDatabase::SaveInstalledGameRecord(
-                            install_state.installed_path, install_state.title,
-                            options.display_settings, logo_path, save_path);
+                            install_state.installed_path, installed_metadata.title,
+                            options.display_settings, logo_path, save_path,
+                            TitleIdString(entry.program_id));
                     install_state.message = install_state.success
                                                 ? "安装成功，已添加到数据库"
                                                 : "安装成功，但写入数据库失败";
@@ -1972,8 +2162,16 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         "类型未添加到数据库";
                 }
                 if (install_state.success && delete_after_install) {
-                    const int remove_rc = std::remove(entry.path.c_str());
-                    DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(), remove_rc);
+                    if (install_state.cancel_requested.load(std::memory_order_acquire)) {
+                        install_state.message += "，已取消删除源文件";
+                    } else {
+                        const int remove_rc = std::remove(entry.path.c_str());
+                        DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(),
+                                 remove_rc);
+                        if (remove_rc != 0) {
+                            install_state.message += "，删除源文件失败";
+                        }
+                    }
                 }
             }
             if (!installed_ok) {
@@ -1991,23 +2189,53 @@ int RunCiaInstaller(const LaunchOptions& options) {
         padUpdate(&pad);
         const u64 down = padGetButtonsDown(&pad);
         if (install_state.active.load(std::memory_order_acquire)) {
+            if ((down & HidNpadButton_B) &&
+                !install_state.done.load(std::memory_order_acquire)) {
+                install_state.cancel_requested = true;
+                notice = batch_active ? "正在取消当前安装，随后停止全部安装" : "正在取消当前安装";
+                DebugLog("CIA install cancel requested path=%s", install_state.source_path.c_str());
+            }
             if (install_state.done.load(std::memory_order_acquire)) {
                 join_install_thread("install-done");
                 install_state.active = false;
                 notice = install_state.message;
                 refresh();
-                while (appletMainLoop()) {
-                    padUpdate(&pad);
-                    const u64 msg_down = padGetButtonsDown(&pad);
-                    DrawCiaMessage(canvas,
-                                   install_state.success ? "安装成功" : "安装失败",
-                                   install_state.message);
-                    if (msg_down & (HidNpadButton_A | HidNpadButton_B)) {
-                        break;
+                const bool cancelled = install_state.cancel_requested.load(std::memory_order_acquire) ||
+                                       install_state.result == Service::AM::InstallStatus::ErrorAborted;
+                if (!batch_active) {
+                    acknowledge_result(cancelled ? "安装已取消"
+                                                : install_state.success ? "安装成功" : "安装失败",
+                                       install_state.message);
+                    refresh();
+                } else {
+                    if (install_state.success) {
+                        ++batch_success;
+                    } else if (!cancelled) {
+                        ++batch_failed;
                     }
-                    svcSleepThread(16'000'000);
+                    if (cancelled) {
+                        const std::size_t remaining =
+                            batch_queue.size() - batch_index - (install_state.success ? 1 : 0);
+                        batch_active = false;
+                        acknowledge_result(
+                            "全部安装已取消",
+                            "已成功 " + std::to_string(batch_success) + " 个，失败 " +
+                                std::to_string(batch_failed) + " 个，剩余 " +
+                                std::to_string(remaining) + " 个未安装");
+                    } else {
+                        ++batch_index;
+                        if (batch_index < batch_queue.size()) {
+                            start_install(batch_queue[batch_index], batch_delete_source,
+                                          batch_index + 1, batch_queue.size());
+                        } else {
+                            batch_active = false;
+                            acknowledge_result(
+                                batch_failed == 0 ? "全部安装完成" : "全部安装完成（有失败）",
+                                "成功 " + std::to_string(batch_success) + " 个，失败 " +
+                                    std::to_string(batch_failed) + " 个");
+                        }
+                    }
                 }
-                refresh();
             }
             DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
                              install_state, notice);
@@ -2020,6 +2248,26 @@ int RunCiaInstaller(const LaunchOptions& options) {
         }
         if (down & HidNpadButton_X) {
             delete_source = !delete_source;
+        }
+        if (down & HidNpadButton_Y) {
+            std::vector<CiaBrowserEntry> queue = BuildCiaInstallQueue(entries);
+            if (queue.empty()) {
+                notice = "当前目录没有可安装的CIA/zCIA文件";
+            } else if (ConfirmCiaInstallAll(canvas, queue.size(), delete_source)) {
+                batch_queue = std::move(queue);
+                batch_index = 0;
+                batch_success = 0;
+                batch_failed = 0;
+                batch_active = true;
+                batch_delete_source = delete_source;
+                start_install(batch_queue.front(), batch_delete_source, 1, batch_queue.size());
+            } else {
+                notice = "已取消全部安装";
+            }
+            DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
+                             install_state, notice);
+            svcSleepThread(16'000'000);
+            continue;
         }
         if (down & HidNpadButton_B) {
             if (!ParentDirectory(directory).empty()) {
@@ -2047,7 +2295,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                     scroll = 0;
                     refresh();
                 } else {
-                    start_install(entry);
+                    start_install(entry, delete_source, 1, 1);
                 }
             }
         }
@@ -2400,6 +2648,65 @@ bool ParseConfigBool(std::string_view value, bool fallback) {
     return fallback;
 }
 
+std::optional<std::string> NormalizeSwitchScreenLayout(std::string_view value) {
+    const std::string lower = LowerCopy(value);
+    if (lower == "vertical" || lower == "default" || lower == "original" ||
+        lower == "stacked") {
+        return "vertical";
+    }
+    if (lower == "horizontal" || lower == "side" || lower == "side_by_side" ||
+        lower == "side_screen") {
+        return "horizontal";
+    }
+    if (lower == "priority_top" || lower == "large" || lower == "large_screen" ||
+        lower == "large_inverted" || lower == "large_screen_inverted") {
+        return "priority_top";
+    }
+    if (lower == "priority_bottom") {
+        return "priority_bottom";
+    }
+    if (lower == "hybrid" || lower == "hybrid_screen" || lower == "hybrid_inverted" ||
+        lower == "hybrid_screen_inverted") {
+        return "hybrid";
+    }
+    if (lower == "top" || lower == "top_only" || lower == "single" ||
+        lower == "single_screen") {
+        return "top";
+    }
+    if (lower == "bottom" || lower == "bottom_only") {
+        return "bottom";
+    }
+    if (lower == "custom" || lower == "custom_layout") {
+        return "custom";
+    }
+    return std::nullopt;
+}
+
+std::optional<int> NormalizeSwitchScreenOrientation(std::string_view value) {
+    int degrees = 0;
+    if (TryParseInt(value, degrees)) {
+        if (degrees == 0 || degrees == 90 || degrees == 180 || degrees == 270) {
+            return degrees;
+        }
+        return std::nullopt;
+    }
+
+    const std::string lower = LowerCopy(value);
+    if (lower == "horizontal" || lower == "landscape" || lower == "default") {
+        return 0;
+    }
+    if (lower == "vertical" || lower == "portrait") {
+        return 90;
+    }
+    if (lower == "horizontal_inverted" || lower == "landscape_inverted") {
+        return 180;
+    }
+    if (lower == "vertical_inverted" || lower == "portrait_inverted") {
+        return 270;
+    }
+    return std::nullopt;
+}
+
 bool ConfigBool(std::string_view key, bool fallback) {
     return ParseConfigBool(SwitchFrontend::GBAStationConfig::GetConfigValue(key), fallback);
 }
@@ -2424,23 +2731,51 @@ VideoStreamOptions LoadVideoStreamOptions() {
     return options;
 }
 
-void RegisterMovieCpuThrottle(Core::System& system, bool enabled, int throttle_clock) {
-    system.RegisterMoviePlaybackStateChanged(
-        [&system, enabled, throttle_clock, saved_clock = 100](bool playing) mutable {
-            if (!enabled) {
-                return;
-            }
-            if (playing) {
-                saved_clock = Settings::values.cpu_clock_percentage.GetValue();
-                Settings::values.cpu_clock_percentage.SetValue(throttle_clock);
-                system.ApplySettings();
-                DebugLog("movie CPU throttle on: clock=%d saved=%d", throttle_clock, saved_clock);
-            } else {
-                Settings::values.cpu_clock_percentage.SetValue(saved_clock);
-                system.ApplySettings();
-                DebugLog("movie CPU throttle off: restored=%d", saved_clock);
-            }
-        });
+struct MovieCpuThrottleState {
+    MovieCpuThrottleState(bool enabled_value, int throttle_clock_value, int requested_clock_value)
+        : enabled{enabled_value}, throttle_clock{throttle_clock_value},
+          requested_clock{requested_clock_value} {}
+
+    std::atomic_bool enabled;
+    std::atomic_int throttle_clock;
+    std::atomic_int requested_clock;
+    std::atomic_bool playback_active{};
+};
+
+int GetEffectiveCpuClock(const MovieCpuThrottleState& state) {
+    const bool should_throttle = state.playback_active.load(std::memory_order_acquire) &&
+                                 state.enabled.load(std::memory_order_acquire);
+    return should_throttle ? state.throttle_clock.load(std::memory_order_acquire)
+                           : state.requested_clock.load(std::memory_order_acquire);
+}
+
+void ApplyEffectiveCpuClock(Core::System& system, MovieCpuThrottleState& state) {
+    const int clock = std::clamp(GetEffectiveCpuClock(state), 5, 400);
+    if (Settings::values.cpu_clock_percentage.GetValue() == clock) {
+        return;
+    }
+    Settings::values.cpu_clock_percentage.SetValue(clock);
+    if (system.IsPoweredOn()) {
+        system.CoreTiming().UpdateClockSpeed(static_cast<u32>(clock));
+    }
+}
+
+void RegisterMovieCpuThrottle(Core::System& system, MovieCpuThrottleState& state) {
+    system.RegisterMoviePlaybackStateChanged([&system, &state](bool is_playing) {
+        state.playback_active.store(is_playing, std::memory_order_release);
+        ApplyEffectiveCpuClock(system, state);
+        DebugLog("movie CPU throttle: playing=%d enabled=%d effective=%d requested=%d",
+                 is_playing ? 1 : 0, state.enabled.load(std::memory_order_acquire) ? 1 : 0,
+                 GetEffectiveCpuClock(state),
+                 state.requested_clock.load(std::memory_order_acquire));
+    });
+}
+
+const char* TextureFilterConfigValue(int filter) {
+    constexpr std::array<const char*, 6> Values{{
+        "none", "anime4k", "bicubic", "scaleforce", "xbrz", "mmpx",
+    }};
+    return Values[std::clamp(filter, 0, static_cast<int>(Values.size()) - 1)];
 }
 
 bool ApplySwitchFastmemConfig() {
@@ -2485,6 +2820,18 @@ void SyncSwitchHostLayoutSettings(const SwitchFrontend::GBAStationDisplaySetting
     Settings::values.screen_gap.SetValue(std::clamp(display.screen_gap, 0, 256));
 }
 
+void MirrorScreenSides(SwitchFrontend::GBAStationDisplaySettings& display) {
+    if (display.screen_layout == "top") {
+        display.screen_layout = "bottom";
+        return;
+    }
+    if (display.screen_layout == "bottom") {
+        display.screen_layout = "top";
+        return;
+    }
+    Settings::values.swap_screen.SetValue(!Settings::values.swap_screen.GetValue());
+}
+
 void LogSwitchDisplaySettings(const char* reason,
                               const SwitchFrontend::GBAStationDisplaySettings& display) {
     DebugLog("display settings %s: layout=%s orientation=%d resolution=%d integer=%d gap=%d "
@@ -2503,11 +2850,17 @@ void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& s
 
     if (include_screen) {
         const std::string layout = GetConfigValue("ndsScreenLayout");
-        if (!layout.empty()) {
-            settings.screen_layout = layout;
+        const std::string screen_layout = layout.empty() ? GetConfigValue("screen_layout") : layout;
+        const std::string azahar_layout =
+            screen_layout.empty() ? GetConfigValue("layout") : screen_layout;
+        if (const auto normalized = NormalizeSwitchScreenLayout(azahar_layout)) {
+            settings.screen_layout = *normalized;
         }
-        if (TryParseInt(GetConfigValue("ndsScreenOrientation"), parsed_int)) {
-            settings.screen_orientation = parsed_int;
+        const std::string orientation = GetConfigValue("ndsScreenOrientation");
+        const std::string display_orientation =
+            orientation.empty() ? GetConfigValue("display_orientation") : orientation;
+        if (const auto normalized = NormalizeSwitchScreenOrientation(display_orientation)) {
+            settings.screen_orientation = *normalized;
         }
         if (TryParseInt(GetConfigValue("ndsInternalResolution"), parsed_int)) {
             settings.internal_resolution = std::clamp(parsed_int, 1, 4);
@@ -2700,6 +3053,7 @@ int Run(int argc, char** argv) {
     ConfigureSettings();
     SwitchFrontend::GBAStationConfig::ReloadConfig();
     SwitchFrontend::GBAStationConfig::ApplyConfig();
+    const bool pause_when_menu_open = ConfigBool("pause_when_menu_open", true);
     const VideoStreamOptions video_stream_options = LoadVideoStreamOptions();
     const bool switch_fastmem_enabled = ApplySwitchFastmemConfig();
     const bool switch_jit_fast_dispatch_enabled = ApplySwitchJitFastDispatchConfig();
@@ -2709,16 +3063,19 @@ int Run(int argc, char** argv) {
     Settings::values.resolution_factor.SetValue(
         static_cast<u16>(std::clamp(launch_options.display_settings.internal_resolution, 1, 4)));
     Settings::values.swap_screen.SetValue(false);
+    Settings::values.small_screen_position.SetValue(Settings::SmallScreenPosition::MiddleRight);
     // The Switch frontend owns a FIFO VI swapchain and must continue presenting while a title
     // is booting.  Some titles do not report a top-screen buffer swap for a long time; with
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
              launch_options.display_settings_from_game_db ? 1 : 0,
+             launch_options.display_settings.screen_layout.c_str(),
+             launch_options.display_settings.screen_orientation,
              launch_options.display_settings.internal_resolution,
              Settings::values.resolution_factor.GetValue(),
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
@@ -2740,8 +3097,10 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: Core::System::GetInstance");
     auto& system = Core::System::GetInstance();
-    RegisterMovieCpuThrottle(system, video_stream_options.movie_cpu_throttle,
-                             video_stream_options.movie_throttle_clock);
+    MovieCpuThrottleState movie_cpu_throttle{
+        video_stream_options.movie_cpu_throttle, video_stream_options.movie_throttle_clock,
+        std::clamp(Settings::values.cpu_clock_percentage.GetValue(), 25, 400)};
+    RegisterMovieCpuThrottle(system, movie_cpu_throttle);
     StartupLog("Run: frontend applets/image interface");
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
     Frontend::RegisterDefaultApplets(system);
@@ -2796,9 +3155,18 @@ int Run(int argc, char** argv) {
     SwitchFrontend::EmuWindowSwitch window{nwindowGetDefault()};
     SyncSwitchDisplaySettings(launch_options.display_settings);
     window.SetDisplaySettings(launch_options.display_settings);
+    const bool cartridge_inserted = IsCartridgeImagePath(rom_path);
+    if (cartridge_inserted) {
+        system.InsertCartridge(rom_path);
+        DebugLog("cartridge image inserted: %s", rom_path.c_str());
+    }
     DebugLog("loading ROM: %s", rom_path.c_str());
     const Core::System::ResultStatus load_result = system.Load(window, rom_path);
     if (load_result != Core::System::ResultStatus::Success) {
+        if (cartridge_inserted) {
+            system.EjectCartridge();
+            DebugLog("cartridge image ejected after load failure");
+        }
         DebugLog("load failed: %s (%u)", ResultStatusName(load_result),
                  static_cast<unsigned>(load_result));
         ExitLog("early exit: load failed status=%s (%u)", ResultStatusName(load_result),
@@ -2830,6 +3198,8 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: ApplySettings");
     system.ApplySettings();
+    window.SetDisplaySettings(launch_options.display_settings);
+    LogSwitchDisplaySettings("post-apply-settings", launch_options.display_settings);
     SwitchFrontend::GameDatabase::UpdatePlayStats(
         launch_options.rom_path, launch_options.title, true, 0);
 
@@ -2843,7 +3213,7 @@ int Run(int argc, char** argv) {
     if (system.GetAppLoader().ReadProgramId(program_id) == Loader::ResultStatus::Success) {
         const u64 movie_id = system.Movie().GetCurrentMovieID();
         for (const Core::SaveStateInfo& state : Core::ListSaveStates(program_id, movie_id)) {
-            if (state.slot > 0 && state.slot <= SwitchFrontend::OverlayUI::StateSlotCount) {
+            if (state.slot <= SwitchFrontend::OverlayUI::StateSlotCount) {
                 (*slot_state_cache)[state.slot].store(true, std::memory_order_relaxed);
             }
         }
@@ -2851,7 +3221,7 @@ int Run(int argc, char** argv) {
     SwitchFrontend::OverlayUI::SetGameTitle(launch_options.title);
     SwitchFrontend::OverlayUI::SetSlotOccupiedCallback(
         [slot_state_cache](int slot) {
-            return slot > 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
+            return slot >= 0 && slot <= SwitchFrontend::OverlayUI::StateSlotCount &&
                    (*slot_state_cache)[slot].load(std::memory_order_acquire);
         });
     auto cheat_settings_dirty = std::make_shared<std::atomic_bool>(false);
@@ -2893,12 +3263,27 @@ int Run(int argc, char** argv) {
             return true;
         });
 
+    bool show_fps_overlay = ParseConfigBool(
+        SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
+    const auto capture_runtime_settings = [&]() {
+        SwitchFrontend::GBAStationRuntimeSettings settings;
+        settings.fps_counter = show_fps_overlay;
+        settings.custom_textures = Settings::values.custom_textures.GetValue();
+        settings.texture_filter = static_cast<int>(Settings::values.texture_filter.GetValue());
+        settings.disable_right_eye = Settings::values.disable_right_eye_render.GetValue();
+        settings.cpu_clock_percentage =
+            movie_cpu_throttle.requested_clock.load(std::memory_order_acquire);
+        settings.movie_cpu_throttle = movie_cpu_throttle.enabled.load(std::memory_order_acquire);
+        settings.movie_throttle_clock =
+            movie_cpu_throttle.throttle_clock.load(std::memory_order_acquire);
+        settings.controller_pointer = window.IsControllerPointerEnabled();
+        return settings;
+    };
     SwitchFrontend::VulkanOverlay::SetDisplaySettings(launch_options.display_settings);
+    SwitchFrontend::VulkanOverlay::SetRuntimeSettings(capture_runtime_settings());
     SyncSwitchDisplaySettings(launch_options.display_settings);
     bool menu_initialized = SwitchFrontend::VulkanOverlay::Init(
         static_cast<Vulkan::RendererVulkan&>(system.GPU().Renderer()));
-    bool show_fps_overlay = ParseConfigBool(
-        SwitchFrontend::GBAStationConfig::GetConfigValue("display.showFps", "0"), false);
     SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
     const bool show_shader_compile_notice = ParseConfigBool(
         SwitchFrontend::GBAStationConfig::GetConfigValue("show_shader_compile_notice", "1"), true);
@@ -2913,6 +3298,7 @@ int Run(int argc, char** argv) {
     raw_marker_enabled = false;
 
     using Clock = std::chrono::steady_clock;
+    constexpr auto frontend_poll_interval = std::chrono::milliseconds{0};
     auto play_stats_checkpoint = Clock::now();
     auto last_keepalive = Clock::now();
     u64 loop_count = 0;
@@ -2928,13 +3314,16 @@ int Run(int argc, char** argv) {
     u64 last_heartbeat_loop_count = loop_count;
     s32 last_heartbeat_frame = last_logged_frame;
     bool menu_was_visible = false;
+    bool menu_auto_muted = false;
     bool block_game_input_until_release = false;
     bool fast_forward_toggle = false;
     bool previous_fast_forward_combo = false;
+    bool previous_swap_screens_combo = false;
     bool previous_mic_input_combo = false;
     bool mic_input_simulated = false;
     AudioCore::InputType mic_restore_input_type = Settings::values.input_type.GetValue();
     bool last_fast_forward_active = false;
+    float last_fast_forward_multiplier = launch_options.display_settings.fast_forward_multiplier;
     bool fast_forward_compile_throttled = false;
     bool force_input_suppressed_during_shutdown = false;
     const bool normal_vsync = Settings::values.use_vsync.GetValue();
@@ -3008,7 +3397,6 @@ int Run(int argc, char** argv) {
         }
 
         padUpdate(&pad);
-
         if (menu_initialized) {
             SwitchFrontend::VulkanOverlay::Update(&pad);
         }
@@ -3043,7 +3431,10 @@ int Run(int argc, char** argv) {
         Settings::is_temporary_frame_limit = fast_forward_active;
         Settings::temporary_frame_limit =
             fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
-        if (fast_forward_active != last_fast_forward_active) {
+        const bool fast_forward_multiplier_changed =
+            std::fabs(fast_forward_multiplier - last_fast_forward_multiplier) > 0.001f;
+        if (fast_forward_active != last_fast_forward_active ||
+            (fast_forward_active && fast_forward_multiplier_changed)) {
             Settings::values.use_vsync.SetValue(fast_forward_active ? false : normal_vsync);
             SwitchFrontend::VulkanOverlay::SetFastForwardActive(fast_forward_active);
             vulkan_renderer.SetFastForward(fast_forward_active, fast_forward_multiplier);
@@ -3052,9 +3443,17 @@ int Run(int argc, char** argv) {
                      Settings::temporary_frame_limit);
             last_fast_forward_active = fast_forward_active;
         }
+        last_fast_forward_multiplier = fast_forward_multiplier;
         if (menu_visible != menu_was_visible) {
             block_game_input_until_release = true;
             DebugLog("GBAStation menu visible=%d", menu_visible ? 1 : 0);
+            if (pause_when_menu_open && menu_visible && !Settings::values.audio_muted) {
+                Settings::values.audio_muted = true;
+                menu_auto_muted = true;
+            } else if (!menu_visible && menu_auto_muted) {
+                Settings::values.audio_muted = false;
+                menu_auto_muted = false;
+            }
             menu_was_visible = menu_visible;
         }
         if (!menu_visible && cheat_settings_dirty->exchange(false, std::memory_order_acq_rel)) {
@@ -3066,6 +3465,20 @@ int Run(int argc, char** argv) {
             block_game_input_until_release = false;
         }
         bool suppress_game_input = menu_visible || block_game_input_until_release;
+        const bool swap_screens_combo =
+            SwitchFrontend::InputMapping::SwapScreensHotkeyPressed(pad);
+        if (!suppress_game_input && swap_screens_combo && !previous_swap_screens_combo) {
+            auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
+            MirrorScreenSides(display);
+            SwitchFrontend::VulkanOverlay::SetDisplaySettings(display);
+            window.SetDisplaySettings(display);
+            SwitchFrontend::OverlayUI::ShowToast("已交换上下屏");
+            DebugLog("hotkey swap screens: layout=%s swap=%d", display.screen_layout.c_str(),
+                     Settings::values.swap_screen.GetValue() ? 1 : 0);
+            block_game_input_until_release = true;
+            suppress_game_input = true;
+        }
+        previous_swap_screens_combo = swap_screens_combo;
         const bool mic_input_combo = SwitchFrontend::InputMapping::MicInputHotkeyPressed(pad);
         if (!suppress_game_input && mic_input_combo && !previous_mic_input_combo) {
             if (!mic_input_simulated) {
@@ -3080,7 +3493,7 @@ int Run(int argc, char** argv) {
                 SwitchFrontend::OverlayUI::ShowToast("已停止模拟麦克风输入");
                 DebugLog("hotkey microphone simulation off");
             }
-            system.ApplySettings();
+            Service::MIC::ReloadMic(system);
             block_game_input_until_release = true;
             suppress_game_input = true;
         }
@@ -3119,9 +3532,14 @@ int Run(int argc, char** argv) {
                     }
                 }
                 char message[64]{};
-                std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
-                                                              : "准备读取存档位 %d",
-                              slot);
+                if (slot == 0) {
+                    std::snprintf(message, sizeof(message),
+                                  saving ? "准备快速存档" : "准备快速读档");
+                } else {
+                    std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
+                                                                    : "准备读取存档位 %d",
+                                  slot);
+                }
                 SwitchFrontend::OverlayUI::ShowToast(message);
                 DebugLog("menu queued %s state slot=%d", saving ? "save" : "load", slot);
             } else {
@@ -3150,6 +3568,47 @@ int Run(int argc, char** argv) {
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
             SwitchFrontend::OverlayUI::ShowToast(saved ? "画面设置已保存" : "画面设置保存失败");
+            block_game_input_until_release = true;
+        } else if (menu_action == SwitchFrontend::OverlayUI::Action::RuntimeSettingsChanged) {
+            const auto runtime = SwitchFrontend::VulkanOverlay::GetRuntimeSettings();
+            show_fps_overlay = runtime.fps_counter;
+            SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
+            Settings::values.custom_textures.SetValue(runtime.custom_textures);
+            Settings::values.texture_filter.SetValue(
+                static_cast<Settings::TextureFilter>(runtime.texture_filter));
+            Settings::values.disable_right_eye_render.SetValue(runtime.disable_right_eye);
+            movie_cpu_throttle.enabled.store(runtime.movie_cpu_throttle,
+                                             std::memory_order_release);
+            movie_cpu_throttle.throttle_clock.store(runtime.movie_throttle_clock,
+                                                    std::memory_order_release);
+            movie_cpu_throttle.requested_clock.store(runtime.cpu_clock_percentage,
+                                                     std::memory_order_release);
+            window.SetControllerPointerEnabled(runtime.controller_pointer);
+            ApplyEffectiveCpuClock(system, movie_cpu_throttle);
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "display.showFps", runtime.fps_counter ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "custom_textures", runtime.custom_textures ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "texture_filter", TextureFilterConfigValue(runtime.texture_filter));
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "disable_right_eye", runtime.disable_right_eye ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "cpu_clock", std::to_string(runtime.cpu_clock_percentage));
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "movie_cpu_throttle", runtime.movie_cpu_throttle ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "movie_throttle_clock", std::to_string(runtime.movie_throttle_clock));
+            const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
+            SwitchFrontend::OverlayUI::ShowToast(saved ? "运行设置已保存" : "运行设置保存失败");
+            DebugLog("runtime menu settings: fps=%d custom_textures=%d texture_filter=%d "
+                     "right_eye_disabled=%d cpu_clock=%d movie_throttle=%d movie_clock=%d "
+                     "pointer=%d saved=%d",
+                     runtime.fps_counter ? 1 : 0, runtime.custom_textures ? 1 : 0,
+                     runtime.texture_filter, runtime.disable_right_eye ? 1 : 0,
+                     runtime.cpu_clock_percentage, runtime.movie_cpu_throttle ? 1 : 0,
+                     runtime.movie_throttle_clock, runtime.controller_pointer ? 1 : 0,
+                     saved ? 1 : 0);
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutChanged) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
@@ -3212,13 +3671,13 @@ int Run(int argc, char** argv) {
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncDisplaySettings) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
             SyncSwitchDisplaySettings(display);
-            window.SetDisplaySettings(display);
             if (Settings::values.resolution_factor.GetValue() !=
                 static_cast<u32>(display.internal_resolution)) {
                 Settings::values.resolution_factor.SetValue(
                     static_cast<u16>(display.internal_resolution));
                 system.ApplySettings();
             }
+            window.SetDisplaySettings(display);
             const bool current_saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
             int count = 0;
@@ -3307,7 +3766,18 @@ int Run(int argc, char** argv) {
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const auto runloop_started = Clock::now();
 #endif
-        const Core::System::ResultStatus run_result = system.RunLoop();
+        const bool pause_for_menu =
+            pause_when_menu_open && menu_initialized &&
+            SwitchFrontend::VulkanOverlay::IsVisible() &&
+            pending_state_request.operation == PendingStateOperation::None && pause_frame_ready;
+        const Core::System::ResultStatus run_result = [&] {
+            if (!pause_for_menu) {
+                return system.RunLoop();
+            }
+            vulkan_renderer.PresentLastFrame();
+            std::this_thread::sleep_for(std::chrono::milliseconds{16});
+            return Core::System::ResultStatus::Success;
+        }();
 #ifdef GBASTATION_HOTPATH_DIAGNOSTICS
         const double runloop_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - runloop_started).count();
@@ -3349,8 +3819,14 @@ int Run(int argc, char** argv) {
                     last_heartbeat_frame = pause_frame_baseline;
                 }
                 char message[64]{};
-                std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
-                                                                  : "已读取存档位 %d", slot);
+                if (slot == 0) {
+                    std::snprintf(message, sizeof(message),
+                                  saving ? "快速存档完成" : "快速读档完成");
+                } else {
+                    std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
+                                                                    : "已读取存档位 %d",
+                                  slot);
+                }
                 SwitchFrontend::OverlayUI::ShowToast(message);
                 pending_state_request = {};
             } else if (request_status != Core::System::SaveStateStatus::NONE &&
@@ -3373,6 +3849,7 @@ int Run(int argc, char** argv) {
             SyncSwitchDisplaySettings(SwitchFrontend::VulkanOverlay::GetDisplaySettings());
             SwitchFrontend::VulkanOverlay::SetDisplaySettings(
                 SwitchFrontend::VulkanOverlay::GetDisplaySettings());
+            SwitchFrontend::VulkanOverlay::SetRuntimeSettings(capture_runtime_settings());
             menu_initialized = SwitchFrontend::VulkanOverlay::Init(
                 static_cast<Vulkan::RendererVulkan&>(reset_renderer));
             SwitchFrontend::VulkanOverlay::SetFpsOverlay(show_fps_overlay, 0.0f);
@@ -3418,10 +3895,15 @@ int Run(int argc, char** argv) {
                                         : 0.0;
 #ifndef GBASTATION_HOTPATH_DIAGNOSTICS
             const auto stats = system.GetAndResetPerfStats();
-            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f powered=%d applet=%d keepalives=%llu",
+            HeartbeatLog("main loop heartbeat: iterations=%llu loops_per_sec=%.1f renderer_frame=%d frame_delta=%d frontend_fps=%.1f system_fps=%.1f game_fps=%.1f emu_speed=%.2f res=%u poll_ms=%lld pending_compilations=%zu pica_jit_pending=%zu hle_svc_ms=%.2f hle_ipc_ms=%.2f hle_gpu_ms=%.2f swap_ms=%.2f remaining_ms=%.2f powered=%d applet=%d keepalives=%llu",
                          static_cast<unsigned long long>(loop_count), loops_per_sec,
                          renderer_frame, frame_delta, frontend_fps, stats.system_fps,
-                         stats.game_fps, stats.emulation_speed, system.IsPoweredOn() ? 1 : 0,
+                         stats.game_fps, stats.emulation_speed, renderer.GetResolutionScaleFactor(),
+                         static_cast<long long>(frontend_poll_interval.count()), pending_compilations,
+                         std::size_t{0},
+                         stats.time_hle_svc * 1000.0, stats.time_hle_ipc * 1000.0,
+                         stats.time_gpu * 1000.0, stats.time_swap * 1000.0,
+                         stats.time_remaining * 1000.0, system.IsPoweredOn() ? 1 : 0,
                          applet_loop_active ? 1 : 0,
                          static_cast<unsigned long long>(keepalive_count));
 #else
@@ -3885,6 +4367,10 @@ int Run(int argc, char** argv) {
         DebugLog("shutdown step: system.Shutdown done (%lld ms)", step_ms);
         ExitLog("shutdown step: system.Shutdown done (%lld ms)", step_ms);
         ExitLogMemorySummary("after-system-shutdown");
+    }
+    if (cartridge_inserted) {
+        system.EjectCartridge();
+        ExitLog("shutdown step: cartridge ejected");
     }
     ReleaseStaleDefaultNWindowBuffers("after-system-shutdown");
     ExitLog("shutdown step: clear input suppression begin");

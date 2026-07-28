@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <ctime>
 #include <cstdio>
@@ -38,6 +39,23 @@ std::string NormalizePath(std::string path) {
     return path;
 }
 
+std::string NormalizeTitleId(std::string title_id) {
+    if (title_id.rfind("0x", 0) == 0 || title_id.rfind("0X", 0) == 0) {
+        title_id.erase(0, 2);
+    }
+    if (title_id.size() != 16) {
+        return {};
+    }
+    for (char& value : title_id) {
+        const unsigned char byte = static_cast<unsigned char>(value);
+        if (!std::isxdigit(byte)) {
+            return {};
+        }
+        value = static_cast<char>(std::toupper(byte));
+    }
+    return title_id;
+}
+
 std::string ExtractTitleIdFromInstalledPath(const std::string& rom_path) {
     const std::string normalized = NormalizePath(rom_path);
     const std::string marker = "/title/";
@@ -67,8 +85,9 @@ std::string DefaultSavePathForInstalledTitle(const std::string& rom_path) {
 }
 
 bool IsKnownLayout(const std::string& layout) {
-    constexpr std::array<const char*, 7> Layouts{{
-        "vertical", "horizontal", "priority_top", "hybrid", "top", "bottom", "custom",
+    constexpr std::array<const char*, 8> Layouts{{
+        "vertical", "horizontal", "priority_top", "priority_bottom", "hybrid", "top",
+        "bottom", "custom",
     }};
     return std::find(Layouts.begin(), Layouts.end(), layout) != Layouts.end();
 }
@@ -277,7 +296,8 @@ bool SaveDisplaySettings(const std::string& rom_path, const std::string& title,
 
 bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& title,
                              const GBAStationDisplaySettings& settings,
-                             const std::string& logo_path, const std::string& save_path) {
+                             const std::string& logo_path, const std::string& save_path,
+                             const std::string& title_id) {
     const char* target_path = nullptr;
     nlohmann::json data;
     LoadWritableDatabase(data, target_path);
@@ -285,6 +305,13 @@ bool SaveInstalledGameRecord(const std::string& rom_path, const std::string& tit
     item["path"] = rom_path;
     item["title"] = title.empty() ? StemFromPath(rom_path) : title;
     item["platform"] = 7;
+    std::string normalized_title_id = NormalizeTitleId(title_id);
+    if (normalized_title_id.empty()) {
+        normalized_title_id = NormalizeTitleId(ExtractTitleIdFromInstalledPath(rom_path));
+    }
+    if (!normalized_title_id.empty()) {
+        item["3ds_titleid"] = normalized_title_id;
+    }
     if (!logo_path.empty()) {
         item["logoPath"] = logo_path;
     } else if (item.value("logoPath", "").empty()) {

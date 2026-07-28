@@ -42,6 +42,10 @@ constexpr u32 GradientWidth = 512;
 constexpr u32 GradientHeight = 4;
 constexpr float PackedFontSize = 32.0f;
 constexpr vk::DeviceSize VertexBufferSize = 2 * 1024 * 1024;
+constexpr float LandscapeCanvasWidth = 1280.0f;
+constexpr float LandscapeCanvasHeight = 720.0f;
+constexpr float PortraitCanvasWidth = 720.0f;
+constexpr float PortraitCanvasHeight = 1280.0f;
 
 struct Vertex {
     float x;
@@ -129,14 +133,33 @@ std::vector<stbtt_packedchar> packed_chars;
 std::unordered_map<int, std::size_t> glyph_indices;
 std::vector<Vertex> vertices;
 
+float canvas_width{LandscapeCanvasWidth};
+float canvas_height{LandscapeCanvasHeight};
+int canvas_orientation{};
+
 float MeasureText(std::string_view text, float size);
 
+bool IsPortraitCanvas() {
+    return canvas_orientation == 90 || canvas_orientation == 270;
+}
+
+void SetCanvasOrientation(int orientation) {
+    canvas_orientation = orientation;
+    if (IsPortraitCanvas()) {
+        canvas_width = PortraitCanvasWidth;
+        canvas_height = PortraitCanvasHeight;
+    } else {
+        canvas_width = LandscapeCanvasWidth;
+        canvas_height = LandscapeCanvasHeight;
+    }
+}
+
 constexpr std::array<const char*, static_cast<int>(Item::Count)> ItemLabels{{
-    "返回游戏", "保存状态", "读取状态", "金手指", "画面设置", "重置游戏", "退出游戏",
+    "返回游戏", "保存状态", "读取状态", "金手指", "画面设置", "运行设置", "重置游戏", "退出游戏",
 }};
 
 constexpr std::array<int, static_cast<int>(Item::Count)> ItemIcons{{
-    0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE5D5, 0xE879,
+    0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE8B8, 0xE5D5, 0xE879,
 }};
 
 constexpr int NintendoIconA = 0xE0E0;
@@ -418,6 +441,8 @@ bool BuildFontAtlas() {
         "自定义画面布局调整当前项上屏布局下屏布局缩放偏移"
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
         "同步遮罩同步画面设置执行已同步到个游戏失败"
+        "运行设置即时画面设置性能视频和输入显示禁用右眼渲染"
+        "CPU时钟频率视频节流"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
         "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
@@ -481,9 +506,9 @@ bool BuildFontAtlas() {
         NintendoIconA, NintendoIconB, NintendoIconX, NintendoIconL, NintendoIconR,
     };
     const std::vector<int> material_codepoints{
-        0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE5D5, 0xE879,
+        0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE8B8, 0xE5D5, 0xE879,
         0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
-        0xE5CC, 0xE2C7, 0xE873,
+        0xE5CC, 0xE2C7, 0xE873, 0xE8E5, 0xE3B7, 0xE8A1, 0xE8EF, 0xE55F,
     };
     codepoints = regular_codepoints;
     codepoints.insert(codepoints.end(), nintendo_codepoints.begin(), nintendo_codepoints.end());
@@ -1382,12 +1407,14 @@ void DrawToast(const State& state) {
     if (state.toast.empty()) {
         return;
     }
-    constexpr float Right = 1210.0f;
-    const float width = std::min(520.0f, MeasureText(state.toast, 18.0f) + 48.0f);
-    const float x = Right - width;
-    Rect(x, 626, width, 48, {0.02f, 0.025f, 0.035f, 0.94f});
-    Border(x, 626, width, 48, 1.0f, {0.31f, 0.70f, 1.0f, 0.72f});
-    Text(x + 22, 657, 18, {0.94f, 0.97f, 1.0f, 0.96f}, state.toast);
+    const float right = canvas_width - 70.0f;
+    const float width = std::min(canvas_width - 96.0f,
+                                 std::min(520.0f, MeasureText(state.toast, 18.0f) + 48.0f));
+    const float y = canvas_height - (IsPortraitCanvas() ? 112.0f : 94.0f);
+    const float x = right - width;
+    Rect(x, y, width, 48, {0.02f, 0.025f, 0.035f, 0.94f});
+    Border(x, y, width, 48, 1.0f, {0.31f, 0.70f, 1.0f, 0.72f});
+    Text(x + 22, y + 31, 18, {0.94f, 0.97f, 1.0f, 0.96f}, state.toast);
 }
 
 void DrawFastForwardIndicator(const State& state) {
@@ -1640,7 +1667,453 @@ void DrawFilePicker(const State& state) {
     }
 }
 
+void DrawPortraitFooter(const State& state) {
+    constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.78f};
+    const float y = canvas_height - 38.0f;
+    IconCentered(482, y, 27, Muted, NintendoIconB);
+    Text(504, y + 9, 19, Muted, state.content_focused ? "返回列表" : "返回");
+    IconCentered(618, y, 27, Muted, NintendoIconA);
+    Text(640, y + 9, 19, Muted, "确定");
+}
+
+void DrawPortraitCustomLayoutSidebar(const State& state) {
+    constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.78f};
+    constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
+    constexpr float RowX = 28.0f;
+    constexpr float RowW = 664.0f;
+    constexpr float RowH = 64.0f;
+
+    Rect(0, 0, canvas_width, canvas_height, {0.015f, 0.020f, 0.030f, 0.985f});
+    Text(30, 61, 27, White, "自定义画面布局");
+    Text(30, 94, 16, Muted, "B 返回并保存   A 重置当前项");
+    Rect(28, 116, 664, 1, {1.0f, 1.0f, 1.0f, 0.18f});
+
+    auto section = [&](float y, const char* label) {
+        Rect(RowX, y + 10, 82, 1, {1.0f, 1.0f, 1.0f, 0.13f});
+        Text(RowX + 98, y + 17, 18, Cyan, label);
+        Rect(RowX + 210, y + 10, RowW - 210, 1, {1.0f, 1.0f, 1.0f, 0.13f});
+    };
+    auto row = [&](int index, float y, const char* label, std::string_view value) {
+        const bool focused = state.custom_layout_focus == index;
+        Rect(RowX, y, RowW, RowH,
+             focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                     : std::array<float, 4>{1.0f, 1.0f, 1.0f, 0.045f});
+        if (focused) {
+            FlowBorder(RowX, y, RowW, RowH, 3.0f);
+        } else {
+            Border(RowX, y, RowW, RowH, 1.0f, {1.0f, 1.0f, 1.0f, 0.10f});
+        }
+        Text(RowX + 18, y + 40, 21, White, label);
+        SelectorValue(RowX, y, RowW, RowH, value, Cyan);
+    };
+    auto scale_value = [](float value) {
+        char text[24]{};
+        std::snprintf(text, sizeof(text), "%.1fx", value);
+        return std::string{text};
+    };
+    auto offset_value = [](float value) {
+        char text[24]{};
+        std::snprintf(text, sizeof(text), "%.0f px", value);
+        return std::string{text};
+    };
+    auto opacity_value = [](float value) {
+        char text[24]{};
+        std::snprintf(text, sizeof(text), "%.0f%%", value * 100.0f);
+        return std::string{text};
+    };
+
+    section(146, "上屏布局");
+    row(0, 180, "缩放", scale_value(state.display.top_scale));
+    row(1, 254, "X 偏移", offset_value(state.display.top_offset_x));
+    row(2, 328, "Y 偏移", offset_value(state.display.top_offset_y));
+    section(428, "下屏布局");
+    row(3, 462, "缩放", scale_value(state.display.bottom_scale));
+    row(4, 536, "X 偏移", offset_value(state.display.bottom_offset_x));
+    row(5, 610, "Y 偏移", offset_value(state.display.bottom_offset_y));
+    row(6, 684, "透明度", opacity_value(state.display.bottom_opacity));
+    IconCentered(466, canvas_height - 38.0f, 27, Muted, NintendoIconB);
+    Text(488, canvas_height - 29.0f, 19, Muted, "返回并保存");
+}
+
+void DrawPortraitOverlaySidebar(const State& state) {
+    constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.72f};
+    constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
+    constexpr float RowX = 28.0f;
+    constexpr float RowW = 664.0f;
+
+    Rect(0, 0, canvas_width, canvas_height, {0.015f, 0.020f, 0.030f, 0.985f});
+    IconCentered(50, 48, 27, Cyan, 0xE53B);
+    Text(78, 55, 27, White, "遮罩选择");
+    Text(30, 91, 16, Muted, "选择 PNG 遮罩文件");
+    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩文件"}};
+    const std::array<std::string, 2> values{{
+        state.display.overlay_enabled ? "开启" : "关闭",
+        state.display.overlay_path.empty() ? "未选择" : Filename(state.display.overlay_path),
+    }};
+    for (int row = 0; row < 2; ++row) {
+        const float y = 152.0f + row * 76.0f;
+        const bool focused = state.overlay_focus == row;
+        Rect(RowX, y, RowW, 62,
+             focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                     : std::array<float, 4>{1, 1, 1, 0.045f});
+        if (focused) {
+            FlowBorder(RowX, y, RowW, 62, 3.0f);
+        } else {
+            Border(RowX, y, RowW, 62, 1.0f, {1, 1, 1, 0.10f});
+        }
+        Text(RowX + 18, y + 40, 21, White, labels[row]);
+        TextRight(RowX + RowW - (row == 1 ? 48.0f : 18.0f), y + 39, 18, Cyan, values[row]);
+        if (row == 1) {
+            IconCentered(RowX + RowW - 20, y + 31, 23, Cyan, 0xE5CC);
+        }
+    }
+    IconCentered(466, canvas_height - 38.0f, 27, Muted, NintendoIconB);
+    Text(488, canvas_height - 29.0f, 19, Muted, "返回并保存");
+}
+
+void DrawPortraitFilePicker(const State& state) {
+    constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.72f};
+    constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
+    constexpr float TopH = 104.0f;
+    constexpr float FooterH = 64.0f;
+    constexpr float BodyY = 128.0f;
+    constexpr float RowH = 88.0f;
+
+    Rect(0, 0, canvas_width, canvas_height, {0.010f, 0.014f, 0.020f, 0.985f});
+    Rect(0, 0, canvas_width, TopH, {0.0f, 0.0f, 0.0f, 0.42f});
+    Rect(0, TopH, canvas_width, 1, {1, 1, 1, 0.12f});
+    Text(28, 62, 23, White, state.file_picker_path.empty() ? "/" : state.file_picker_path);
+
+    const int count = static_cast<int>(state.file_entries.size());
+    const int focus = count == 0 ? 0 : std::clamp(state.file_picker_focus, 0, count - 1);
+    char index_text[48]{};
+    std::snprintf(index_text, sizeof(index_text), "%d / %d", count == 0 ? 0 : focus + 1, count);
+    TextRight(690, 62, 22, Muted, index_text);
+
+    constexpr int VisibleRows = 11;
+    const int first = std::clamp(focus - VisibleRows / 2, 0,
+                                 std::max(0, count - VisibleRows));
+    if (count == 0) {
+        Text(42, 190, 21, Muted, "目录中暂无可用 PNG 文件");
+    }
+    for (int row = 0; row < std::min(VisibleRows, count - first); ++row) {
+        const int index = first + row;
+        const auto& entry = state.file_entries[index];
+        const float y = BodyY + row * RowH;
+        const bool focused = index == focus;
+        if (focused) {
+            FlowBorder(22, y + 7, 676, RowH - 14, 3.0f);
+        } else {
+            Rect(22, y + 8, 676, RowH - 16, {1, 1, 1, 0.025f});
+        }
+        IconCentered(64, y + RowH * 0.5f, 34,
+                     entry.directory ? std::array<float, 4>{0.50f, 0.78f, 1.0f, 0.92f}
+                                     : std::array<float, 4>{0.66f, 0.90f, 0.74f, 0.88f},
+                     entry.directory ? 0xE2C7 : 0xE3F4);
+        Text(106, y + 38, 23, focused ? White : std::array<float, 4>{1, 1, 1, 0.78f},
+             entry.name);
+        std::string meta;
+        if (entry.directory) {
+            meta = entry.name == ".." ? "上级目录" : "文件夹";
+        } else {
+            meta = FormatBytes(entry.size);
+            if (!entry.modified_time.empty()) {
+                meta += "   " + entry.modified_time;
+            }
+        }
+        Text(106, y + 66, 16, focused ? Muted : std::array<float, 4>{0.72f, 0.82f, 0.90f, 0.50f},
+             meta);
+    }
+
+    const bool selected_image = count > 0 && !state.file_entries[focus].directory &&
+                                IsPngPath(state.file_entries[focus].path);
+    if (state.file_preview) {
+        Rect(0, 0, canvas_width, canvas_height, {0.0f, 0.0f, 0.0f, 0.82f});
+        if (preview_active && preview_width > 0 && preview_height > 0) {
+            constexpr float MaxW = 644.0f;
+            constexpr float MaxH = 950.0f;
+            const float aspect = static_cast<float>(preview_width) /
+                                 static_cast<float>(preview_height);
+            float draw_w = MaxW;
+            float draw_h = draw_w / aspect;
+            if (draw_h > MaxH) {
+                draw_h = MaxH;
+                draw_w = draw_h * aspect;
+            }
+            const float draw_x = (canvas_width - draw_w) * 0.5f;
+            const float draw_y = 122.0f + (MaxH - draw_h) * 0.5f;
+            Rect(draw_x - 12, draw_y - 12, draw_w + 24, draw_h + 24, {1, 1, 1, 0.055f});
+            preview_vertex_first = static_cast<u32>(vertices.size());
+            AddQuad(draw_x, draw_y, draw_x + draw_w, draw_y + draw_h, 0, 0, 1, 1,
+                    {1, 1, 1, 1}, 2.0f);
+            preview_vertex_count = 6;
+        } else {
+            Text(246, 620, 21, Muted, "图片预览加载失败");
+        }
+        Text(42, 62, 23, White,
+             state.file_preview_path.empty() ? "图片预览" : Filename(state.file_preview_path));
+    }
+
+    const float footer_y = canvas_height - FooterH;
+    Rect(0, footer_y, canvas_width, FooterH, {0.0f, 0.0f, 0.0f, 0.42f});
+    Rect(0, footer_y, canvas_width, 1, {1, 1, 1, 0.12f});
+    float right = 684.0f;
+    auto hint = [&](int icon, const char* label, const std::array<float, 4>& color, float width) {
+        right -= width;
+        IconCentered(right + 16, footer_y + 32, 30, {1, 1, 1, 0.92f}, icon);
+        Text(right + 38, footer_y + 40, 22, color, label);
+        right -= 24.0f;
+    };
+    hint(NintendoIconA, state.file_preview ? "关闭" : "选择", Cyan, 100.0f);
+    hint(NintendoIconB, state.file_preview ? "关闭" : "返回", White, 100.0f);
+    if (!state.file_preview && selected_image) {
+        hint(NintendoIconX, "预览", Muted, 100.0f);
+    }
+}
+
+void DrawPortraitMenu(const State& state) {
+    if (state.file_picker) {
+        DrawPortraitFilePicker(state);
+        DrawToast(state);
+        return;
+    }
+    if (state.overlay_sidebar) {
+        DrawPortraitOverlaySidebar(state);
+        DrawToast(state);
+        return;
+    }
+    if (state.custom_layout_sidebar) {
+        DrawPortraitCustomLayoutSidebar(state);
+        DrawToast(state);
+        return;
+    }
+
+    constexpr std::array<float, 4> White{0.94f, 0.97f, 1.0f, 1.0f};
+    constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.78f};
+    constexpr std::array<float, 4> Cyan{0.44f, 0.80f, 1.0f, 1.0f};
+    constexpr float TabX = 30.0f;
+    constexpr float TabY = 116.0f;
+    constexpr float TabW = 250.0f;
+    constexpr float TabH = 70.0f;
+    constexpr float TabStep = 80.0f;
+    constexpr float DividerX = 282.0f;
+    constexpr float ContentX = 300.0f;
+    constexpr float ContentW = 384.0f;
+    constexpr float ContentHeader = 154.0f;
+
+    for (int strip = 0; strip < 8; ++strip) {
+        const float t = static_cast<float>(strip) / 7.0f;
+        Rect(0, strip * 160.0f, canvas_width, 160.0f,
+             {0.08f - t * 0.03f, 0.10f - t * 0.04f, 0.13f - t * 0.05f, 0.94f});
+    }
+    Text(36, 60, 27, White, "游戏菜单");
+    Rect(28, 92, 664, 1, {1, 1, 1, 0.18f});
+    Rect(DividerX, 110, 1, 1040, {1, 1, 1, 0.10f});
+    Rect(DividerX + 1, 110, 409, 1040, {0.015f, 0.020f, 0.030f, 0.48f});
+    const int selected = std::clamp(static_cast<int>(state.item), 0,
+                                    static_cast<int>(Item::Count) - 1);
+    for (int i = 0; i < static_cast<int>(Item::Count); ++i) {
+        const float x = TabX;
+        const float y = TabY + i * TabStep + (i >= static_cast<int>(Item::Reset) ? 18.0f : 0.0f);
+        const bool focused = i == selected;
+        if (focused) {
+            Rect(x, y, TabW, TabH,
+                 state.content_focused ? std::array<float, 4>{0.13f, 0.42f, 0.70f, 0.20f}
+                                       : std::array<float, 4>{0.00f, 0.30f, 0.50f, 0.52f});
+            if (state.content_focused) {
+                Border(x, y, TabW, TabH, 1.0f, {0.31f, 0.70f, 1.0f, 0.50f});
+            } else {
+                FlowBorder(x, y, TabW, TabH, 3.0f);
+            }
+        }
+        IconCentered(x + 32, y + TabH * 0.5f, 25, focused ? White : Muted, ItemIcons[i]);
+        Text(x + 62, y + 44, 21, focused ? White : Muted, ItemLabels[i]);
+    }
+    const float reset_separator_y =
+        TabY + static_cast<int>(Item::Reset) * TabStep + 8.0f;
+    Rect(TabX + 18, reset_separator_y, TabW - 36, 1, {1, 1, 1, 0.14f});
+
+    const Item item = static_cast<Item>(selected);
+    if (item != Item::Display && item != Item::Runtime) {
+        Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
+        Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+    }
+
+    auto draw_row = [&](float y, float height, int icon, std::string_view label,
+                        std::string_view value, bool focused, bool selector,
+                        const std::array<float, 4>& label_color) {
+        Rect(ContentX, y, ContentW, height,
+             focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                     : std::array<float, 4>{1, 1, 1, 0.045f});
+        if (focused) {
+            FlowBorder(ContentX, y, ContentW, height, 3.0f);
+        } else {
+            Border(ContentX, y, ContentW, height, 1.0f, {1, 1, 1, 0.10f});
+        }
+        IconCentered(ContentX + 24, y + height * 0.5f, 20, selector ? Cyan : label_color, icon);
+        Text(ContentX + 46, y + height * 0.5f + 8, 20, label_color, label);
+        if (selector) {
+            SelectorValue(ContentX, y, ContentW, height, value, Cyan);
+        } else {
+            TextRight(ContentX + ContentW - 18, y + height * 0.5f + 7, 18, Cyan, value);
+        }
+    };
+
+    if (item == Item::SaveState || item == Item::LoadState) {
+        constexpr float RowH = 52.0f;
+        constexpr float RowGap = 4.0f;
+        for (int row = 0; row <= 10; ++row) {
+            const bool quick_slot = row == 0;
+            const int slot = row - 1;
+            const float y = 190.0f + row * (RowH + RowGap);
+            const bool focused = state.content_focused && state.content_focus == row;
+            const bool occupied = quick_slot ? state.quick_state_occupied : state.occupied[slot];
+            Rect(ContentX, y, ContentW, RowH,
+                 focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                         : std::array<float, 4>{0.176f, 0.176f, 0.188f, 0.58f});
+            if (focused) {
+                FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
+            } else {
+                Border(ContentX, y, ContentW, RowH, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
+            }
+            char slot_name[32]{};
+            if (quick_slot) {
+                std::snprintf(slot_name, sizeof(slot_name),
+                              item == Item::SaveState ? "快速存档" : "快速读档");
+            } else {
+                std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
+            }
+            Text(ContentX + 16, y + 33, 20, White, slot_name);
+            const char* status = occupied ? "已有状态" : quick_slot ? "专用快速槽" : "空存档槽";
+            TextRight(ContentX + ContentW - 20, y + 32, 16, occupied ? Cyan : Muted, status);
+        }
+    } else if (item == Item::Display) {
+        const std::array<const char*, 10> labels{{
+            "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局", "自定义画面布局", "画面方向",
+            "屏幕间距", "遮罩选择", "同步遮罩", "同步画面设置",
+        }};
+        const std::array<int, 10> icons{{
+            0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
+            0xE873, 0xE873,
+        }};
+        const bool custom_enabled = state.display.screen_layout == "custom";
+        std::array<std::string, 10> values{};
+        char multiplier[24]{};
+        std::snprintf(multiplier, sizeof(multiplier),
+                      std::fabs(state.display.fast_forward_multiplier -
+                                std::round(state.display.fast_forward_multiplier)) < 0.01f
+                          ? "%.0fx"
+                          : "%.2fx",
+                      state.display.fast_forward_multiplier);
+        values[0] = multiplier;
+        values[1] = std::to_string(state.display.internal_resolution) + "x";
+        values[2] = state.display.integer_scale ? "开启" : "关闭";
+        values[3] = DisplayLayoutLabel(state.display.screen_layout);
+        values[4] = custom_enabled ? "调整" : "不可用";
+        values[5] = std::to_string(state.display.screen_orientation) + "°";
+        values[6] = std::to_string(state.display.screen_gap) + " px";
+        values[7] = state.display.overlay_enabled ? "已开启" : "设置";
+        values[8] = "执行";
+        values[9] = "执行";
+        constexpr std::array<float, 10> RowY{{220.0f, 278.0f, 336.0f, 424.0f, 482.0f,
+                                               540.0f, 598.0f, 686.0f, 744.0f, 802.0f}};
+        const int focus = state.content_focused
+                              ? std::clamp(state.content_focus, 0, static_cast<int>(RowY.size()) - 1)
+                              : 0;
+        Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
+        Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+        Text(ContentX, 200, 18, Cyan, "基础画面设置");
+        Text(ContentX, 402, 18, Cyan, "布局设置");
+        Text(ContentX, 664, 18, Cyan, "个性化设置");
+        for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
+            const bool focused = state.content_focused && focus == row;
+            const bool enabled = row != 4 || custom_enabled;
+            const bool selector = row == 0 || row == 1 || row == 3 || row == 5 || row == 6;
+            draw_row(RowY[row], 48.0f, icons[row], labels[row], values[row], focused, selector,
+                     enabled ? White : Muted);
+            if (!selector && (row == 4 || row >= 7)) {
+                IconCentered(ContentX + ContentW - 20, RowY[row] + 24, 20,
+                             enabled ? Cyan : Muted, 0xE5CC);
+            }
+        }
+    } else if (item == Item::Runtime) {
+        const std::array<const char*, 5> labels{{
+            "FPS 显示", "禁用右眼渲染", "CPU 时钟频率", "视频 CPU 节流", "视频节流时钟",
+        }};
+        const std::array<int, 5> icons{{0xE8E5, 0xE8A1, 0xE8E5, 0xE8EF, 0xE8E5}};
+        const std::array<std::string, 5> values{{
+            state.runtime.fps_counter ? "开启" : "关闭",
+            state.runtime.disable_right_eye ? "开启" : "关闭",
+            std::to_string(state.runtime.cpu_clock_percentage) + "%",
+            state.runtime.movie_cpu_throttle ? "开启" : "关闭",
+            std::to_string(state.runtime.movie_throttle_clock) + "%",
+        }};
+        constexpr std::array<float, 5> RowY{{220.0f, 278.0f, 426.0f, 484.0f, 542.0f}};
+        const int focus = state.content_focused
+                              ? std::clamp(state.content_focus, 0, static_cast<int>(RowY.size()) - 1)
+                              : 0;
+        Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
+        Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+        Text(ContentX, 200, 18, Cyan, "即时画面设置");
+        Text(ContentX, 404, 18, Cyan, "性能视频和输入");
+        for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
+            draw_row(RowY[row], 48.0f, icons[row], labels[row], values[row],
+                     state.content_focused && focus == row, row == 2 || row == 4, White);
+        }
+    } else if (item == Item::Cheats) {
+        const int count = static_cast<int>(state.cheats.size());
+        if (count == 0) {
+            Rect(ContentX, 200, ContentW, 58, {1, 1, 1, 0.045f});
+            Border(ContentX, 200, ContentW, 58, 1, {1, 1, 1, 0.10f});
+            Text(ContentX + 20, 237, 21, Muted, "暂无金手指");
+            Text(ContentX, 316, 20, Muted, "已加载的金手指会在这里显示");
+        } else {
+            constexpr float RowH = 52.0f;
+            constexpr float RowGap = 4.0f;
+            constexpr int VisibleRows = 11;
+            const int first = std::clamp(state.content_focus - VisibleRows / 2, 0,
+                                         std::max(0, count - VisibleRows));
+            for (int row = 0; row < std::min(VisibleRows, count - first); ++row) {
+                const int index = first + row;
+                const auto& cheat = state.cheats[index];
+                const float y = 200.0f + row * (RowH + RowGap);
+                const bool focused = state.content_focused && state.content_focus == index;
+                Rect(ContentX, y, ContentW, RowH,
+                     focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                             : std::array<float, 4>{0.176f, 0.176f, 0.188f, 0.58f});
+                if (focused) {
+                    FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
+                } else {
+                    Border(ContentX, y, ContentW, RowH, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
+                }
+                constexpr float NameMaxWidth = 268.0f;
+                const std::string name = cheat.name.empty() ? "未命名金手指" : cheat.name;
+                Text(ContentX + 16, y + 33, 19, White,
+                     focused ? ScrollUtf8(name, NameMaxWidth, 19.0f)
+                             : EllipsizeUtf8(name, NameMaxWidth, 19.0f));
+                TextRight(ContentX + ContentW - 18, y + 32, 17,
+                          cheat.enabled ? Cyan : Muted, cheat.enabled ? "开启" : "关闭");
+            }
+        }
+    } else {
+        const char* body = "按 A 继续游戏";
+        if (item == Item::Reset) body = "按 A 重置游戏，未保存的进度可能丢失";
+        if (item == Item::Exit) body = "按 A 安全关闭模拟器并返回启动器";
+        Text(ContentX, 310, 20, {0.80f, 0.90f, 0.98f, 0.86f}, body);
+    }
+
+    DrawPortraitFooter(state);
+    DrawToast(state);
+}
+
 void BuildMenu(const State& state) {
+    if (IsPortraitCanvas()) {
+        DrawPortraitMenu(state);
+        return;
+    }
     if (state.file_picker) {
         DrawFilePicker(state);
         DrawToast(state);
@@ -1671,8 +2144,8 @@ void BuildMenu(const State& state) {
     constexpr float LeftX = 48.0f;
     constexpr float LeftY = 116.0f;
     constexpr float MenuW = 336.0f;
-    constexpr float ItemH = 70.0f;
-    constexpr float Step = 80.0f;
+    constexpr float ItemH = 58.0f;
+    constexpr float Step = 64.0f;
     const int selected = std::clamp(static_cast<int>(state.item), 0,
                                     static_cast<int>(Item::Count) - 1);
     for (int i = 0; i < static_cast<int>(Item::Count); ++i) {
@@ -1690,16 +2163,16 @@ void BuildMenu(const State& state) {
         }
         IconCentered(LeftX + 34, y + ItemH * 0.5f, 25,
                      focused ? White : Muted, ItemIcons[i]);
-        Text(LeftX + 64, y + 44, 22, focused ? White : Muted, ItemLabels[i]);
+        Text(LeftX + 64, y + 38, 21, focused ? White : Muted, ItemLabels[i]);
     }
-    Rect(LeftX + 18, LeftY + 5 * Step - 14, MenuW - 36, 1, {1, 1, 1, 0.14f});
+    Rect(LeftX + 18, LeftY + 6 * Step - 9, MenuW - 36, 1, {1, 1, 1, 0.14f});
     Rect(404, 110, 1, 500, {1, 1, 1, 0.08f});
 
     constexpr float ContentX = 432.0f;
     constexpr float ContentY = 110.0f;
     constexpr float ContentW = 790.0f;
     const Item item = static_cast<Item>(selected);
-    if (item != Item::Display) {
+    if (item != Item::Display && item != Item::Runtime) {
         Text(ContentX, ContentY + 28, 24, White, ItemLabels[selected]);
         Rect(ContentX, ContentY + 50, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
     }
@@ -1707,9 +2180,12 @@ void BuildMenu(const State& state) {
     if (item == Item::SaveState || item == Item::LoadState) {
         const float row_h = 42.0f;
         const float row_gap = 4.0f;
-        for (int slot = 0; slot < 10; ++slot) {
-            const float y = 176.0f + slot * (row_h + row_gap);
-            const bool focused = state.content_focused && state.content_focus == slot;
+        for (int row = 0; row <= 10; ++row) {
+            const bool quick_slot = row == 0;
+            const int slot = row - 1;
+            const float y = 154.0f + row * (row_h + row_gap);
+            const bool focused = state.content_focused && state.content_focus == row;
+            const bool occupied = quick_slot ? state.quick_state_occupied : state.occupied[slot];
             Rect(ContentX, y, 520, row_h,
                  focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
                          : std::array<float, 4>{0.176f, 0.176f, 0.188f, 0.58f});
@@ -1719,11 +2195,16 @@ void BuildMenu(const State& state) {
                 Border(ContentX, y, 520, row_h, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
             }
             char slot_name[32]{};
-            std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
+            if (quick_slot) {
+                std::snprintf(slot_name, sizeof(slot_name),
+                              item == Item::SaveState ? "快速存档" : "快速读档");
+            } else {
+                std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
+            }
             Text(ContentX + 16, y + 28, 20, White, slot_name);
-            const char* status = state.occupied[slot] ? "已有状态" : "空存档槽";
-            TextRight(ContentX + 500, y + 27, 16,
-                      state.occupied[slot] ? Cyan : Muted, status);
+            const char* status = occupied ? "已有状态"
+                                          : quick_slot ? "专用快速槽" : "空存档槽";
+            TextRight(ContentX + 500, y + 27, 16, occupied ? Cyan : Muted, status);
         }
     } else if (item == Item::Display) {
         const std::array<const char*, 10> labels{{
@@ -1765,7 +2246,7 @@ void BuildMenu(const State& state) {
         constexpr float TargetCenter = 420.0f;
         constexpr std::array<float, 10> RowY{{214.0f, 272.0f, 330.0f, 418.0f, 476.0f,
                                               534.0f, 592.0f, 680.0f, 738.0f, 796.0f}};
-        constexpr std::array<float, 3> SectionY{{176.0f, 390.0f, 650.0f}};
+        constexpr std::array<float, 3> SectionY{{176.0f, 402.0f, 662.0f}};
         const int focus = state.content_focused
                               ? std::clamp(state.content_focus, 0,
                                             static_cast<int>(RowY.size()) - 1)
@@ -1777,7 +2258,7 @@ void BuildMenu(const State& state) {
         Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
         auto draw_section = [&](int index, const char* title) {
             const float y = SectionY[index] - scroll_y;
-            if (y < ViewTop - 24.0f || y > ViewBottom) {
+            if (y < ViewTop || y > ViewBottom) {
                 return;
             }
             Text(ContentX, y, SectionSize, Cyan, title);
@@ -1814,6 +2295,54 @@ void BuildMenu(const State& state) {
                     IconCentered(ContentX + ContentW - 20, y + RowH * 0.5f, 20,
                                  enabled ? Cyan : Muted, 0xE5CC);
                 }
+            }
+        }
+    } else if (item == Item::Runtime) {
+        const std::array<const char*, 5> labels{{
+            "FPS 显示", "禁用右眼渲染", "CPU 时钟频率", "视频 CPU 节流",
+            "视频节流时钟",
+        }};
+        const std::array<int, 5> icons{{
+            0xE8E5, 0xE8A1, 0xE8E5, 0xE8EF, 0xE8E5,
+        }};
+        std::array<std::string, 5> values{};
+        values[0] = state.runtime.fps_counter ? "开启" : "关闭";
+        values[1] = state.runtime.disable_right_eye ? "开启" : "关闭";
+        values[2] = std::to_string(state.runtime.cpu_clock_percentage) + "%";
+        values[3] = state.runtime.movie_cpu_throttle ? "开启" : "关闭";
+        values[4] = std::to_string(state.runtime.movie_throttle_clock) + "%";
+        constexpr float HeaderY = 150.0f;
+        constexpr float HeaderSize = 27.0f;
+        constexpr float SectionSize = 18.0f;
+        constexpr float LabelSize = 20.0f;
+        constexpr float ValueSize = 18.0f;
+        constexpr float RowH = 42.0f;
+        constexpr std::array<float, 5> RowY{{204.0f, 252.0f, 436.0f, 484.0f, 532.0f}};
+        const int focus = state.content_focused
+                              ? std::clamp(state.content_focus, 0,
+                                            static_cast<int>(RowY.size()) - 1)
+                              : 0;
+        Text(ContentX, HeaderY, HeaderSize, White, ItemLabels[selected]);
+        Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
+        Text(ContentX, 176.0f, SectionSize, Cyan, "即时画面设置");
+        Text(ContentX, 404.0f, SectionSize, Cyan, "性能视频和输入");
+        for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
+            const float y = RowY[row];
+            const bool focused = state.content_focused && focus == row;
+            Rect(ContentX, y, ContentW, RowH,
+                 focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
+                         : std::array<float, 4>{1, 1, 1, 0.045f});
+            if (focused) {
+                FlowBorder(ContentX, y, ContentW, RowH, 3.0f);
+            } else {
+                Border(ContentX, y, ContentW, RowH, 1.0f, {1, 1, 1, 0.10f});
+            }
+            IconCentered(ContentX + 24, y + RowH * 0.5f, 20, Cyan, icons[row]);
+            Text(ContentX + 46, y + 32, LabelSize, White, labels[row]);
+            if (row == 2 || row == 4) {
+                SelectorValue(ContentX, y, ContentW, RowH, values[row], Cyan);
+            } else {
+                TextRight(ContentX + ContentW - 18.0f, y + 30, ValueSize, Cyan, values[row]);
             }
         }
     } else if (item == Item::Cheats) {
@@ -1867,8 +2396,17 @@ void BuildMenu(const State& state) {
 
 void TransformVertices(vk::Extent2D extent) {
     for (Vertex& vertex : vertices) {
-        vertex.x = vertex.x / 1280.0f * 2.0f - 1.0f;
-        vertex.y = vertex.y / 720.0f * 2.0f - 1.0f;
+        float x = vertex.x;
+        float y = vertex.y;
+        if (canvas_orientation == 90) {
+            x = vertex.y;
+            y = canvas_width - vertex.x;
+        } else if (canvas_orientation == 270) {
+            x = canvas_height - vertex.y;
+            y = vertex.x;
+        }
+        vertex.x = x / static_cast<float>(extent.width) * 2.0f - 1.0f;
+        vertex.y = y / static_cast<float>(extent.height) * 2.0f - 1.0f;
     }
     const std::size_t bytes = vertices.size() * sizeof(Vertex);
     if (bytes <= VertexBufferSize) {
@@ -1928,6 +2466,7 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
     EnsureOverlayTexture(state);
     EnsurePreviewTexture(state);
     UploadTextures(command_buffer);
+    SetCanvasOrientation(state.display.screen_orientation);
     vertices.clear();
     overlay_vertex_count = 0;
     preview_vertex_first = 0;
@@ -1938,7 +2477,7 @@ void Draw(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2D extent
         --overlay_skip_draw_frames;
     }
     if (draw_overlay) {
-        AddQuad(0, 0, 1280, 720, 0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
+        AddQuad(0, 0, canvas_width, canvas_height, 0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
         overlay_vertex_count = 6;
     }
     if (state.menu_visible) {

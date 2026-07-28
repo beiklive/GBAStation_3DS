@@ -88,29 +88,36 @@ Layout::FramebufferLayout BuildLandscapeLayout(u32 width, u32 height,
         } else {
             layout.bottom_opacity = opacity;
         }
+        if (Settings::values.swap_screen.GetValue()) {
+            std::swap(layout.top_screen, layout.bottom_screen);
+        }
     } else if (settings.screen_layout == "horizontal") {
-        layout = Layout::LargeFrameLayout(width, height, false, false, 1.0f,
+        layout = Layout::LargeFrameLayout(width, height,
+                                          Settings::values.swap_screen.GetValue(), false, 1.0f,
                                           Settings::SmallScreenPosition::MiddleRight);
     } else if (settings.screen_layout == "priority_top") {
         layout = Layout::LargeFrameLayout(
-            width, height, false, false,
+            width, height, Settings::values.swap_screen.GetValue(), false,
             std::clamp(Settings::values.large_screen_proportion.GetValue(), 1.0f, 16.0f),
-            Settings::SmallScreenPosition::BelowLarge);
+            Settings::SmallScreenPosition::MiddleRight);
     } else if (settings.screen_layout == "priority_bottom") {
         layout = Layout::LargeFrameLayout(
-            width, height, true, false,
+            width, height, !Settings::values.swap_screen.GetValue(), false,
             std::clamp(Settings::values.large_screen_proportion.GetValue(), 1.0f, 16.0f),
-            Settings::SmallScreenPosition::BelowLarge);
+            Settings::SmallScreenPosition::MiddleRight);
     } else if (settings.screen_layout == "hybrid") {
-        layout = Layout::HybridScreenLayout(width, height, false, false);
+        layout = Layout::HybridScreenLayout(width, height,
+                                            Settings::values.swap_screen.GetValue(), false);
     } else if (settings.screen_layout == "top") {
         layout = Layout::SingleFrameLayout(width, height, false, false);
     } else if (settings.screen_layout == "bottom") {
         layout = Layout::SingleFrameLayout(width, height, true, false);
     } else if (settings.screen_layout == "vertical") {
-        layout = Layout::DefaultFrameLayout(width, height, false, false);
+        layout = Layout::DefaultFrameLayout(width, height,
+                                            Settings::values.swap_screen.GetValue(), false);
     } else {
-        layout = Layout::DefaultFrameLayout(width, height, false, false);
+        layout = Layout::DefaultFrameLayout(width, height,
+                                            Settings::values.swap_screen.GetValue(), false);
     }
     if (settings.screen_layout != "custom") {
         layout.top_opacity = 1.0f;
@@ -184,22 +191,69 @@ void EmuWindowSwitch::SetInputSuppressed(bool suppressed) {
     input_suppressed = suppressed;
 }
 
+bool EmuWindowSwitch::IsControllerPointerEnabled() const {
+    return cursor_visible;
+}
+
+void EmuWindowSwitch::SetControllerPointerEnabled(bool enabled) {
+    cursor_visible = enabled;
+    if (!cursor_visible && cursor_touch_pressed) {
+        TouchReleased();
+        cursor_touch_pressed = false;
+    }
+}
+
 void EmuWindowSwitch::SetDisplaySettings(const GBAStationDisplaySettings& settings) {
     display_settings = settings;
+    display_layout_dirty = true;
     RefreshDimensions();
 }
 
+void EmuWindowSwitch::UpdateCurrentFramebufferLayout(unsigned width, unsigned height,
+                                                     bool is_portrait_mode) {
+    if (width == 0 || height == 0) {
+        RefreshDimensions();
+        return;
+    }
+    framebuffer_width = width;
+    framebuffer_height = height;
+    NotifyFramebufferLayoutChanged(BuildDisplayLayout(framebuffer_width, framebuffer_height,
+                                                      display_settings));
+    last_render_3d_mode = get3DMode();
+    display_layout_dirty = false;
+    (void)is_portrait_mode;
+}
+
 void EmuWindowSwitch::RefreshDimensions() {
-    u32 width = DefaultWidth;
-    u32 height = DefaultHeight;
-    if (window) {
-        static_cast<void>(nwindowGetDimensions(window, &width, &height));
+    constexpr auto DimensionPollInterval = std::chrono::milliseconds{250};
+    const auto now = std::chrono::steady_clock::now();
+    const bool dimensions_uninitialized = framebuffer_width == 0 || framebuffer_height == 0;
+    bool dimensions_changed = false;
+    if (dimensions_uninitialized || now - last_dimensions_poll >= DimensionPollInterval) {
+        u32 width = DefaultWidth;
+        u32 height = DefaultHeight;
+        if (window) {
+            static_cast<void>(nwindowGetDimensions(window, &width, &height));
+        }
         if (width == 0 || height == 0) {
             width = DefaultWidth;
             height = DefaultHeight;
         }
+        dimensions_changed = width != framebuffer_width || height != framebuffer_height;
+        framebuffer_width = width;
+        framebuffer_height = height;
+        last_dimensions_poll = now;
     }
-    NotifyFramebufferLayoutChanged(BuildDisplayLayout(width, height, display_settings));
+
+    const Settings::StereoRenderOption render_3d_mode = get3DMode();
+    if (!display_layout_dirty && !dimensions_changed && render_3d_mode == last_render_3d_mode) {
+        return;
+    }
+
+    NotifyFramebufferLayoutChanged(
+        BuildDisplayLayout(framebuffer_width, framebuffer_height, display_settings));
+    last_render_3d_mode = render_3d_mode;
+    display_layout_dirty = false;
 }
 
 unsigned EmuWindowSwitch::ScaleTouchX(u32 touch_x) const {

@@ -28,6 +28,8 @@ int ConsumeAction();
 
 void SetDisplaySettings(const GBAStationDisplaySettings& settings);
 GBAStationDisplaySettings GetDisplaySettings();
+void SetRuntimeSettings(const GBAStationRuntimeSettings& settings);
+GBAStationRuntimeSettings GetRuntimeSettings();
 void SetFastForwardActive(bool active);
 void SetFpsOverlay(bool visible, float fps);
 void PrepareForShutdown();

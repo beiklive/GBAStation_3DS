@@ -3,8 +3,9 @@
 
 #include "GBAStation/overlay/overlay_ui.h"
 
-#include <mutex>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <utility>
 
 namespace SwitchFrontend::OverlayUI {
@@ -13,7 +14,8 @@ namespace {
 std::mutex state_mutex;
 std::string game_title;
 std::string toast_message;
-std::chrono::steady_clock::time_point toast_expiry{};
+using ToastExpiryRep = std::chrono::steady_clock::duration::rep;
+std::atomic<ToastExpiryRep> toast_expiry{};
 SlotOccupiedFn slot_occupied;
 CheatListFn cheat_list;
 CheatToggleFn cheat_toggle;
@@ -26,14 +28,19 @@ bool IsActionInRange(Action action, Action first, Action last) {
 } // namespace
 
 bool IsSaveStateAction(Action action) {
-    return IsActionInRange(action, Action::SaveStateSlot1, Action::SaveStateSlot10);
+    return action == Action::QuickSaveState ||
+           IsActionInRange(action, Action::SaveStateSlot1, Action::SaveStateSlot10);
 }
 
 bool IsLoadStateAction(Action action) {
-    return IsActionInRange(action, Action::LoadStateSlot1, Action::LoadStateSlot10);
+    return action == Action::QuickLoadState ||
+           IsActionInRange(action, Action::LoadStateSlot1, Action::LoadStateSlot10);
 }
 
 int GetStateSlotForAction(Action action) {
+    if (action == Action::QuickSaveState || action == Action::QuickLoadState) {
+        return 0;
+    }
     if (IsSaveStateAction(action)) {
         return static_cast<int>(action) - static_cast<int>(Action::SaveStateSlot1) + 1;
     }
@@ -57,17 +64,31 @@ void SetGameTitle(std::string title) {
 void ShowToast(std::string message, ToastCorner) {
     std::lock_guard lock{state_mutex};
     toast_message = std::move(message);
-    toast_expiry = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto expiry = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    toast_expiry.store(toast_message.empty() ? ToastExpiryRep{} : expiry.time_since_epoch().count(),
+                       std::memory_order_release);
 }
 
 bool HasTransientContent() {
-    return !GetToast().empty();
+    ToastExpiryRep expiry = toast_expiry.load(std::memory_order_acquire);
+    if (expiry == ToastExpiryRep{}) {
+        return false;
+    }
+    if (std::chrono::steady_clock::now().time_since_epoch().count() < expiry) {
+        return true;
+    }
+    toast_expiry.compare_exchange_strong(expiry, ToastExpiryRep{}, std::memory_order_acq_rel,
+                                         std::memory_order_acquire);
+    return false;
 }
 
 std::string GetToast() {
     std::lock_guard lock{state_mutex};
-    if (toast_message.empty() || std::chrono::steady_clock::now() >= toast_expiry) {
+    const ToastExpiryRep expiry = toast_expiry.load(std::memory_order_acquire);
+    if (toast_message.empty() || expiry == ToastExpiryRep{} ||
+        std::chrono::steady_clock::now().time_since_epoch().count() >= expiry) {
         toast_message.clear();
+        toast_expiry.store(ToastExpiryRep{}, std::memory_order_release);
         return {};
     }
     return toast_message;

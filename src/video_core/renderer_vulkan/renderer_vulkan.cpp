@@ -2164,7 +2164,8 @@ RendererVulkan::OverlayDraw RendererVulkan::PrepareShaderNotice(
     if (!VideoCore::GetShaderCompileNoticeState()) {
         return {};
     }
-    const std::size_t pending = rasterizer.PendingCompilationCount();
+    const std::size_t pending =
+        rasterizer.PendingCompilationCount() + VideoCore::GetPendingShaderCompiles();
     const u64 generation = VideoCore::GetShaderCompileGeneration();
     const auto now = std::chrono::steady_clock::now();
     if (pending > 0 || generation != shader_notice_generation) {

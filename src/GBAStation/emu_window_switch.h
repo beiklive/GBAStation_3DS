@@ -19,8 +19,12 @@ public:
     explicit EmuWindowSwitch(NWindow* window = nwindowGetDefault());
 
     void PollEvents() override;
+    void UpdateCurrentFramebufferLayout(unsigned width, unsigned height,
+                                        bool is_portrait_mode = {}) override;
     CursorInfo GetCursorInfo() const override;
     void SetInputSuppressed(bool suppressed);
+    bool IsControllerPointerEnabled() const;
+    void SetControllerPointerEnabled(bool enabled);
     void SetDisplaySettings(const GBAStationDisplaySettings& settings);
 
 private:
@@ -41,6 +45,7 @@ private:
     float cursor_x{};
     float cursor_y{};
     std::chrono::steady_clock::time_point last_cursor_update{};
+    std::chrono::steady_clock::time_point last_dimensions_poll{};
     GBAStationDisplaySettings display_settings{};
     u32 framebuffer_width{};
     u32 framebuffer_height{};
