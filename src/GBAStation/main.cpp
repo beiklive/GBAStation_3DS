@@ -3288,6 +3288,8 @@ int Run(int argc, char** argv) {
         settings.fps_counter = show_fps_overlay;
         settings.custom_textures = Settings::values.custom_textures.GetValue();
         settings.texture_filter = static_cast<int>(Settings::values.texture_filter.GetValue());
+        settings.anisotropic_filtering =
+            static_cast<int>(Settings::values.anisotropic_filtering.GetValue());
         settings.disable_right_eye = Settings::values.disable_right_eye_render.GetValue();
         settings.cpu_clock_percentage =
             movie_cpu_throttle.requested_clock.load(std::memory_order_acquire);
@@ -3596,6 +3598,8 @@ int Run(int argc, char** argv) {
             Settings::values.custom_textures.SetValue(runtime.custom_textures);
             Settings::values.texture_filter.SetValue(
                 static_cast<Settings::TextureFilter>(runtime.texture_filter));
+            Settings::values.anisotropic_filtering.SetValue(
+                static_cast<Settings::AnisotropicFiltering>(runtime.anisotropic_filtering));
             Settings::values.disable_right_eye_render.SetValue(runtime.disable_right_eye);
             movie_cpu_throttle.enabled.store(runtime.movie_cpu_throttle,
                                              std::memory_order_release);
@@ -3612,6 +3616,9 @@ int Run(int argc, char** argv) {
             SwitchFrontend::GBAStationConfig::SetConfigValue(
                 "texture_filter", TextureFilterConfigValue(runtime.texture_filter));
             SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "anisotropic_filtering",
+                std::to_string(1 << runtime.anisotropic_filtering));
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
                 "disable_right_eye", runtime.disable_right_eye ? "true" : "false");
             SwitchFrontend::GBAStationConfig::SetConfigValue(
                 "cpu_clock", std::to_string(runtime.cpu_clock_percentage));
@@ -3622,10 +3629,11 @@ int Run(int argc, char** argv) {
             const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
             SwitchFrontend::OverlayUI::ShowToast(saved ? "运行设置已保存" : "运行设置保存失败");
             DebugLog("runtime menu settings: fps=%d custom_textures=%d texture_filter=%d "
-                     "right_eye_disabled=%d cpu_clock=%d movie_throttle=%d movie_clock=%d "
-                     "pointer=%d saved=%d",
+                     "anisotropy=%dx right_eye_disabled=%d cpu_clock=%d movie_throttle=%d "
+                     "movie_clock=%d pointer=%d saved=%d",
                      runtime.fps_counter ? 1 : 0, runtime.custom_textures ? 1 : 0,
-                     runtime.texture_filter, runtime.disable_right_eye ? 1 : 0,
+                     runtime.texture_filter, 1 << runtime.anisotropic_filtering,
+                     runtime.disable_right_eye ? 1 : 0,
                      runtime.cpu_clock_percentage, runtime.movie_cpu_throttle ? 1 : 0,
                      runtime.movie_throttle_clock, runtime.controller_pointer ? 1 : 0,
                      saved ? 1 : 0);

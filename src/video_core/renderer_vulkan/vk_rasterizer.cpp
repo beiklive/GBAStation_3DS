@@ -32,7 +32,11 @@ using VideoCore::SurfaceType;
 using namespace Common::Literals;
 using namespace Pica::Shader::Generator;
 
+#ifdef __SWITCH__
+constexpr u64 STREAM_BUFFER_SIZE = 32_MiB;
+#else
 constexpr u64 STREAM_BUFFER_SIZE = 64_MiB;
+#endif
 constexpr u64 UNIFORM_BUFFER_SIZE = 8_MiB;
 constexpr u64 TEXTURE_BUFFER_SIZE = 2_MiB;
 

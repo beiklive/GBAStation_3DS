@@ -2040,18 +2040,22 @@ void DrawPortraitMenu(const State& state) {
             }
         }
     } else if (item == Item::Runtime) {
-        const std::array<const char*, 5> labels{{
-            "FPS 显示", "禁用右眼渲染", "CPU 时钟频率", "视频 CPU 节流", "视频节流时钟",
+        const std::array<const char*, 6> labels{{
+            "FPS 显示", "禁用右眼渲染", "各向异性过滤", "CPU 时钟频率", "视频 CPU 节流",
+            "视频节流时钟",
         }};
-        const std::array<int, 5> icons{{0xE8E5, 0xE8A1, 0xE8E5, 0xE8EF, 0xE8E5}};
-        const std::array<std::string, 5> values{{
+        const std::array<int, 6> icons{{0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5}};
+        const std::array<std::string, 6> values{{
             state.runtime.fps_counter ? "开启" : "关闭",
             state.runtime.disable_right_eye ? "开启" : "关闭",
+            state.runtime.anisotropic_filtering == 0
+                ? "关闭"
+                : std::to_string(1 << state.runtime.anisotropic_filtering) + "x",
             std::to_string(state.runtime.cpu_clock_percentage) + "%",
             state.runtime.movie_cpu_throttle ? "开启" : "关闭",
             std::to_string(state.runtime.movie_throttle_clock) + "%",
         }};
-        constexpr std::array<float, 5> RowY{{220.0f, 278.0f, 426.0f, 484.0f, 542.0f}};
+        constexpr std::array<float, 6> RowY{{220.0f, 278.0f, 336.0f, 426.0f, 484.0f, 542.0f}};
         const int focus = state.content_focused
                               ? std::clamp(state.content_focus, 0, static_cast<int>(RowY.size()) - 1)
                               : 0;
@@ -2061,7 +2065,8 @@ void DrawPortraitMenu(const State& state) {
         Text(ContentX, 404, 18, Cyan, "性能视频和输入");
         for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
             draw_row(RowY[row], 48.0f, icons[row], labels[row], values[row],
-                     state.content_focused && focus == row, row == 2 || row == 4, White);
+                     state.content_focused && focus == row, row == 2 || row == 3 || row == 5,
+                     White);
         }
     } else if (item == Item::Cheats) {
         const int count = static_cast<int>(state.cheats.size());

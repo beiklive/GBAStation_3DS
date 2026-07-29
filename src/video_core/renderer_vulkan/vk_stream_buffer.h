@@ -44,6 +44,10 @@ public:
         return buffer;
     }
 
+    u64 GetSize() const noexcept {
+        return stream_buffer_size;
+    }
+
 private:
     struct Watch {
         u64 tick{};

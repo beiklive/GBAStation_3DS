@@ -32,6 +32,7 @@ struct GBAStationRuntimeSettings {
     bool fps_counter{};
     bool custom_textures{};
     int texture_filter{};
+    int anisotropic_filtering{};
     bool disable_right_eye{true};
     int cpu_clock_percentage{100};
     bool movie_cpu_throttle{true};

@@ -354,6 +354,23 @@ Settings::TextureSampling ParseTextureSampling(std::string_view value) {
     return Settings::TextureSampling::GameControlled;
 }
 
+Settings::AnisotropicFiltering ParseAnisotropicFiltering(std::string_view value) {
+    const std::string lower = LowerCopy(value);
+    if (lower == "2" || lower == "2x" || lower == "x2") {
+        return Settings::AnisotropicFiltering::X2;
+    }
+    if (lower == "4" || lower == "4x" || lower == "x4") {
+        return Settings::AnisotropicFiltering::X4;
+    }
+    if (lower == "8" || lower == "8x" || lower == "x8") {
+        return Settings::AnisotropicFiltering::X8;
+    }
+    if (lower == "16" || lower == "16x" || lower == "x16") {
+        return Settings::AnisotropicFiltering::X16;
+    }
+    return Settings::AnisotropicFiltering::Off;
+}
+
 class Manager {
 public:
     void ReloadConfig() {
@@ -584,6 +601,11 @@ public:
         }
         if (const auto v = GetFirstOptional({"texture_sampling", "citra_texture_sampling"}); v) {
             Settings::values.texture_sampling.SetValue(ParseTextureSampling(*v));
+        }
+        if (const auto v = GetFirstOptional(
+                {"anisotropic_filtering", "citra_anisotropic_filtering"});
+            v) {
+            Settings::values.anisotropic_filtering.SetValue(ParseAnisotropicFiltering(*v));
         }
         if (const auto v = GetFirstOptional({"custom_textures", "citra_custom_textures"}); v) {
             if (const auto b = ParseBool(*v)) {

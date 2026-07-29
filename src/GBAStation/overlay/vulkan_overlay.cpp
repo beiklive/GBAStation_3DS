@@ -33,7 +33,7 @@ namespace {
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
 constexpr int DisplayControlCount = 10;
-constexpr int RuntimeControlCount = 5;
+constexpr int RuntimeControlCount = 6;
 constexpr int CustomLayoutControlCount = 7;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
@@ -73,6 +73,7 @@ std::atomic_bool display_overlay_enabled{};
 std::atomic_bool runtime_fps_counter{};
 std::atomic_bool runtime_custom_textures{};
 std::atomic_int runtime_texture_filter{};
+std::atomic_int runtime_anisotropic_filtering{};
 std::atomic_bool runtime_disable_right_eye{true};
 std::atomic_int runtime_cpu_clock{100};
 std::atomic_bool runtime_movie_cpu_throttle{true};
@@ -427,17 +428,22 @@ void HandleRuntimeAdjustment(int row, int direction) {
             std::memory_order_release);
         break;
     case 2:
+        runtime_anisotropic_filtering.store(
+            (runtime_anisotropic_filtering.load(std::memory_order_relaxed) + direction + 5) % 5,
+            std::memory_order_release);
+        break;
+    case 3:
         runtime_cpu_clock.store(
             std::clamp(runtime_cpu_clock.load(std::memory_order_relaxed) + direction * 25, 25,
                        400),
             std::memory_order_release);
         break;
-    case 3:
+    case 4:
         runtime_movie_cpu_throttle.store(
             !runtime_movie_cpu_throttle.load(std::memory_order_relaxed),
             std::memory_order_release);
         break;
-    case 4:
+    case 5:
         runtime_movie_throttle_clock.store(
             std::clamp(runtime_movie_throttle_clock.load(std::memory_order_relaxed) + direction,
                        10, 100),
@@ -993,6 +999,8 @@ void SetRuntimeSettings(const GBAStationRuntimeSettings& settings) {
     runtime_custom_textures.store(settings.custom_textures, std::memory_order_release);
     runtime_texture_filter.store(std::clamp(settings.texture_filter, 0, 5),
                                  std::memory_order_release);
+    runtime_anisotropic_filtering.store(std::clamp(settings.anisotropic_filtering, 0, 4),
+                                        std::memory_order_release);
     runtime_disable_right_eye.store(settings.disable_right_eye, std::memory_order_release);
     runtime_cpu_clock.store(std::clamp(settings.cpu_clock_percentage, 25, 400),
                             std::memory_order_release);
@@ -1007,6 +1015,8 @@ GBAStationRuntimeSettings GetRuntimeSettings() {
     settings.fps_counter = runtime_fps_counter.load(std::memory_order_acquire);
     settings.custom_textures = runtime_custom_textures.load(std::memory_order_acquire);
     settings.texture_filter = runtime_texture_filter.load(std::memory_order_acquire);
+    settings.anisotropic_filtering =
+        runtime_anisotropic_filtering.load(std::memory_order_acquire);
     settings.disable_right_eye = runtime_disable_right_eye.load(std::memory_order_acquire);
     settings.cpu_clock_percentage = runtime_cpu_clock.load(std::memory_order_acquire);
     settings.movie_cpu_throttle = runtime_movie_cpu_throttle.load(std::memory_order_acquire);

@@ -234,7 +234,8 @@ vk::ImageSubresourceRange MakeSubresourceRange(vk::ImageAspectFlags aspect, u32 
 }
 
 #ifdef __SWITCH__
-constexpr u64 UPLOAD_BUFFER_SIZE = 128_MiB;
+// Large enough for one 4096x4096 RGBA8 custom texture level.
+constexpr u64 UPLOAD_BUFFER_SIZE = 64_MiB;
 #else
 constexpr u64 UPLOAD_BUFFER_SIZE = 512_MiB;
 #endif
@@ -1172,6 +1173,12 @@ void Surface::UploadCustom(const VideoCore::Material* material, u32 level) {
 
     const auto upload = [&](Type type, VideoCore::CustomTexture* texture) {
         const u32 custom_size = static_cast<u32>(texture->data.size());
+        if (custom_size > runtime.upload_buffer.GetSize()) {
+            LOG_ERROR(Render_Vulkan,
+                      "Custom texture {}x{} needs {} KiB, upload buffer holds {} KiB", width,
+                      height, custom_size / 1024, runtime.upload_buffer.GetSize() / 1024);
+            return;
+        }
         const RecordParams params = {
             .aspect = vk::ImageAspectFlagBits::eColor,
             .pipeline_flags = PipelineStageFlags(),
@@ -1738,7 +1745,6 @@ Sampler::Sampler(TextureRuntime& runtime, const VideoCore::SamplerParams& params
     using TextureConfig = VideoCore::SamplerParams::TextureConfig;
 
     const Instance& instance = runtime.GetInstance();
-    const vk::PhysicalDeviceProperties properties = instance.GetPhysicalDevice().getProperties();
     const bool use_border_color =
         instance.IsCustomBorderColorSupported() && (params.wrap_s == TextureConfig::ClampToBorder ||
                                                     params.wrap_t == TextureConfig::ClampToBorder);
@@ -1756,6 +1762,10 @@ Sampler::Sampler(TextureRuntime& runtime, const VideoCore::SamplerParams& params
     const vk::SamplerAddressMode wrap_v = PicaToVK::WrapMode(params.wrap_t);
     const float lod_min = static_cast<float>(params.lod_min);
     const float lod_max = static_cast<float>(params.lod_max);
+    const float anisotropy = instance.IsAnisotropicFilteringSupported()
+                                 ? std::min(static_cast<float>(params.anisotropy),
+                                            instance.MaxSamplerAnisotropy())
+                                 : 1.0f;
 
     const vk::SamplerCreateInfo sampler_info = {
         .pNext = use_border_color ? &border_color_info : nullptr,
@@ -1765,8 +1775,8 @@ Sampler::Sampler(TextureRuntime& runtime, const VideoCore::SamplerParams& params
         .addressModeU = wrap_u,
         .addressModeV = wrap_v,
         .mipLodBias = 0,
-        .anisotropyEnable = instance.IsAnisotropicFilteringSupported(),
-        .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+        .anisotropyEnable = anisotropy > 1.0f,
+        .maxAnisotropy = anisotropy,
         .compareEnable = false,
         .compareOp = vk::CompareOp::eAlways,
         .minLod = lod_min,
