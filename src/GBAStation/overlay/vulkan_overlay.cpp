@@ -328,7 +328,7 @@ void DrawCallback(vk::CommandBuffer command_buffer, vk::Image image, vk::Extent2
     if (transient_content) {
         state.toast = OverlayUI::GetToast();
     }
-    if (state.menu_visible || display_overlay_active) {
+    if (state.menu_visible || state.fast_forward_active || display_overlay_active) {
         state.display = GetDisplaySettings();
     }
     if (state.menu_visible) {
