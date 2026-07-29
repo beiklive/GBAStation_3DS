@@ -491,7 +491,8 @@ public:
                                              "citra_cpu_clock_percentage"});
             v) {
             if (const auto pct = ParseInt(*v)) {
-                Settings::values.cpu_clock_percentage.SetValue(std::clamp(*pct, 5, 400));
+                const int clamped = std::clamp(*pct, 10, 800);
+                Settings::values.cpu_clock_percentage.SetValue(((clamped + 5) / 10) * 10);
             }
         }
         if (const auto v = GetFirstOptional({"region", "region_value", "citra_region_value"}); v) {

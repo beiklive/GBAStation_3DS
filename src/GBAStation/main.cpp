@@ -3115,9 +3115,11 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: Core::System::GetInstance");
     auto& system = Core::System::GetInstance();
+    const int clampedCpuClock =
+        std::clamp(Settings::values.cpu_clock_percentage.GetValue(), 10, 800);
     MovieCpuThrottleState movie_cpu_throttle{
         video_stream_options.movie_cpu_throttle, video_stream_options.movie_throttle_clock,
-        std::clamp(Settings::values.cpu_clock_percentage.GetValue(), 25, 400)};
+        ((clampedCpuClock + 5) / 10) * 10};
     RegisterMovieCpuThrottle(system, movie_cpu_throttle);
     StartupLog("Run: frontend applets/image interface");
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
