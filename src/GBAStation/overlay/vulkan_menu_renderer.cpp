@@ -2303,26 +2303,30 @@ void BuildMenu(const State& state) {
             }
         }
     } else if (item == Item::Runtime) {
-        const std::array<const char*, 5> labels{{
-            "FPS 显示", "禁用右眼渲染", "CPU 时钟频率", "视频 CPU 节流",
+        const std::array<const char*, 6> labels{{
+            "FPS 显示", "禁用右眼渲染", "各向异性过滤", "CPU 时钟频率", "视频 CPU 节流",
             "视频节流时钟",
         }};
-        const std::array<int, 5> icons{{
-            0xE8E5, 0xE8A1, 0xE8E5, 0xE8EF, 0xE8E5,
+        const std::array<int, 6> icons{{
+            0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5,
         }};
-        std::array<std::string, 5> values{};
+        std::array<std::string, 6> values{};
         values[0] = state.runtime.fps_counter ? "开启" : "关闭";
         values[1] = state.runtime.disable_right_eye ? "开启" : "关闭";
-        values[2] = std::to_string(state.runtime.cpu_clock_percentage) + "%";
-        values[3] = state.runtime.movie_cpu_throttle ? "开启" : "关闭";
-        values[4] = std::to_string(state.runtime.movie_throttle_clock) + "%";
+        values[2] = state.runtime.anisotropic_filtering == 0
+                        ? "关闭"
+                        : std::to_string(1 << state.runtime.anisotropic_filtering) + "x";
+        values[3] = std::to_string(state.runtime.cpu_clock_percentage) + "%";
+        values[4] = state.runtime.movie_cpu_throttle ? "开启" : "关闭";
+        values[5] = std::to_string(state.runtime.movie_throttle_clock) + "%";
         constexpr float HeaderY = 150.0f;
         constexpr float HeaderSize = 27.0f;
         constexpr float SectionSize = 18.0f;
         constexpr float LabelSize = 20.0f;
         constexpr float ValueSize = 18.0f;
         constexpr float RowH = 42.0f;
-        constexpr std::array<float, 5> RowY{{204.0f, 252.0f, 436.0f, 484.0f, 532.0f}};
+        constexpr std::array<float, 6> RowY{{204.0f, 252.0f, 300.0f, 436.0f, 484.0f,
+                                              532.0f}};
         const int focus = state.content_focused
                               ? std::clamp(state.content_focus, 0,
                                             static_cast<int>(RowY.size()) - 1)
@@ -2344,7 +2348,7 @@ void BuildMenu(const State& state) {
             }
             IconCentered(ContentX + 24, y + RowH * 0.5f, 20, Cyan, icons[row]);
             Text(ContentX + 46, y + 32, LabelSize, White, labels[row]);
-            if (row == 2 || row == 4) {
+            if (row == 2 || row == 3 || row == 5) {
                 SelectorValue(ContentX, y, ContentW, RowH, values[row], Cyan);
             } else {
                 TextRight(ContentX + ContentW - 18.0f, y + 30, ValueSize, Cyan, values[row]);
