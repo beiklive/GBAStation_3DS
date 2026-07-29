@@ -107,6 +107,10 @@ public:
         return main_present_window;
     }
 
+    // Drain commands which may reference frontend overlay resources before those
+    // resources are destroyed outside the renderer.
+    void WaitForOverlayShutdown();
+
 private:
     void ReloadPipeline(Settings::StereoRenderOption render_3d);
     void CompileShaders();

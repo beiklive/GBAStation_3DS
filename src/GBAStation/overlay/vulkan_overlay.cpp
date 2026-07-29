@@ -94,6 +94,7 @@ std::string file_preview_path;
 
 bool previous_combo{};
 vk::Device device;
+Vulkan::RendererVulkan* renderer_owner{};
 
 struct PreviousNavigation {
     bool up{};
@@ -518,8 +519,10 @@ bool Init(Vulkan::RendererVulkan& renderer) {
     const Vulkan::Instance& renderer_instance = renderer.GetVulkanInstance();
     device = renderer_instance.GetDevice();
     if (!device || !VulkanMenuRenderer::Init(renderer_instance)) {
+        renderer_owner = nullptr;
         return false;
     }
+    renderer_owner = &renderer;
     visible.store(false);
     exit_requested.store(false);
     content_focused.store(false);
@@ -1047,10 +1050,11 @@ void Shutdown() {
     }
     Vulkan::SetOverlayDrawCallback(nullptr);
     Vulkan::SetOverlayResetCallback(nullptr);
-    if (device) {
-        device.waitIdle();
+    if (renderer_owner) {
+        renderer_owner->WaitForOverlayShutdown();
     }
     VulkanMenuRenderer::Shutdown();
+    renderer_owner = nullptr;
     device = VK_NULL_HANDLE;
     visible.store(false);
     fast_forward_active.store(false);

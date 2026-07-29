@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string_view>
 #include <vector>
 
@@ -222,6 +223,24 @@ RendererVulkan::~RendererVulkan() {
     device.destroyImageView(overlay_font_view);
     vmaDestroyImage(instance.GetAllocator(), overlay_font_image, overlay_font_allocation);
     OverlayFont::Shutdown();
+}
+
+void RendererVulkan::WaitForOverlayShutdown() {
+    LOG_INFO(Render_Vulkan, "Overlay shutdown: draining renderer scheduler");
+    scheduler.Finish();
+
+    LOG_INFO(Render_Vulkan, "Overlay shutdown: waiting for presentation queues");
+    main_present_window.WaitPresent();
+    if (secondary_present_window_ptr) {
+        secondary_present_window_ptr->WaitPresent();
+    }
+
+    // vkDeviceWaitIdle requires external synchronization with every queue from
+    // the device. PresentWindow and Scheduler use this mutex for queue submits.
+    LOG_INFO(Render_Vulkan, "Overlay shutdown: waiting for Vulkan device idle");
+    std::scoped_lock submit_lock{scheduler.submit_mutex};
+    instance.GetDevice().waitIdle();
+    LOG_INFO(Render_Vulkan, "Overlay shutdown: renderer is idle");
 }
 
 void RendererVulkan::PrepareRendertarget() {
