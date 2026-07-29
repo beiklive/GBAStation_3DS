@@ -3119,7 +3119,7 @@ int Run(int argc, char** argv) {
         std::clamp(Settings::values.cpu_clock_percentage.GetValue(), 10, 800);
     MovieCpuThrottleState movie_cpu_throttle{
         video_stream_options.movie_cpu_throttle, video_stream_options.movie_throttle_clock,
-        ((clampedCpuClock + 5) / 10) * 10};
+        ((clampedCpuClock + 2) / 5) * 5};
     RegisterMovieCpuThrottle(system, movie_cpu_throttle);
     StartupLog("Run: frontend applets/image interface");
     system.RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());

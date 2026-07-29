@@ -434,7 +434,7 @@ void HandleRuntimeAdjustment(int row, int direction) {
         break;
     case 3:
         runtime_cpu_clock.store(
-            std::clamp(runtime_cpu_clock.load(std::memory_order_relaxed) + direction * 10, 10,
+            std::clamp(runtime_cpu_clock.load(std::memory_order_relaxed) + direction * 5, 10,
                        800),
             std::memory_order_release);
         break;
@@ -1003,7 +1003,7 @@ void SetRuntimeSettings(const GBAStationRuntimeSettings& settings) {
                                         std::memory_order_release);
     runtime_disable_right_eye.store(settings.disable_right_eye, std::memory_order_release);
     const int clampedCpuClock = std::clamp(settings.cpu_clock_percentage, 10, 800);
-    runtime_cpu_clock.store(((clampedCpuClock + 5) / 10) * 10, std::memory_order_release);
+    runtime_cpu_clock.store(((clampedCpuClock + 2) / 5) * 5, std::memory_order_release);
     runtime_movie_cpu_throttle.store(settings.movie_cpu_throttle, std::memory_order_release);
     runtime_movie_throttle_clock.store(std::clamp(settings.movie_throttle_clock, 10, 100),
                                        std::memory_order_release);

@@ -492,7 +492,7 @@ public:
             v) {
             if (const auto pct = ParseInt(*v)) {
                 const int clamped = std::clamp(*pct, 10, 800);
-                Settings::values.cpu_clock_percentage.SetValue(((clamped + 5) / 10) * 10);
+                Settings::values.cpu_clock_percentage.SetValue(((clamped + 2) / 5) * 5);
             }
         }
         if (const auto v = GetFirstOptional({"region", "region_value", "citra_region_value"}); v) {
