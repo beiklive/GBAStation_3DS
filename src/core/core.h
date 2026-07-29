@@ -89,6 +89,13 @@ struct RunLoopDiagnostics {
     u64 executed_ticks{};
     u64 max_delay_ticks{};
     u64 max_slice_ticks{};
+    u64 max_cpu_execute_ns{};
+    u32 max_cpu_execute_core{};
+    u32 max_cpu_execute_pc{};
+    u32 max_cpu_execute_lr{};
+    u64 max_idle_ns{};
+    u32 max_idle_core{};
+    u64 max_reschedule_ns{};
     u64 entry_pc_samples{};
     std::array<u32, 4> top_entry_pcs{};
     std::array<u32, 4> top_entry_lrs{};

@@ -69,6 +69,11 @@ public:
         return use_new_hash;
     }
 
+    /// Returns true when at least one replacement material was discovered.
+    bool HasCustomTextures() const noexcept {
+        return !material_map.empty();
+    }
+
 private:
     /// Parses the custom texture filename (hash, material type, etc).
     bool ParseFilename(const FileUtil::FSTEntry& file, CustomTexture* texture);

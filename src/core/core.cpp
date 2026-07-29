@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 #include <boost/serialization/array.hpp>
@@ -77,6 +78,13 @@ std::atomic<u64> diagnostic_runloop_reschedules{};
 std::atomic<u64> diagnostic_runloop_executed_ticks{};
 std::atomic<u64> diagnostic_runloop_max_delay_ticks{};
 std::atomic<u64> diagnostic_runloop_max_slice_ticks{};
+std::atomic<u64> diagnostic_runloop_max_cpu_execute_ns{};
+std::atomic<u32> diagnostic_runloop_max_cpu_execute_core{};
+std::atomic<u32> diagnostic_runloop_max_cpu_execute_pc{};
+std::atomic<u32> diagnostic_runloop_max_cpu_execute_lr{};
+std::atomic<u64> diagnostic_runloop_max_idle_ns{};
+std::atomic<u32> diagnostic_runloop_max_idle_core{};
+std::atomic<u64> diagnostic_runloop_max_reschedule_ns{};
 std::atomic<u64> diagnostic_runloop_entry_pc_sample_counter{};
 std::atomic<u64> diagnostic_runloop_entry_pc_samples_recorded{};
 std::atomic<u64> diagnostic_runloop_entry_pc_sample_write{};
@@ -211,6 +219,33 @@ void AddRunLoopDiagnostics(const RunLoopDiagnostics& stats) {
     diagnostic_runloop_executed_ticks.fetch_add(stats.executed_ticks, std::memory_order_relaxed);
     diagnostic_runloop_max_delay_ticks.fetch_add(stats.max_delay_ticks, std::memory_order_relaxed);
     diagnostic_runloop_max_slice_ticks.fetch_add(stats.max_slice_ticks, std::memory_order_relaxed);
+    u64 previous_cpu_ns = diagnostic_runloop_max_cpu_execute_ns.load(std::memory_order_relaxed);
+    while (stats.max_cpu_execute_ns > previous_cpu_ns &&
+           !diagnostic_runloop_max_cpu_execute_ns.compare_exchange_weak(
+               previous_cpu_ns, stats.max_cpu_execute_ns, std::memory_order_relaxed)) {
+    }
+    if (stats.max_cpu_execute_ns >= previous_cpu_ns && stats.max_cpu_execute_ns != 0) {
+        diagnostic_runloop_max_cpu_execute_core.store(stats.max_cpu_execute_core,
+                                                      std::memory_order_relaxed);
+        diagnostic_runloop_max_cpu_execute_pc.store(stats.max_cpu_execute_pc,
+                                                    std::memory_order_relaxed);
+        diagnostic_runloop_max_cpu_execute_lr.store(stats.max_cpu_execute_lr,
+                                                    std::memory_order_relaxed);
+    }
+    u64 previous_idle_ns = diagnostic_runloop_max_idle_ns.load(std::memory_order_relaxed);
+    while (stats.max_idle_ns > previous_idle_ns &&
+           !diagnostic_runloop_max_idle_ns.compare_exchange_weak(
+               previous_idle_ns, stats.max_idle_ns, std::memory_order_relaxed)) {
+    }
+    if (stats.max_idle_ns >= previous_idle_ns && stats.max_idle_ns != 0) {
+        diagnostic_runloop_max_idle_core.store(stats.max_idle_core, std::memory_order_relaxed);
+    }
+    u64 previous_reschedule_ns =
+        diagnostic_runloop_max_reschedule_ns.load(std::memory_order_relaxed);
+    while (stats.max_reschedule_ns > previous_reschedule_ns &&
+           !diagnostic_runloop_max_reschedule_ns.compare_exchange_weak(
+               previous_reschedule_ns, stats.max_reschedule_ns, std::memory_order_relaxed)) {
+    }
 }
 
 RunLoopDiagnostics GetAndResetRunLoopDiagnostics() {
@@ -224,6 +259,19 @@ RunLoopDiagnostics GetAndResetRunLoopDiagnostics() {
     result.executed_ticks = diagnostic_runloop_executed_ticks.exchange(0, std::memory_order_relaxed);
     result.max_delay_ticks = diagnostic_runloop_max_delay_ticks.exchange(0, std::memory_order_relaxed);
     result.max_slice_ticks = diagnostic_runloop_max_slice_ticks.exchange(0, std::memory_order_relaxed);
+    result.max_cpu_execute_ns =
+        diagnostic_runloop_max_cpu_execute_ns.exchange(0, std::memory_order_relaxed);
+    result.max_cpu_execute_core =
+        diagnostic_runloop_max_cpu_execute_core.exchange(0, std::memory_order_relaxed);
+    result.max_cpu_execute_pc =
+        diagnostic_runloop_max_cpu_execute_pc.exchange(0, std::memory_order_relaxed);
+    result.max_cpu_execute_lr =
+        diagnostic_runloop_max_cpu_execute_lr.exchange(0, std::memory_order_relaxed);
+    result.max_idle_ns = diagnostic_runloop_max_idle_ns.exchange(0, std::memory_order_relaxed);
+    result.max_idle_core =
+        diagnostic_runloop_max_idle_core.exchange(0, std::memory_order_relaxed);
+    result.max_reschedule_ns =
+        diagnostic_runloop_max_reschedule_ns.exchange(0, std::memory_order_relaxed);
     result.entry_pc_samples =
         diagnostic_runloop_entry_pc_samples_recorded.exchange(0, std::memory_order_relaxed);
     result.pc_samples =
@@ -417,18 +465,47 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         if (kernel->GetCurrentThreadManager().GetCurrentThread() == nullptr) {
             LOG_TRACE(Core_ARM11, "Core {} idling", current_core_to_execute->GetID());
             GBASTATION_HOTPATH_DIAG(loop_diag.idle_runs++);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+            const auto idle_started = std::chrono::steady_clock::now();
+#endif
             current_core_to_execute->GetTimer().Idle();
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+            const u64 idle_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    std::chrono::steady_clock::now() - idle_started)
+                                                    .count());
+            if (idle_ns > loop_diag.max_idle_ns) {
+                loop_diag.max_idle_ns = idle_ns;
+                loop_diag.max_idle_core = current_core_to_execute->GetID();
+            }
+#endif
             PrepareReschedule();
         } else {
             GBASTATION_HOTPATH_DIAG(loop_diag.active_runs++);
             GBASTATION_HOTPATH_DIAG(SampleRunLoopEntryPc(
                 current_core_to_execute->GetPC(), current_core_to_execute->GetCPSR(),
                 current_core_to_execute->GetReg(14)));
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+            const u32 execute_pc = current_core_to_execute->GetPC();
+            const u32 execute_lr = current_core_to_execute->GetReg(14);
+            const auto execute_started = std::chrono::steady_clock::now();
+#endif
             if (tight_loop) {
                 current_core_to_execute->Run();
             } else {
                 current_core_to_execute->Step();
             }
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+            const u64 execute_ns = static_cast<u64>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - execute_started)
+                    .count());
+            if (execute_ns > loop_diag.max_cpu_execute_ns) {
+                loop_diag.max_cpu_execute_ns = execute_ns;
+                loop_diag.max_cpu_execute_core = current_core_to_execute->GetID();
+                loop_diag.max_cpu_execute_pc = execute_pc;
+                loop_diag.max_cpu_execute_lr = execute_lr;
+            }
+#endif
             GBASTATION_HOTPATH_DIAG(SampleRunLoopExitPc(current_core_to_execute->GetPC(),
                                                         current_core_to_execute->GetCPSR()));
         }
@@ -462,7 +539,20 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             if (kernel->GetCurrentThreadManager().GetCurrentThread() == nullptr) {
                 LOG_TRACE(Core_ARM11, "Core {} idling", cpu_core->GetID());
                 GBASTATION_HOTPATH_DIAG(loop_diag.idle_runs++);
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+                const auto idle_started = std::chrono::steady_clock::now();
+#endif
                 cpu_core->GetTimer().Idle();
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+                const u64 idle_ns = static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - idle_started)
+                        .count());
+                if (idle_ns > loop_diag.max_idle_ns) {
+                    loop_diag.max_idle_ns = idle_ns;
+                    loop_diag.max_idle_core = cpu_core->GetID();
+                }
+#endif
                 PrepareReschedule();
             } else {
                 GBASTATION_HOTPATH_DIAG(loop_diag.active_runs++);
@@ -470,11 +560,28 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
                     cpu_core->GetPC(), cpu_core->GetCPSR(), cpu_core->GetReg(14)));
                 // In the rare case the break flag is set (due to exception thrown)
                 // there is probably no need to adjust the timer accordingly.
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+                const u32 execute_pc = cpu_core->GetPC();
+                const u32 execute_lr = cpu_core->GetReg(14);
+                const auto execute_started = std::chrono::steady_clock::now();
+#endif
                 if (tight_loop) {
                     cpu_core->Run();
                 } else {
                     cpu_core->Step();
                 }
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+                const u64 execute_ns = static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - execute_started)
+                        .count());
+                if (execute_ns > loop_diag.max_cpu_execute_ns) {
+                    loop_diag.max_cpu_execute_ns = execute_ns;
+                    loop_diag.max_cpu_execute_core = cpu_core->GetID();
+                    loop_diag.max_cpu_execute_pc = execute_pc;
+                    loop_diag.max_cpu_execute_lr = execute_lr;
+                }
+#endif
                 GBASTATION_HOTPATH_DIAG(
                     SampleRunLoopExitPc(cpu_core->GetPC(), cpu_core->GetCPSR()));
             }
@@ -483,7 +590,16 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         }
     }
 
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    const auto reschedule_started = std::chrono::steady_clock::now();
+#endif
     Reschedule();
+#ifdef GBASTATION_HOTPATH_DIAGNOSTICS
+    loop_diag.max_reschedule_ns = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - reschedule_started)
+            .count());
+#endif
     GBASTATION_HOTPATH_DIAG(loop_diag.reschedules++);
     GBASTATION_HOTPATH_DIAG(AddRunLoopDiagnostics(loop_diag));
 

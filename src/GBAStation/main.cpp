@@ -3933,6 +3933,20 @@ int Run(int argc, char** argv) {
                     : 0.0;
             const double runloop_max_ms = diagnostic_runloop_ms_max;
             const auto runloop_stats = Core::GetAndResetRunLoopDiagnostics();
+            const double runloop_cpu_max_ms =
+                static_cast<double>(runloop_stats.max_cpu_execute_ns) / 1'000'000.0;
+            const double runloop_idle_max_ms =
+                static_cast<double>(runloop_stats.max_idle_ns) / 1'000'000.0;
+            const double runloop_reschedule_max_ms =
+                static_cast<double>(runloop_stats.max_reschedule_ns) / 1'000'000.0;
+            if (runloop_cpu_max_ms >= 10.0 || runloop_idle_max_ms >= 10.0 ||
+                runloop_reschedule_max_ms >= 10.0) {
+                HeartbeatLog(
+                    "runloop phase maxima: cpu_ms=%.2f cpu_core=%u cpu_pc=0x%08x cpu_lr=0x%08x idle_ms=%.2f idle_core=%u reschedule_ms=%.2f",
+                    runloop_cpu_max_ms, runloop_stats.max_cpu_execute_core,
+                    runloop_stats.max_cpu_execute_pc, runloop_stats.max_cpu_execute_lr,
+                    runloop_idle_max_ms, runloop_stats.max_idle_core, runloop_reschedule_max_ms);
+            }
             const double runloop_ticks_avg =
                 runloop_stats.calls > 0
                     ? static_cast<double>(runloop_stats.executed_ticks) /

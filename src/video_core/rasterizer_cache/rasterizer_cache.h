@@ -1093,6 +1093,10 @@ template <class T>
 bool RasterizerCache<T>::UploadCustomSurface(SurfaceId surface_id, SurfaceInterval interval) {
     MICROPROFILE_SCOPE(RasterizerCache_UploadSurface);
 
+    if (!custom_tex_manager.HasCustomTextures()) {
+        return false;
+    }
+
     Surface& surface = slot_surfaces[surface_id];
     const SurfaceParams load_info = surface.FromInterval(interval);
     ASSERT(load_info.addr >= surface.addr && load_info.end <= surface.end);
