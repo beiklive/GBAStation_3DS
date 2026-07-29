@@ -2862,10 +2862,9 @@ void GMainWindow::SetTurboEnabled(bool state) {
 
 void GMainWindow::ReloadTurbo() {
     if (IsTurboEnabled()) {
-        Settings::temporary_frame_limit = Settings::values.turbo_limit.GetValue();
-        Settings::is_temporary_frame_limit = true;
+        Settings::SetTemporaryFrameLimit(Settings::values.turbo_limit.GetValue());
     } else {
-        Settings::is_temporary_frame_limit = false;
+        Settings::ResetTemporaryFrameLimit();
     }
 
     UpdateStatusBar();

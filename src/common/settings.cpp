@@ -77,8 +77,7 @@ std::string_view GetTextureSamplingName(TextureSampling sampling) {
 
 Values values = {};
 static bool configuring_global = true;
-bool is_temporary_frame_limit;
-double temporary_frame_limit;
+std::atomic<double> temporary_frame_limit{-1.0};
 
 void LogSettings() {
     const auto log_setting = [](std::string_view name, const auto& value) {

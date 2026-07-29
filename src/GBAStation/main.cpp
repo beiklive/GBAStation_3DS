@@ -2852,11 +2852,11 @@ void MirrorScreenSides(SwitchFrontend::GBAStationDisplaySettings& display) {
 void LogSwitchDisplaySettings(const char* reason,
                               const SwitchFrontend::GBAStationDisplaySettings& display) {
     DebugLog("display settings %s: layout=%s orientation=%d resolution=%d integer=%d gap=%d "
-             "top_scale=%.2f bottom_scale=%.2f bottom_opacity=%.2f overlay=%d",
+             "top_scale=%.2f bottom_scale=%.2f bottom_opacity=%.2f overlay=%d fast_forward=%.2f",
              reason, display.screen_layout.c_str(), display.screen_orientation,
              display.internal_resolution, display.integer_scale ? 1 : 0, display.screen_gap,
              display.top_scale, display.bottom_scale, display.bottom_opacity,
-             display.overlay_enabled ? 1 : 0);
+             display.overlay_enabled ? 1 : 0, display.fast_forward_multiplier);
 }
 
 void ApplyConfiguredDisplayDefaults(SwitchFrontend::GBAStationDisplaySettings& settings,
@@ -3086,7 +3086,7 @@ int Run(int argc, char** argv) {
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u fast_forward=%.2f skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
@@ -3095,6 +3095,7 @@ int Run(int argc, char** argv) {
              launch_options.display_settings.screen_orientation,
              launch_options.display_settings.internal_resolution,
              Settings::values.resolution_factor.GetValue(),
+             launch_options.display_settings.fast_forward_multiplier,
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
              switch_fastmem_enabled ? 1 : 0,
              switch_jit_fast_dispatch_enabled ? 1 : 0,
@@ -3445,9 +3446,11 @@ int Run(int argc, char** argv) {
             fast_forward_requested && !fast_forward_compile_throttled;
         const float fast_forward_multiplier =
             SwitchFrontend::VulkanOverlay::GetDisplaySettings().fast_forward_multiplier;
-        Settings::is_temporary_frame_limit = fast_forward_active;
-        Settings::temporary_frame_limit =
-            fast_forward_active ? static_cast<double>(fast_forward_multiplier) * 100.0 : 0.0;
+        if (fast_forward_active) {
+            Settings::SetTemporaryFrameLimit(static_cast<double>(fast_forward_multiplier) * 100.0);
+        } else {
+            Settings::ResetTemporaryFrameLimit();
+        }
         const bool fast_forward_multiplier_changed =
             std::fabs(fast_forward_multiplier - last_fast_forward_multiplier) > 0.001f;
         if (fast_forward_active != last_fast_forward_active ||
@@ -3457,7 +3460,7 @@ int Run(int argc, char** argv) {
             vulkan_renderer.SetFastForward(fast_forward_active, fast_forward_multiplier);
             DebugLog("fast forward %s multiplier=%.2f limit=%.1f",
                      fast_forward_active ? "on" : "off", fast_forward_multiplier,
-                     Settings::temporary_frame_limit);
+                     fast_forward_active ? Settings::GetTemporaryFrameLimit() : 0.0);
             last_fast_forward_active = fast_forward_active;
         }
         last_fast_forward_multiplier = fast_forward_multiplier;

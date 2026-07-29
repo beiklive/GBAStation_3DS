@@ -2,6 +2,9 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
+#include <vector>
+
 #include "common/alignment.h"
 #include "common/logging/log.h"
 #include "common/scope_exit.h"
@@ -11,6 +14,54 @@
 #include "core/hle/service/ldr_ro/cro_helper.h"
 
 namespace Service::LDR {
+
+namespace {
+
+class RelocationInvalidationBatch {
+public:
+    explicit RelocationInvalidationBatch(Core::System& system_) : system(system_) {}
+
+    void Add(VAddr address, std::size_t size) {
+        if (size == 0) {
+            return;
+        }
+
+        const u64 first_page = address & ~Memory::CITRA_PAGE_MASK;
+        const u64 last_page =
+            (static_cast<u64>(address) + size - 1) & ~static_cast<u64>(Memory::CITRA_PAGE_MASK);
+        for (u64 page = first_page; page <= last_page; page += Memory::CITRA_PAGE_SIZE) {
+            pages.push_back(static_cast<VAddr>(page));
+        }
+    }
+
+    void Flush() {
+        if (pages.empty()) {
+            return;
+        }
+
+        std::sort(pages.begin(), pages.end());
+        pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+
+        VAddr range_begin = pages.front();
+        VAddr range_end = range_begin + Memory::CITRA_PAGE_SIZE;
+        for (std::size_t i = 1; i < pages.size(); ++i) {
+            if (pages[i] == range_end) {
+                range_end += Memory::CITRA_PAGE_SIZE;
+                continue;
+            }
+            system.InvalidateCacheRange(range_begin, range_end - range_begin);
+            range_begin = pages[i];
+            range_end = range_begin + Memory::CITRA_PAGE_SIZE;
+        }
+        system.InvalidateCacheRange(range_begin, range_end - range_begin);
+    }
+
+private:
+    Core::System& system;
+    std::vector<VAddr> pages;
+};
+
+} // namespace
 
 static const Result ERROR_BUFFER_TOO_SMALL = // 0xE0E12C1F
     Result(static_cast<ErrorDescription>(31), ErrorModule::RO, ErrorSummary::InvalidArgument,
@@ -64,7 +115,8 @@ VAddr CROHelper::SegmentTagToAddress(SegmentTag segment_tag) const {
 }
 
 Result CROHelper::ApplyRelocation(VAddr target_address, RelocationType relocation_type, u32 addend,
-                                  u32 symbol_address, u32 target_future_address) {
+                                  u32 symbol_address, u32 target_future_address,
+                                  bool invalidate_cache) {
 
     switch (relocation_type) {
     case RelocationType::Nothing:
@@ -72,11 +124,11 @@ Result CROHelper::ApplyRelocation(VAddr target_address, RelocationType relocatio
     case RelocationType::AbsoluteAddress:
     case RelocationType::AbsoluteAddress2:
         system.Memory().Write32(target_address, symbol_address + addend);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     case RelocationType::RelativeAddress:
         system.Memory().Write32(target_address, symbol_address + addend - target_future_address);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     case RelocationType::ThumbBranch: {
         // Thumb-2 BL/BLX: two 16-bit halfwords at target_address and target_address+2.
@@ -103,7 +155,7 @@ Result CROHelper::ApplyRelocation(VAddr target_address, RelocationType relocatio
         }
         system.Memory().Write16(target_address,     t1);
         system.Memory().Write16(target_address + 2, t2);
-        system.InvalidateCacheRange(target_address, 4);
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, 4);
         break;
     }
     case RelocationType::ArmBranch: {
@@ -117,7 +169,7 @@ Result CROHelper::ApplyRelocation(VAddr target_address, RelocationType relocatio
         }
         instr = (instr & 0xFF000000u) | (offset & 0x00FFFFFFu);
         system.Memory().Write32(target_address, instr);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     }
     case RelocationType::ModifyArmBranch: {
@@ -133,14 +185,14 @@ Result CROHelper::ApplyRelocation(VAddr target_address, RelocationType relocatio
         }
         instr = (instr & 0xFF000000u) | (offset & 0x00FFFFFFu);
         system.Memory().Write32(target_address, instr);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     }
     case RelocationType::AlignedRelativeAddress:
         // Like RelativeAddress but aligns the symbol to 4 bytes.
         system.Memory().Write32(target_address,
                                 ((symbol_address + addend) & ~3u) - target_address);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     default:
         return CROFormatError(0x22);
@@ -148,7 +200,8 @@ Result CROHelper::ApplyRelocation(VAddr target_address, RelocationType relocatio
     return ResultSuccess;
 }
 
-Result CROHelper::ClearRelocation(VAddr target_address, RelocationType relocation_type) {
+Result CROHelper::ClearRelocation(VAddr target_address, RelocationType relocation_type,
+                                  bool invalidate_cache) {
     switch (relocation_type) {
     case RelocationType::Nothing:
         break;
@@ -156,7 +209,7 @@ Result CROHelper::ClearRelocation(VAddr target_address, RelocationType relocatio
     case RelocationType::AbsoluteAddress2:
     case RelocationType::RelativeAddress:
         system.Memory().Write32(target_address, 0);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     case RelocationType::ThumbBranch: {
         // Clear to BL with zero offset (branches to PC+4 = the next instruction).
@@ -167,7 +220,7 @@ Result CROHelper::ClearRelocation(VAddr target_address, RelocationType relocatio
         t2 = static_cast<u16>((t2 & 0xD000u) | 0x2800u); // J1=1, J2=1, imm11=0
         system.Memory().Write16(target_address,     t1);
         system.Memory().Write16(target_address + 2, t2);
-        system.InvalidateCacheRange(target_address, 4);
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, 4);
         break;
     }
     case RelocationType::ArmBranch:
@@ -176,12 +229,12 @@ Result CROHelper::ClearRelocation(VAddr target_address, RelocationType relocatio
         u32 instr = system.Memory().Read32(target_address);
         instr = instr & 0xFF000000u;
         system.Memory().Write32(target_address, instr);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     }
     case RelocationType::AlignedRelativeAddress:
         system.Memory().Write32(target_address, 0);
-        system.InvalidateCacheRange(target_address, sizeof(u32));
+        if (invalidate_cache) system.InvalidateCacheRange(target_address, sizeof(u32));
         break;
     default:
         return CROFormatError(0x22);
@@ -193,6 +246,8 @@ Result CROHelper::ApplyRelocationBatch(VAddr batch, u32 symbol_address, bool res
     if (symbol_address == 0 && !reset)
         return CROFormatError(0x10);
 
+    RelocationInvalidationBatch invalidations{system};
+    SCOPE_EXIT({ invalidations.Flush(); });
     VAddr relocation_address = batch;
     while (true) {
         RelocationEntry relocation;
@@ -204,8 +259,11 @@ Result CROHelper::ApplyRelocationBatch(VAddr batch, u32 symbol_address, bool res
             return CROFormatError(0x12);
         }
 
+        if (relocation.type != RelocationType::Nothing) {
+            invalidations.Add(relocation_target, sizeof(u32));
+        }
         Result result = ApplyRelocation(relocation_target, relocation.type, relocation.addend,
-                                        symbol_address, relocation_target);
+                                        symbol_address, relocation_target, false);
         if (result.IsError()) {
             LOG_ERROR(Service_LDR, "Error applying relocation {:08X}", result.raw);
             return result;
@@ -557,6 +615,8 @@ Result CROHelper::ResetExternalRelocations() {
         return CROFormatError(0x12);
     }
 
+    RelocationInvalidationBatch invalidations{system};
+    SCOPE_EXIT({ invalidations.Flush(); });
     bool batch_begin = true;
     for (u32 i = 0; i < external_relocation_num; ++i) {
         GetEntry(system.Memory(), i, relocation);
@@ -566,8 +626,11 @@ Result CROHelper::ResetExternalRelocations() {
             return CROFormatError(0x12);
         }
 
+        if (relocation.type != RelocationType::Nothing) {
+            invalidations.Add(relocation_target, sizeof(u32));
+        }
         Result result = ApplyRelocation(relocation_target, relocation.type, relocation.addend,
-                                        unresolved_symbol, relocation_target);
+                                        unresolved_symbol, relocation_target, false);
         if (result.IsError()) {
             LOG_ERROR(Service_LDR, "Error applying relocation {:08X}", result.raw);
             return result;
@@ -590,6 +653,8 @@ Result CROHelper::ClearExternalRelocations() {
     u32 external_relocation_num = GetField(ExternalRelocationNum);
     ExternalRelocationEntry relocation;
 
+    RelocationInvalidationBatch invalidations{system};
+    SCOPE_EXIT({ invalidations.Flush(); });
     bool batch_begin = true;
     for (u32 i = 0; i < external_relocation_num; ++i) {
         GetEntry(system.Memory(), i, relocation);
@@ -599,7 +664,10 @@ Result CROHelper::ClearExternalRelocations() {
             return CROFormatError(0x12);
         }
 
-        Result result = ClearRelocation(relocation_target, relocation.type);
+        if (relocation.type != RelocationType::Nothing) {
+            invalidations.Add(relocation_target, sizeof(u32));
+        }
+        Result result = ClearRelocation(relocation_target, relocation.type, false);
         if (result.IsError()) {
             LOG_ERROR(Service_LDR, "Error clearing relocation {:08X}", result.raw);
             return result;
@@ -651,6 +719,8 @@ Result CROHelper::ApplyStaticAnonymousSymbolToCRS(VAddr crs_address) {
 }
 
 Result CROHelper::ApplyInternalRelocations(u32 old_data_segment_address) {
+    RelocationInvalidationBatch invalidations{system};
+    SCOPE_EXIT({ invalidations.Flush(); });
     u32 segment_num = GetField(SegmentNum);
     u32 internal_relocation_num = GetField(InternalRelocationNum);
     for (u32 i = 0; i < internal_relocation_num; ++i) {
@@ -681,8 +751,11 @@ Result CROHelper::ApplyInternalRelocations(u32 old_data_segment_address) {
         GetEntry(system.Memory(), relocation.symbol_segment, symbol_segment);
         LOG_TRACE(Service_LDR, "Internally relocates 0x{:08X} with 0x{:08X}", target_address,
                   symbol_segment.offset);
+        if (relocation.type != RelocationType::Nothing) {
+            invalidations.Add(target_address, sizeof(u32));
+        }
         Result result = ApplyRelocation(target_address, relocation.type, relocation.addend,
-                                        symbol_segment.offset, target_addressB);
+                                        symbol_segment.offset, target_addressB, false);
         if (result.IsError()) {
             LOG_ERROR(Service_LDR, "Error applying relocation {:08X}", result.raw);
             return result;
@@ -692,6 +765,8 @@ Result CROHelper::ApplyInternalRelocations(u32 old_data_segment_address) {
 }
 
 Result CROHelper::ClearInternalRelocations() {
+    RelocationInvalidationBatch invalidations{system};
+    SCOPE_EXIT({ invalidations.Flush(); });
     u32 internal_relocation_num = GetField(InternalRelocationNum);
     for (u32 i = 0; i < internal_relocation_num; ++i) {
         InternalRelocationEntry relocation;
@@ -702,7 +777,10 @@ Result CROHelper::ClearInternalRelocations() {
             return CROFormatError(0x15);
         }
 
-        Result result = ClearRelocation(target_address, relocation.type);
+        if (relocation.type != RelocationType::Nothing) {
+            invalidations.Add(target_address, sizeof(u32));
+        }
+        Result result = ClearRelocation(target_address, relocation.type, false);
         if (result.IsError()) {
             LOG_ERROR(Service_LDR, "Error clearing relocation {:08X}", result.raw);
             return result;

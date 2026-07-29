@@ -1481,11 +1481,9 @@ Result SVC::KernelSetState(u32 kernel_state, u32 varg1, u32 varg2) {
     case KernelState::KERNEL_STATE_CITRA_EMULATION_SPEED: {
         u16 new_value = static_cast<u16>(varg1);
         if (new_value == 0xFFFF) {
-            Settings::is_temporary_frame_limit = false;
-            Settings::temporary_frame_limit = 0;
+            Settings::ResetTemporaryFrameLimit();
         } else {
-            Settings::is_temporary_frame_limit = true;
-            Settings::temporary_frame_limit = static_cast<double>(new_value);
+            Settings::SetTemporaryFrameLimit(static_cast<double>(new_value));
         }
     } break;
     default:

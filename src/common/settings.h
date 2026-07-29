@@ -705,14 +705,19 @@ void CreateProfile(std::string name);
 void DeleteProfile(int index);
 void RenameCurrentProfile(std::string new_name);
 
-extern bool is_temporary_frame_limit;
-extern double temporary_frame_limit;
+extern std::atomic<double> temporary_frame_limit;
 static inline void ResetTemporaryFrameLimit() {
-    is_temporary_frame_limit = false;
-    temporary_frame_limit = 0;
+    temporary_frame_limit.store(-1.0, std::memory_order_release);
+}
+static inline void SetTemporaryFrameLimit(double frame_limit) {
+    temporary_frame_limit.store(std::max(0.0, frame_limit), std::memory_order_release);
+}
+static inline double GetTemporaryFrameLimit() {
+    return temporary_frame_limit.load(std::memory_order_acquire);
 }
 static inline double GetFrameLimit() {
-    return is_temporary_frame_limit ? temporary_frame_limit : values.frame_limit.GetValue();
+    const double temporary_limit = GetTemporaryFrameLimit();
+    return temporary_limit >= 0.0 ? temporary_limit : values.frame_limit.GetValue();
 }
 
 } // namespace Settings

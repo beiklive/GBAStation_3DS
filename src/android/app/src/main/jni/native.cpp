@@ -1179,12 +1179,11 @@ void Java_org_citra_citra_1emu_NativeLibrary_unlinkConsole(JNIEnv* env, jobject 
 
 void Java_org_citra_citra_1emu_NativeLibrary_setTemporaryFrameLimit(JNIEnv* env, jobject obj,
                                                                     jdouble speed) {
-    Settings::temporary_frame_limit = speed;
-    Settings::is_temporary_frame_limit = true;
+    Settings::SetTemporaryFrameLimit(speed);
 }
 
 void Java_org_citra_citra_1emu_NativeLibrary_disableTemporaryFrameLimit(JNIEnv* env, jobject obj) {
-    Settings::is_temporary_frame_limit = false;
+    Settings::ResetTemporaryFrameLimit();
 }
 
 void Java_org_citra_citra_1emu_NativeLibrary_playTimeManagerInit(JNIEnv* env, jobject obj) {

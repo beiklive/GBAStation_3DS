@@ -224,11 +224,11 @@ void FrameLimiter::DoFrameLimiting(microseconds current_system_time_us) {
     }
 
     auto now = Clock::now();
-    double sleep_scale = Settings::GetFrameLimit() / 100.0;
-
-    if (Settings::GetFrameLimit() == 0) {
+    const double frame_limit = Settings::GetFrameLimit();
+    if (frame_limit == 0) {
         return;
     }
+    const double sleep_scale = frame_limit / 100.0;
 
     // Max lag caused by slow frames. Shouldn't be more than the length of a frame at the current
     // speed percent or it will clamp too much and prevent this from properly limiting to that

@@ -216,7 +216,8 @@ std::size_t ImportBeikliveFlatConfig(const char* path, OptionMap& options) {
                 DecodeFlatConfigValue(raw_value);
             ++imported;
         } else if (key == "fastforward.multiplier" || key == "display.showFps") {
-            options[key] = DecodeFlatConfigValue(raw_value);
+            // Shared launcher values are defaults. Preserve values saved by the 3DS in-game menu.
+            options.try_emplace(key, DecodeFlatConfigValue(raw_value));
             ++imported;
         }
     }

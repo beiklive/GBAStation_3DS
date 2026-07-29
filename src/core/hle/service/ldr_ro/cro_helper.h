@@ -494,7 +494,8 @@ private:
      * @returns Result ResultSuccess on success, otherwise error code.
      */
     Result ApplyRelocation(VAddr target_address, RelocationType relocation_type, u32 addend,
-                           u32 symbol_address, u32 target_future_address);
+                           u32 symbol_address, u32 target_future_address,
+                           bool invalidate_cache = true);
 
     /**
      * Clears a relocation to zero
@@ -502,7 +503,8 @@ private:
      * @param relocation_type the type of the relocation
      * @returns Result ResultSuccess on success, otherwise error code.
      */
-    Result ClearRelocation(VAddr target_address, RelocationType relocation_type);
+    Result ClearRelocation(VAddr target_address, RelocationType relocation_type,
+                           bool invalidate_cache = true);
 
     /**
      * Applies or resets a batch of relocations
