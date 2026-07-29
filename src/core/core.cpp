@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
@@ -317,6 +318,57 @@ Core::Timing& Global() {
 System::System() : movie{*this}, cheat_engine{*this} {}
 
 System::~System() = default;
+
+void System::InvalidateCacheRange(u32 start_address, std::size_t length) {
+    if (length == 0) {
+        return;
+    }
+
+    const u64 range_end =
+        std::min<u64>(static_cast<u64>(start_address) + length, u64{1} << 32);
+    if (cache_invalidation_batch_depth != 0) {
+        pending_cache_invalidations.emplace_back(start_address, range_end);
+        return;
+    }
+
+    for (const auto& cpu : cpu_cores) {
+        cpu->InvalidateCacheRange(start_address,
+                                  static_cast<std::size_t>(range_end - start_address));
+    }
+}
+
+void System::BeginCacheInvalidationBatch() {
+    ++cache_invalidation_batch_depth;
+}
+
+void System::EndCacheInvalidationBatch() {
+    ASSERT(cache_invalidation_batch_depth != 0);
+    if (--cache_invalidation_batch_depth != 0 || pending_cache_invalidations.empty()) {
+        return;
+    }
+
+    std::sort(pending_cache_invalidations.begin(), pending_cache_invalidations.end());
+    u64 range_begin = pending_cache_invalidations.front().first;
+    u64 range_end = pending_cache_invalidations.front().second;
+    for (std::size_t i = 1; i < pending_cache_invalidations.size(); ++i) {
+        const auto [next_begin, next_end] = pending_cache_invalidations[i];
+        if (next_begin <= range_end) {
+            range_end = std::max(range_end, next_end);
+            continue;
+        }
+        for (const auto& cpu : cpu_cores) {
+            cpu->InvalidateCacheRange(static_cast<u32>(range_begin),
+                                      static_cast<std::size_t>(range_end - range_begin));
+        }
+        range_begin = next_begin;
+        range_end = next_end;
+    }
+    for (const auto& cpu : cpu_cores) {
+        cpu->InvalidateCacheRange(static_cast<u32>(range_begin),
+                                  static_cast<std::size_t>(range_end - range_begin));
+    }
+    pending_cache_invalidations.clear();
+}
 
 System::ResultStatus System::RunLoop(bool tight_loop) {
     status = ResultStatus::Success;

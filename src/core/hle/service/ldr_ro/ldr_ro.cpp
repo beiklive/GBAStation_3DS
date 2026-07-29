@@ -6,6 +6,7 @@
 #include "common/archives.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
+#include "common/scope_exit.h"
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/hle/ipc_helpers.h"
@@ -253,6 +254,9 @@ void RO::LoadCRO(Kernel::HLERequestContext& ctx, bool link_on_load_bug_fix) {
 
     Result result = ResultSuccess;
 
+    system.BeginCacheInvalidationBatch();
+    SCOPE_EXIT({ system.EndCacheInvalidationBatch(); });
+
     result = process->Map(cro_address, cro_buffer_ptr, cro_size, Kernel::VMAPermission::Read, true);
     if (result.IsError()) {
         LOG_ERROR(Service_LDR, "Error mapping memory block {:08X}", result.raw);
@@ -378,6 +382,9 @@ void RO::UnloadCRO(Kernel::HLERequestContext& ctx) {
 
     u32 fixed_size = cro.GetFixedSize();
 
+    system.BeginCacheInvalidationBatch();
+    SCOPE_EXIT({ system.EndCacheInvalidationBatch(); });
+
     cro.Unregister(slot->loaded_crs);
 
     Result result = cro.Unlink(slot->loaded_crs);
@@ -443,6 +450,9 @@ void RO::LinkCRO(Kernel::HLERequestContext& ctx) {
 
     LOG_INFO(Service_LDR, "Linking CRO \"{}\"", cro.ModuleName());
 
+    system.BeginCacheInvalidationBatch();
+    SCOPE_EXIT({ system.EndCacheInvalidationBatch(); });
+
     Result result = cro.Link(slot->loaded_crs, false);
     if (result.IsError()) {
         LOG_ERROR(Service_LDR, "Error linking CRO {:08X}", result.raw);
@@ -482,6 +492,9 @@ void RO::UnlinkCRO(Kernel::HLERequestContext& ctx) {
     }
 
     LOG_INFO(Service_LDR, "Unlinking CRO \"{}\"", cro.ModuleName());
+
+    system.BeginCacheInvalidationBatch();
+    SCOPE_EXIT({ system.EndCacheInvalidationBatch(); });
 
     Result result = cro.Unlink(slot->loaded_crs);
     if (result.IsError()) {

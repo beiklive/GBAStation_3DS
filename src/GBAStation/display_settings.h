@@ -8,7 +8,7 @@
 namespace SwitchFrontend {
 
 constexpr float MinFastForwardMultiplier = 0.1f;
-constexpr float MaxFastForwardMultiplier = 2.0f;
+constexpr float MaxFastForwardMultiplier = 5.0f;
 
 struct GBAStationDisplaySettings {
     float fast_forward_multiplier{2.0f};

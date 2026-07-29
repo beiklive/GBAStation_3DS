@@ -38,8 +38,8 @@ constexpr int CustomLayoutControlCount = 7;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
 constexpr const char* OverlayRoot = "sdmc:/GBAStation/overlays";
-constexpr std::array<float, 7> FastForwardValues{{
-    0.1f, 0.5f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f,
+constexpr std::array<float, 10> FastForwardValues{{
+    0.1f, 0.5f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 3.0f, 4.0f, 5.0f,
 }};
 constexpr std::array<const char*, 8> LayoutIds{{
     "vertical", "horizontal", "priority_top", "priority_bottom",

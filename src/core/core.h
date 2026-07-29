@@ -11,6 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 #include <boost/optional.hpp>
 #include <boost/serialization/version.hpp>
 #include "common/common_types.h"
@@ -251,11 +253,9 @@ public:
         return static_cast<u32>(cpu_cores.size());
     }
 
-    void InvalidateCacheRange(u32 start_address, std::size_t length) {
-        for (const auto& cpu : cpu_cores) {
-            cpu->InvalidateCacheRange(start_address, length);
-        }
-    }
+    void InvalidateCacheRange(u32 start_address, std::size_t length);
+    void BeginCacheInvalidationBatch();
+    void EndCacheInvalidationBatch();
 
     /**
      * Gets a reference to the emulated DSP.
@@ -507,6 +507,8 @@ private:
     /// ARM11 CPU core
     std::vector<std::shared_ptr<ARM_Interface>> cpu_cores;
     ARM_Interface* running_core = nullptr;
+    u32 cache_invalidation_batch_depth{};
+    std::vector<std::pair<u32, u64>> pending_cache_invalidations;
 
     /// DSP core
     std::unique_ptr<AudioCore::DspInterface> dsp_core;
