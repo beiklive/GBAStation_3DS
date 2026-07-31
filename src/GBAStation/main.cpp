@@ -2517,14 +2517,69 @@ void ConfigureSettings() {
     profile.buttons[Settings::NativeButton::ZR] =
         MakeButton(ButtonMask("3ds.handle.r2", HidNpadButton_ZR));
 
-    const auto MakeAnalog = [](int axis) {
+    const auto MakeNativeAnalog = [](int axis, int x_from, int x_sign, int y_from, int y_sign) {
         Common::ParamPackage pkg;
         pkg.Set("engine", "switch_hid_analog");
         pkg.Set("axis", axis);
+        pkg.Set("x_from", x_from);
+        pkg.Set("x_sign", x_sign);
+        pkg.Set("y_from", y_from);
+        pkg.Set("y_sign", y_sign);
         return pkg.Serialize();
     };
-    profile.analogs[Settings::NativeAnalog::CirclePad] = MakeAnalog(0);
-    profile.analogs[Settings::NativeAnalog::CStick]    = MakeAnalog(1);
+    const auto MakeButtonAnalog = [&](u64 up, u64 down, u64 left, u64 right) {
+        Common::ParamPackage pkg;
+        pkg.Set("engine", "analog_from_button");
+        pkg.Set("up", MakeButton(up));
+        pkg.Set("down", MakeButton(down));
+        pkg.Set("left", MakeButton(left));
+        pkg.Set("right", MakeButton(right));
+        return pkg.Serialize();
+    };
+    struct StickDirection {
+        int stick;
+        int component;
+        int sign;
+    };
+    const auto DecodeStickDirection = [](u64 mask) -> std::optional<StickDirection> {
+        if (mask == HidNpadButton_StickLRight) return StickDirection{0, 0, 1};
+        if (mask == HidNpadButton_StickLLeft) return StickDirection{0, 0, -1};
+        if (mask == HidNpadButton_StickLUp) return StickDirection{0, 1, 1};
+        if (mask == HidNpadButton_StickLDown) return StickDirection{0, 1, -1};
+        if (mask == HidNpadButton_StickRRight) return StickDirection{1, 0, 1};
+        if (mask == HidNpadButton_StickRLeft) return StickDirection{1, 0, -1};
+        if (mask == HidNpadButton_StickRUp) return StickDirection{1, 1, 1};
+        if (mask == HidNpadButton_StickRDown) return StickDirection{1, 1, -1};
+        return std::nullopt;
+    };
+    const auto MakeAnalog = [&](std::string_view prefix, u64 up, u64 down, u64 left, u64 right) {
+        const std::string key_prefix{prefix};
+        const u64 up_mask = ButtonMask(key_prefix + "_up", up);
+        const u64 down_mask = ButtonMask(key_prefix + "_down", down);
+        const u64 left_mask = ButtonMask(key_prefix + "_left", left);
+        const u64 right_mask = ButtonMask(key_prefix + "_right", right);
+
+        const auto up_dir = DecodeStickDirection(up_mask);
+        const auto down_dir = DecodeStickDirection(down_mask);
+        const auto left_dir = DecodeStickDirection(left_mask);
+        const auto right_dir = DecodeStickDirection(right_mask);
+        if (up_dir && down_dir && left_dir && right_dir &&
+            up_dir->stick == down_dir->stick && up_dir->stick == left_dir->stick &&
+            up_dir->stick == right_dir->stick && up_dir->component == down_dir->component &&
+            left_dir->component == right_dir->component && up_dir->sign == -down_dir->sign &&
+            left_dir->sign == -right_dir->sign && up_dir->component != right_dir->component) {
+            return MakeNativeAnalog(up_dir->stick, right_dir->component, right_dir->sign,
+                                    up_dir->component, up_dir->sign);
+        }
+
+        return MakeButtonAnalog(up_mask, down_mask, left_mask, right_mask);
+    };
+    profile.analogs[Settings::NativeAnalog::CirclePad] =
+        MakeAnalog("3ds.handle.lstick", HidNpadButton_StickLUp, HidNpadButton_StickLDown,
+                   HidNpadButton_StickLLeft, HidNpadButton_StickLRight);
+    profile.analogs[Settings::NativeAnalog::CStick] =
+        MakeAnalog("3ds.handle.rstick", HidNpadButton_StickRUp, HidNpadButton_StickRDown,
+                   HidNpadButton_StickRLeft, HidNpadButton_StickRRight);
     profile.motion_device = "engine:switch_hid_motion,sensitivity:1.25";
     profile.touch_device = "engine:emu_window";
     profile.controller_touch_device.clear();

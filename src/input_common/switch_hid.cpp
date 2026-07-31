@@ -109,7 +109,9 @@ std::unique_ptr<Input::ButtonDevice> SwitchHIDButtonFactory::Create(
 
 class SwitchHIDAnalog final : public Input::AnalogDevice {
 public:
-    explicit SwitchHIDAnalog(int stick_idx) : m_stick(stick_idx) {}
+    SwitchHIDAnalog(int stick_idx, int x_from_, int x_sign_, int y_from_, int y_sign_)
+        : m_stick(stick_idx), x_from(x_from_), x_sign(x_sign_), y_from(y_from_),
+          y_sign(y_sign_) {}
 
     std::tuple<float, float> GetStatus() const override {
         if (g_input_suppressed.load(std::memory_order_acquire)) {
@@ -118,19 +120,31 @@ public:
         const HidAnalogStickState pos = padGetStickPos(&g_pad, m_stick);
         // Normalize to [-1, 1]. Range is -32768..32767; use 32767.0f to avoid clamping +1.
         constexpr float kScale = 1.0f / 32767.0f;
-        const float x = std::clamp(pos.x * kScale, -1.0f, 1.0f);
-        const float y = std::clamp(pos.y * kScale, -1.0f, 1.0f);
-        return {x, y};
+        const std::array<float, 2> values{{
+            std::clamp(pos.x * kScale, -1.0f, 1.0f),
+            std::clamp(pos.y * kScale, -1.0f, 1.0f),
+        }};
+        const float x = values[std::clamp(x_from, 0, 1)] * static_cast<float>(x_sign);
+        const float y = values[std::clamp(y_from, 0, 1)] * static_cast<float>(y_sign);
+        return {std::clamp(x, -1.0f, 1.0f), std::clamp(y, -1.0f, 1.0f)};
     }
 
 private:
     int m_stick;
+    int x_from;
+    int x_sign;
+    int y_from;
+    int y_sign;
 };
 
 std::unique_ptr<Input::AnalogDevice> SwitchHIDAnalogFactory::Create(
     const Common::ParamPackage& params) {
     const int axis = params.Get("axis", 0);
-    return std::make_unique<SwitchHIDAnalog>(axis);
+    const int x_from = params.Get("x_from", 0);
+    const int x_sign = params.Get("x_sign", 1);
+    const int y_from = params.Get("y_from", 1);
+    const int y_sign = params.Get("y_sign", 1);
+    return std::make_unique<SwitchHIDAnalog>(axis, x_from, x_sign, y_from, y_sign);
 }
 
 // ---- MotionDevice ----
