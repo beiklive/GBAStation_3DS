@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "GBAStation/overlay/vulkan_menu_renderer.h"
+#include "GBAStation/overlay/gbastation_language.h"
 
 #include <algorithm>
 #include <array>
@@ -154,8 +155,8 @@ void SetCanvasOrientation(int orientation) {
     }
 }
 
-constexpr std::array<const char*, static_cast<int>(Item::Count)> ItemLabels{{
-    "返回游戏", "保存状态", "读取状态", "金手指", "画面设置", "运行设置", "重置游戏", "退出游戏",
+static const std::array<std::string, static_cast<int>(Item::Count)> ItemLabels{{
+    GBA_L("返回游戏"), GBA_L("保存状态"), GBA_L("读取状态"), GBA_L("金手指"), GBA_L("画面设置"), GBA_L("运行设置"), GBA_L("重置游戏"), GBA_L("退出游戏"),
 }};
 
 constexpr std::array<int, static_cast<int>(Item::Count)> ItemIcons{{
@@ -1436,15 +1437,15 @@ void DrawFpsIndicator(const State& state) {
     Text(12, 30, 18, {0.20f, 1.0f, 0.24f, 0.96f}, value);
 }
 
-const char* DisplayLayoutLabel(std::string_view layout) {
-    if (layout == "vertical") return "竖向";
-    if (layout == "horizontal") return "横向";
-    if (layout == "priority_bottom") return "下屏优先";
-    if (layout == "hybrid") return "混合";
-    if (layout == "top") return "仅上屏";
-    if (layout == "bottom") return "仅下屏";
-    if (layout == "custom") return "自定义";
-    return "上屏优先";
+std::string DisplayLayoutLabel(std::string_view layout) {
+    if (layout == "vertical") return GBA_L("竖向");
+    if (layout == "horizontal") return GBA_L("横向");
+    if (layout == "priority_bottom") return GBA_L("下屏优先");
+    if (layout == "hybrid") return GBA_L("混合");
+    if (layout == "top") return GBA_L("仅上屏");
+    if (layout == "bottom") return GBA_L("仅下屏");
+    if (layout == "custom") return GBA_L("自定义");
+    return GBA_L("上屏优先");
 }
 
 void DrawCustomLayoutSidebar(const State& state) {
@@ -1460,8 +1461,8 @@ void DrawCustomLayoutSidebar(const State& state) {
     Rect(0, 0, 1280, 720, {0.0f, 0.0f, 0.0f, 0.04f});
     Rect(PanelX, 0, PanelW, 720, {0.015f, 0.020f, 0.030f, 0.52f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
-    Text(830, 54, 27, White, "自定义画面布局");
-    Text(830, 87, 16, Muted, "B 返回   A 重置当前项");
+    Text(830, 54, 27, White, GBA_L("自定义画面布局"));
+    Text(830, 87, 16, Muted, GBA_L("B 返回   A 重置当前项"));
 
     auto section = [&](float y, const char* label) {
         Rect(830, y + 12, 72, 1, {1.0f, 1.0f, 1.0f, 0.13f});
@@ -1497,15 +1498,15 @@ void DrawCustomLayoutSidebar(const State& state) {
         return std::string{text};
     };
 
-    section(116, "上屏布局");
-    row(0, 150, "缩放", scaleValue(state.display.top_scale));
-    row(1, 210, "X 偏移", offsetValue(state.display.top_offset_x));
-    row(2, 270, "Y 偏移", offsetValue(state.display.top_offset_y));
-    section(350, "下屏布局");
-    row(3, 384, "缩放", scaleValue(state.display.bottom_scale));
-    row(4, 444, "X 偏移", offsetValue(state.display.bottom_offset_x));
-    row(5, 504, "Y 偏移", offsetValue(state.display.bottom_offset_y));
-    row(6, 564, "透明度", opacityValue(state.display.bottom_opacity));
+    section(116, GBA_L("上屏布局"));
+    row(0, 150, GBA_L("缩放"), scaleValue(state.display.top_scale));
+    row(1, 210, GBA_L("X 偏移"), offsetValue(state.display.top_offset_x));
+    row(2, 270, GBA_L("Y 偏移"), offsetValue(state.display.top_offset_y));
+    section(350, GBA_L("下屏布局"));
+    row(3, 384, GBA_L("缩放"), scaleValue(state.display.bottom_scale));
+    row(4, 444, GBA_L("X 偏移"), offsetValue(state.display.bottom_offset_x));
+    row(5, 504, GBA_L("Y 偏移"), offsetValue(state.display.bottom_offset_y));
+    row(6, 564, GBA_L("透明度"), opacityValue(state.display.bottom_opacity));
 }
 
 void DrawOverlaySidebar(const State& state) {
@@ -1519,12 +1520,12 @@ void DrawOverlaySidebar(const State& state) {
     Rect(PanelX, 0, 480, 720, {0.015f, 0.020f, 0.030f, 0.97f});
     Rect(PanelX, 0, 1, 720, {1.0f, 1.0f, 1.0f, 0.18f});
     IconCentered(850, 47, 27, Cyan, 0xE53B);
-    Text(878, 54, 27, White, "遮罩选择");
-    Text(830, 88, 16, Muted, "选择 PNG 遮罩文件");
-    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩文件"}};
+    Text(878, 54, 27, White, GBA_L("遮罩选择"));
+    Text(830, 88, 16, Muted, GBA_L("选择 PNG 遮罩文件"));
+    const std::array<const char*, 2> labels{{GBA_L("遮罩开关"), GBA_L("遮罩文件")}};
     const std::array<std::string, 2> values{{
-        state.display.overlay_enabled ? "开启" : "关闭",
-        state.display.overlay_path.empty() ? "未选择" : Filename(state.display.overlay_path),
+        state.display.overlay_enabled ? GBA_L("开启") : GBA_L("关闭"),
+        state.display.overlay_path.empty() ? GBA_L("未选择") : Filename(state.display.overlay_path),
     }};
     for (int row = 0; row < 2; ++row) {
         const float y = 132.0f + row * 66.0f;
@@ -1540,7 +1541,7 @@ void DrawOverlaySidebar(const State& state) {
         if (row == 1) IconCentered(RowX + RowW - 20, y + 27, 23, Cyan, 0xE5CC);
     }
     IconCentered(1030, 672, 27, Muted, NintendoIconB);
-    Text(1052, 681, 18, Muted, "返回并保存");
+    Text(1052, 681, 18, Muted, GBA_L("返回并保存"));
 }
 
 std::string FormatBytes(u64 bytes) {
@@ -1590,7 +1591,7 @@ void DrawFilePicker(const State& state) {
     const int first = std::clamp(focus - VisibleRows / 2, 0,
                                  std::max(0, count - VisibleRows));
     if (count == 0) {
-        Text(48, 180, 22, Muted, "目录中暂无可用 PNG 文件");
+        Text(48, 180, 22, Muted, GBA_L("目录中暂无可用 PNG 文件"));
     }
     for (int row = 0; row < std::min(VisibleRows, count - first); ++row) {
         const int index = first + row;
@@ -1610,7 +1611,7 @@ void DrawFilePicker(const State& state) {
              entry.name);
         std::string meta;
         if (entry.directory) {
-            meta = entry.name == ".." ? "上级目录" : "文件夹";
+            meta = entry.name == ".." ? GBA_L("上级目录") : GBA_L("文件夹");
         } else {
             meta = FormatBytes(entry.size);
             if (!entry.modified_time.empty()) meta += "   " + entry.modified_time;
@@ -1643,10 +1644,10 @@ void DrawFilePicker(const State& state) {
                     0, 0, 1, 1, {1, 1, 1, 1}, 2.0f);
             preview_vertex_count = 6;
         } else {
-            Text(498, 350, 22, Muted, "图片预览加载失败");
+            Text(498, 350, 22, Muted, GBA_L("图片预览加载失败"));
         }
         Text(60, 61, 24, White,
-             state.file_preview_path.empty() ? "图片预览" : Filename(state.file_preview_path));
+             state.file_preview_path.empty() ? GBA_L("图片预览") : Filename(state.file_preview_path));
     }
 
     const float footer_y = 720.0f - FooterH;
@@ -1660,10 +1661,10 @@ void DrawFilePicker(const State& state) {
         Text(right + 44, footer_y + 57, 26, color, label);
         right -= 34.0f;
     };
-    hint(NintendoIconA, state.file_preview ? "关闭" : "选择", Cyan, 112.0f);
-    hint(NintendoIconB, state.file_preview ? "关闭" : "返回", White, 112.0f);
+    hint(NintendoIconA, state.file_preview ? GBA_L("关闭") : GBA_L("选择"), Cyan, 112.0f);
+    hint(NintendoIconB, state.file_preview ? GBA_L("关闭") : GBA_L("返回"), White, 112.0f);
     if (!state.file_preview && selected_image) {
-        hint(NintendoIconX, "预览", Muted, 112.0f);
+        hint(NintendoIconX, GBA_L("预览"), Muted, 112.0f);
     }
 }
 
@@ -1671,9 +1672,9 @@ void DrawPortraitFooter(const State& state) {
     constexpr std::array<float, 4> Muted{0.72f, 0.80f, 0.88f, 0.78f};
     const float y = canvas_height - 38.0f;
     IconCentered(482, y, 27, Muted, NintendoIconB);
-    Text(504, y + 9, 19, Muted, state.content_focused ? "返回列表" : "返回");
+    Text(504, y + 9, 19, Muted, state.content_focused ? GBA_L("返回列表") : GBA_L("返回"));
     IconCentered(618, y, 27, Muted, NintendoIconA);
-    Text(640, y + 9, 19, Muted, "确定");
+    Text(640, y + 9, 19, Muted, GBA_L("确定"));
 }
 
 void DrawPortraitCustomLayoutSidebar(const State& state) {
@@ -1685,8 +1686,8 @@ void DrawPortraitCustomLayoutSidebar(const State& state) {
     constexpr float RowH = 64.0f;
 
     Rect(0, 0, canvas_width, canvas_height, {0.015f, 0.020f, 0.030f, 0.985f});
-    Text(30, 61, 27, White, "自定义画面布局");
-    Text(30, 94, 16, Muted, "B 返回并保存   A 重置当前项");
+    Text(30, 61, 27, White, GBA_L("自定义画面布局"));
+    Text(30, 94, 16, Muted, GBA_L("B 返回并保存   A 重置当前项"));
     Rect(28, 116, 664, 1, {1.0f, 1.0f, 1.0f, 0.18f});
 
     auto section = [&](float y, const char* label) {
@@ -1723,17 +1724,17 @@ void DrawPortraitCustomLayoutSidebar(const State& state) {
         return std::string{text};
     };
 
-    section(146, "上屏布局");
-    row(0, 180, "缩放", scale_value(state.display.top_scale));
-    row(1, 254, "X 偏移", offset_value(state.display.top_offset_x));
-    row(2, 328, "Y 偏移", offset_value(state.display.top_offset_y));
-    section(428, "下屏布局");
-    row(3, 462, "缩放", scale_value(state.display.bottom_scale));
-    row(4, 536, "X 偏移", offset_value(state.display.bottom_offset_x));
-    row(5, 610, "Y 偏移", offset_value(state.display.bottom_offset_y));
-    row(6, 684, "透明度", opacity_value(state.display.bottom_opacity));
+    section(146, GBA_L("上屏布局"));
+    row(0, 180, GBA_L("缩放"), scale_value(state.display.top_scale));
+    row(1, 254, GBA_L("X 偏移"), offset_value(state.display.top_offset_x));
+    row(2, 328, GBA_L("Y 偏移"), offset_value(state.display.top_offset_y));
+    section(428, GBA_L("下屏布局"));
+    row(3, 462, GBA_L("缩放"), scale_value(state.display.bottom_scale));
+    row(4, 536, GBA_L("X 偏移"), offset_value(state.display.bottom_offset_x));
+    row(5, 610, GBA_L("Y 偏移"), offset_value(state.display.bottom_offset_y));
+    row(6, 684, GBA_L("透明度"), opacity_value(state.display.bottom_opacity));
     IconCentered(466, canvas_height - 38.0f, 27, Muted, NintendoIconB);
-    Text(488, canvas_height - 29.0f, 19, Muted, "返回并保存");
+    Text(488, canvas_height - 29.0f, 19, Muted, GBA_L("返回并保存"));
 }
 
 void DrawPortraitOverlaySidebar(const State& state) {
@@ -1745,12 +1746,12 @@ void DrawPortraitOverlaySidebar(const State& state) {
 
     Rect(0, 0, canvas_width, canvas_height, {0.015f, 0.020f, 0.030f, 0.985f});
     IconCentered(50, 48, 27, Cyan, 0xE53B);
-    Text(78, 55, 27, White, "遮罩选择");
-    Text(30, 91, 16, Muted, "选择 PNG 遮罩文件");
-    const std::array<const char*, 2> labels{{"遮罩开关", "遮罩文件"}};
+    Text(78, 55, 27, White, GBA_L("遮罩选择"));
+    Text(30, 91, 16, Muted, GBA_L("选择 PNG 遮罩文件"));
+    const std::array<const char*, 2> labels{{GBA_L("遮罩开关"), GBA_L("遮罩文件")}};
     const std::array<std::string, 2> values{{
-        state.display.overlay_enabled ? "开启" : "关闭",
-        state.display.overlay_path.empty() ? "未选择" : Filename(state.display.overlay_path),
+        state.display.overlay_enabled ? GBA_L("开启") : GBA_L("关闭"),
+        state.display.overlay_path.empty() ? GBA_L("未选择") : Filename(state.display.overlay_path),
     }};
     for (int row = 0; row < 2; ++row) {
         const float y = 152.0f + row * 76.0f;
@@ -1770,7 +1771,7 @@ void DrawPortraitOverlaySidebar(const State& state) {
         }
     }
     IconCentered(466, canvas_height - 38.0f, 27, Muted, NintendoIconB);
-    Text(488, canvas_height - 29.0f, 19, Muted, "返回并保存");
+    Text(488, canvas_height - 29.0f, 19, Muted, GBA_L("返回并保存"));
 }
 
 void DrawPortraitFilePicker(const State& state) {
@@ -1797,7 +1798,7 @@ void DrawPortraitFilePicker(const State& state) {
     const int first = std::clamp(focus - VisibleRows / 2, 0,
                                  std::max(0, count - VisibleRows));
     if (count == 0) {
-        Text(42, 190, 21, Muted, "目录中暂无可用 PNG 文件");
+        Text(42, 190, 21, Muted, GBA_L("目录中暂无可用 PNG 文件"));
     }
     for (int row = 0; row < std::min(VisibleRows, count - first); ++row) {
         const int index = first + row;
@@ -1817,7 +1818,7 @@ void DrawPortraitFilePicker(const State& state) {
              entry.name);
         std::string meta;
         if (entry.directory) {
-            meta = entry.name == ".." ? "上级目录" : "文件夹";
+            meta = entry.name == ".." ? GBA_L("上级目录") : GBA_L("文件夹");
         } else {
             meta = FormatBytes(entry.size);
             if (!entry.modified_time.empty()) {
@@ -1851,10 +1852,10 @@ void DrawPortraitFilePicker(const State& state) {
                     {1, 1, 1, 1}, 2.0f);
             preview_vertex_count = 6;
         } else {
-            Text(246, 620, 21, Muted, "图片预览加载失败");
+            Text(246, 620, 21, Muted, GBA_L("图片预览加载失败"));
         }
         Text(42, 62, 23, White,
-             state.file_preview_path.empty() ? "图片预览" : Filename(state.file_preview_path));
+             state.file_preview_path.empty() ? GBA_L("图片预览") : Filename(state.file_preview_path));
     }
 
     const float footer_y = canvas_height - FooterH;
@@ -1867,10 +1868,10 @@ void DrawPortraitFilePicker(const State& state) {
         Text(right + 38, footer_y + 40, 22, color, label);
         right -= 24.0f;
     };
-    hint(NintendoIconA, state.file_preview ? "关闭" : "选择", Cyan, 100.0f);
-    hint(NintendoIconB, state.file_preview ? "关闭" : "返回", White, 100.0f);
+    hint(NintendoIconA, state.file_preview ? GBA_L("关闭") : GBA_L("选择"), Cyan, 100.0f);
+    hint(NintendoIconB, state.file_preview ? GBA_L("关闭") : GBA_L("返回"), White, 100.0f);
     if (!state.file_preview && selected_image) {
-        hint(NintendoIconX, "预览", Muted, 100.0f);
+        hint(NintendoIconX, GBA_L("预览"), Muted, 100.0f);
     }
 }
 
@@ -1909,7 +1910,7 @@ void DrawPortraitMenu(const State& state) {
         Rect(0, strip * 160.0f, canvas_width, 160.0f,
              {0.08f - t * 0.03f, 0.10f - t * 0.04f, 0.13f - t * 0.05f, 0.94f});
     }
-    Text(36, 60, 27, White, "游戏菜单");
+    Text(36, 60, 27, White, GBA_L("游戏菜单"));
     Rect(28, 92, 664, 1, {1, 1, 1, 0.18f});
     Rect(DividerX, 110, 1, 1040, {1, 1, 1, 0.10f});
     Rect(DividerX + 1, 110, 409, 1040, {0.015f, 0.020f, 0.030f, 0.48f});
@@ -1982,18 +1983,18 @@ void DrawPortraitMenu(const State& state) {
             char slot_name[32]{};
             if (quick_slot) {
                 std::snprintf(slot_name, sizeof(slot_name),
-                              item == Item::SaveState ? "快速存档" : "快速读档");
+                              item == Item::SaveState ? GBA_L("快速存档") : GBA_L("快速读档"));
             } else {
-                std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
+                std::snprintf(slot_name, sizeof(slot_name), GBA_L("档位 %d"), slot + 1);
             }
             Text(ContentX + 16, y + 33, 20, White, slot_name);
-            const char* status = occupied ? "已有状态" : quick_slot ? "专用快速槽" : "空存档槽";
+            const std::string status = occupied ? GBA_L("已有状态") : quick_slot ? GBA_L("专用快速槽") : GBA_L("空存档槽");
             TextRight(ContentX + ContentW - 20, y + 32, 16, occupied ? Cyan : Muted, status);
         }
     } else if (item == Item::Display) {
         const std::array<const char*, 10> labels{{
-            "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局", "自定义画面布局", "画面方向",
-            "屏幕间距", "遮罩选择", "同步遮罩", "同步画面设置",
+            GBA_L("快进倍率"), GBA_L("3D分辨率"), GBA_L("整数倍缩放"), GBA_L("屏幕布局"), GBA_L("自定义画面布局"), GBA_L("画面方向"),
+            GBA_L("屏幕间距"), GBA_L("遮罩选择"), GBA_L("同步遮罩"), GBA_L("同步画面设置"),
         }};
         const std::array<int, 10> icons{{
             0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
@@ -2010,14 +2011,14 @@ void DrawPortraitMenu(const State& state) {
                       state.display.fast_forward_multiplier);
         values[0] = multiplier;
         values[1] = std::to_string(state.display.internal_resolution) + "x";
-        values[2] = state.display.integer_scale ? "开启" : "关闭";
+        values[2] = state.display.integer_scale ? GBA_L("开启") : GBA_L("关闭");
         values[3] = DisplayLayoutLabel(state.display.screen_layout);
-        values[4] = custom_enabled ? "调整" : "不可用";
+        values[4] = custom_enabled ? GBA_L("调整") : GBA_L("不可用");
         values[5] = std::to_string(state.display.screen_orientation) + "°";
         values[6] = std::to_string(state.display.screen_gap) + " px";
-        values[7] = state.display.overlay_enabled ? "已开启" : "设置";
-        values[8] = "执行";
-        values[9] = "执行";
+        values[7] = state.display.overlay_enabled ? GBA_L("已开启") : GBA_L("设置");
+        values[8] = GBA_L("执行");
+        values[9] = GBA_L("执行");
         constexpr std::array<float, 10> RowY{{220.0f, 278.0f, 336.0f, 424.0f, 482.0f,
                                                540.0f, 598.0f, 686.0f, 744.0f, 802.0f}};
         const int focus = state.content_focused
@@ -2025,9 +2026,9 @@ void DrawPortraitMenu(const State& state) {
                               : 0;
         Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
         Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
-        Text(ContentX, 200, 18, Cyan, "基础画面设置");
-        Text(ContentX, 402, 18, Cyan, "布局设置");
-        Text(ContentX, 664, 18, Cyan, "个性化设置");
+        Text(ContentX, 200, 18, Cyan, GBA_L("基础画面设置"));
+        Text(ContentX, 402, 18, Cyan, GBA_L("布局设置"));
+        Text(ContentX, 664, 18, Cyan, GBA_L("个性化设置"));
         for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
             const bool focused = state.content_focused && focus == row;
             const bool enabled = row != 4 || custom_enabled;
@@ -2041,18 +2042,18 @@ void DrawPortraitMenu(const State& state) {
         }
     } else if (item == Item::Runtime) {
         const std::array<const char*, 6> labels{{
-            "FPS 显示", "禁用右眼渲染", "各向异性过滤", "CPU 时钟频率", "视频 CPU 节流",
-            "视频节流时钟",
+            GBA_L("FPS 显示"), GBA_L("禁用右眼渲染"), GBA_L("各向异性过滤"), GBA_L("CPU 时钟频率"), GBA_L("视频 CPU 节流"),
+            GBA_L("视频节流时钟"),
         }};
         const std::array<int, 6> icons{{0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5}};
         const std::array<std::string, 6> values{{
-            state.runtime.fps_counter ? "开启" : "关闭",
-            state.runtime.disable_right_eye ? "开启" : "关闭",
+            state.runtime.fps_counter ? GBA_L("开启") : GBA_L("关闭"),
+            state.runtime.disable_right_eye ? GBA_L("开启") : GBA_L("关闭"),
             state.runtime.anisotropic_filtering == 0
-                ? "关闭"
+                ? GBA_L("关闭")
                 : std::to_string(1 << state.runtime.anisotropic_filtering) + "x",
             std::to_string(state.runtime.cpu_clock_percentage) + "%",
-            state.runtime.movie_cpu_throttle ? "开启" : "关闭",
+            state.runtime.movie_cpu_throttle ? GBA_L("开启") : GBA_L("关闭"),
             std::to_string(state.runtime.movie_throttle_clock) + "%",
         }};
         constexpr std::array<float, 6> RowY{{220.0f, 278.0f, 336.0f, 426.0f, 484.0f, 542.0f}};
@@ -2061,8 +2062,8 @@ void DrawPortraitMenu(const State& state) {
                               : 0;
         Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
         Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
-        Text(ContentX, 200, 18, Cyan, "即时画面设置");
-        Text(ContentX, 404, 18, Cyan, "性能视频和输入");
+        Text(ContentX, 200, 18, Cyan, GBA_L("即时画面设置"));
+        Text(ContentX, 404, 18, Cyan, GBA_L("性能视频和输入"));
         for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
             draw_row(RowY[row], 48.0f, icons[row], labels[row], values[row],
                      state.content_focused && focus == row, row == 2 || row == 3 || row == 5,
@@ -2073,8 +2074,8 @@ void DrawPortraitMenu(const State& state) {
         if (count == 0) {
             Rect(ContentX, 200, ContentW, 58, {1, 1, 1, 0.045f});
             Border(ContentX, 200, ContentW, 58, 1, {1, 1, 1, 0.10f});
-            Text(ContentX + 20, 237, 21, Muted, "暂无金手指");
-            Text(ContentX, 316, 20, Muted, "已加载的金手指会在这里显示");
+            Text(ContentX + 20, 237, 21, Muted, GBA_L("暂无金手指"));
+            Text(ContentX, 316, 20, Muted, GBA_L("已加载的金手指会在这里显示"));
         } else {
             constexpr float RowH = 52.0f;
             constexpr float RowGap = 4.0f;
@@ -2095,18 +2096,18 @@ void DrawPortraitMenu(const State& state) {
                     Border(ContentX, y, ContentW, RowH, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
                 }
                 constexpr float NameMaxWidth = 268.0f;
-                const std::string name = cheat.name.empty() ? "未命名金手指" : cheat.name;
+                const std::string name = cheat.name.empty() ? std::string(GBA_L("未命名金手指")) : cheat.name;
                 Text(ContentX + 16, y + 33, 19, White,
                      focused ? ScrollUtf8(name, NameMaxWidth, 19.0f)
                              : EllipsizeUtf8(name, NameMaxWidth, 19.0f));
                 TextRight(ContentX + ContentW - 18, y + 32, 17,
-                          cheat.enabled ? Cyan : Muted, cheat.enabled ? "开启" : "关闭");
+                          cheat.enabled ? Cyan : Muted, cheat.enabled ? GBA_L("开启") : GBA_L("关闭"));
             }
         }
     } else {
-        const char* body = "按 A 继续游戏";
-        if (item == Item::Reset) body = "按 A 重置游戏，未保存的进度可能丢失";
-        if (item == Item::Exit) body = "按 A 安全关闭模拟器并返回启动器";
+        std::string body = GBA_L("按 A 继续游戏");
+        if (item == Item::Reset) body = GBA_L("按 A 重置游戏，未保存的进度可能丢失");
+        if (item == Item::Exit) body = GBA_L("按 A 安全关闭模拟器并返回启动器");
         Text(ContentX, 310, 20, {0.80f, 0.90f, 0.98f, 0.86f}, body);
     }
 
@@ -2143,7 +2144,7 @@ void BuildMenu(const State& state) {
         Rect(0, strip * 90.0f, 1280, 90,
              {0.08f - t * 0.03f, 0.10f - t * 0.04f, 0.13f - t * 0.05f, 0.94f});
     }
-    Text(64, 58, 26, White, "游戏菜单");
+    Text(64, 58, 26, White, GBA_L("游戏菜单"));
     Rect(56, 92, 1168, 1, {1, 1, 1, 0.18f});
 
     constexpr float LeftX = 48.0f;
@@ -2202,20 +2203,20 @@ void BuildMenu(const State& state) {
             char slot_name[32]{};
             if (quick_slot) {
                 std::snprintf(slot_name, sizeof(slot_name),
-                              item == Item::SaveState ? "快速存档" : "快速读档");
+                              item == Item::SaveState ? GBA_L("快速存档") : GBA_L("快速读档"));
             } else {
-                std::snprintf(slot_name, sizeof(slot_name), "档位 %d", slot + 1);
+                std::snprintf(slot_name, sizeof(slot_name), GBA_L("档位 %d"), slot + 1);
             }
             Text(ContentX + 16, y + 28, 20, White, slot_name);
-            const char* status = occupied ? "已有状态"
-                                          : quick_slot ? "专用快速槽" : "空存档槽";
+            const std::string status = occupied ? GBA_L("已有状态")
+                                          : quick_slot ? GBA_L("专用快速槽") : GBA_L("空存档槽");
             TextRight(ContentX + 500, y + 27, 16, occupied ? Cyan : Muted, status);
         }
     } else if (item == Item::Display) {
         const std::array<const char*, 10> labels{{
-            "快进倍率", "3D分辨率", "整数倍缩放", "屏幕布局",
-            "自定义画面布局", "画面方向", "屏幕间距", "遮罩选择",
-            "同步遮罩", "同步画面设置",
+            GBA_L("快进倍率"), GBA_L("3D分辨率"), GBA_L("整数倍缩放"), GBA_L("屏幕布局"),
+            GBA_L("自定义画面布局"), GBA_L("画面方向"), GBA_L("屏幕间距"), GBA_L("遮罩选择"),
+            GBA_L("同步遮罩"), GBA_L("同步画面设置"),
         }};
         const std::array<int, 10> icons{{
             0xE01F, 0xE433, 0xE3F4, 0xE8F1, 0xE3C9, 0xE41A, 0xE8D4, 0xE53B,
@@ -2232,14 +2233,14 @@ void BuildMenu(const State& state) {
                       state.display.fast_forward_multiplier);
         values[0] = multiplier;
         values[1] = std::to_string(state.display.internal_resolution) + "x";
-        values[2] = state.display.integer_scale ? "开启" : "关闭";
+        values[2] = state.display.integer_scale ? GBA_L("开启") : GBA_L("关闭");
         values[3] = DisplayLayoutLabel(state.display.screen_layout);
-        values[4] = custom_enabled ? "调整" : "不可用";
+        values[4] = custom_enabled ? GBA_L("调整") : GBA_L("不可用");
         values[5] = std::to_string(state.display.screen_orientation) + "°";
         values[6] = std::to_string(state.display.screen_gap) + " px";
-        values[7] = state.display.overlay_enabled ? "已开启" : "设置";
-        values[8] = "执行";
-        values[9] = "执行";
+        values[7] = state.display.overlay_enabled ? GBA_L("已开启") : GBA_L("设置");
+        values[8] = GBA_L("执行");
+        values[9] = GBA_L("执行");
         constexpr float HeaderY = 150.0f;
         constexpr float HeaderSize = 27.0f;
         constexpr float SectionSize = 18.0f;
@@ -2268,9 +2269,9 @@ void BuildMenu(const State& state) {
             }
             Text(ContentX, y, SectionSize, Cyan, title);
         };
-        draw_section(0, "基础画面设置");
-        draw_section(1, "布局设置");
-        draw_section(2, "个性化设置");
+        draw_section(0, GBA_L("基础画面设置"));
+        draw_section(1, GBA_L("布局设置"));
+        draw_section(2, GBA_L("个性化设置"));
         for (int row = 0; row < 10; ++row) {
             const float y = RowY[row] - scroll_y;
             if (y + RowH < ViewTop || y > ViewBottom) {
@@ -2304,20 +2305,20 @@ void BuildMenu(const State& state) {
         }
     } else if (item == Item::Runtime) {
         const std::array<const char*, 6> labels{{
-            "FPS 显示", "禁用右眼渲染", "各向异性过滤", "CPU 时钟频率", "视频 CPU 节流",
-            "视频节流时钟",
+            GBA_L("FPS 显示"), GBA_L("禁用右眼渲染"), GBA_L("各向异性过滤"), GBA_L("CPU 时钟频率"), GBA_L("视频 CPU 节流"),
+            GBA_L("视频节流时钟"),
         }};
         const std::array<int, 6> icons{{
             0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5,
         }};
         std::array<std::string, 6> values{};
-        values[0] = state.runtime.fps_counter ? "开启" : "关闭";
-        values[1] = state.runtime.disable_right_eye ? "开启" : "关闭";
+        values[0] = state.runtime.fps_counter ? GBA_L("开启") : GBA_L("关闭");
+        values[1] = state.runtime.disable_right_eye ? GBA_L("开启") : GBA_L("关闭");
         values[2] = state.runtime.anisotropic_filtering == 0
-                        ? "关闭"
+                        ? GBA_L("关闭")
                         : std::to_string(1 << state.runtime.anisotropic_filtering) + "x";
         values[3] = std::to_string(state.runtime.cpu_clock_percentage) + "%";
-        values[4] = state.runtime.movie_cpu_throttle ? "开启" : "关闭";
+        values[4] = state.runtime.movie_cpu_throttle ? GBA_L("开启") : GBA_L("关闭");
         values[5] = std::to_string(state.runtime.movie_throttle_clock) + "%";
         constexpr float HeaderY = 150.0f;
         constexpr float HeaderSize = 27.0f;
@@ -2333,8 +2334,8 @@ void BuildMenu(const State& state) {
                               : 0;
         Text(ContentX, HeaderY, HeaderSize, White, ItemLabels[selected]);
         Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
-        Text(ContentX, 176.0f, SectionSize, Cyan, "即时画面设置");
-        Text(ContentX, 404.0f, SectionSize, Cyan, "性能视频和输入");
+        Text(ContentX, 176.0f, SectionSize, Cyan, GBA_L("即时画面设置"));
+        Text(ContentX, 404.0f, SectionSize, Cyan, GBA_L("性能视频和输入"));
         for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
             const float y = RowY[row];
             const bool focused = state.content_focused && focus == row;
@@ -2359,8 +2360,8 @@ void BuildMenu(const State& state) {
         if (count == 0) {
             Rect(ContentX, 184, ContentW, 58, {1, 1, 1, 0.045f});
             Border(ContentX, 184, ContentW, 58, 1, {1, 1, 1, 0.10f});
-            Text(ContentX + 20, 221, 21, Muted, "暂无金手指");
-            Text(ContentX, 300, 20, Muted, "已加载的金手指会在这里显示");
+            Text(ContentX + 20, 221, 21, Muted, GBA_L("暂无金手指"));
+            Text(ContentX, 300, 20, Muted, GBA_L("已加载的金手指会在这里显示"));
         } else {
             constexpr float RowH = 42.0f;
             constexpr float RowGap = 4.0f;
@@ -2381,25 +2382,25 @@ void BuildMenu(const State& state) {
                     Border(ContentX, y, 660, RowH, 1.0f, {0.24f, 0.24f, 0.24f, 0.50f});
                 }
                 constexpr float NameMaxWidth = 548.0f;
-                const std::string name = cheat.name.empty() ? "未命名金手指" : cheat.name;
+                const std::string name = cheat.name.empty() ? std::string(GBA_L("未命名金手指")) : cheat.name;
                 Text(ContentX + 16, y + 28, 19, White,
                      focused ? ScrollUtf8(name, NameMaxWidth, 19.0f)
                              : EllipsizeUtf8(name, NameMaxWidth, 19.0f));
                 TextRight(ContentX + 634, y + 27, 17,
-                           cheat.enabled ? Cyan : Muted, cheat.enabled ? "开启" : "关闭");
+                           cheat.enabled ? Cyan : Muted, cheat.enabled ? GBA_L("开启") : GBA_L("关闭"));
             }
         }
     } else {
-        const char* body = "按 A 继续游戏";
-        if (item == Item::Reset) body = "按 A 重置游戏，未保存的进度可能丢失";
-        if (item == Item::Exit) body = "按 A 安全关闭模拟器并返回启动器";
+        std::string body = GBA_L("按 A 继续游戏");
+        if (item == Item::Reset) body = GBA_L("按 A 重置游戏，未保存的进度可能丢失");
+        if (item == Item::Exit) body = GBA_L("按 A 安全关闭模拟器并返回启动器");
         Text(ContentX, 260, 26, {0.80f, 0.90f, 0.98f, 0.86f}, body);
     }
 
     IconCentered(1020, 678, 27, Muted, NintendoIconB);
-    Text(1042, 687, 19, Muted, state.content_focused ? "返回列表" : "返回");
+    Text(1042, 687, 19, Muted, state.content_focused ? GBA_L("返回列表") : GBA_L("返回"));
     IconCentered(1152, 678, 27, Muted, NintendoIconA);
-    Text(1174, 687, 19, Muted, "确定");
+    Text(1174, 687, 19, Muted, GBA_L("确定"));
     DrawToast(state);
 }
 

@@ -689,6 +689,17 @@ public:
     }
 
     std::string GetConfiguredSystemLanguage() const {
+        // The launcher's UI.language (config.cfg, zh-CN / en-US) takes priority
+        // so the frontend and cores switch language together.
+        if (const auto v = GetFirstOptional({"UI.language"});
+            v) {
+            if (*v == "en-US" || *v == "en") {
+                return "en-US";
+            }
+            if (*v == "zh-CN" || *v == "zh-Hans" || *v == "zh") {
+                return "zh-CN";
+            }
+        }
         if (const auto v = GetFirstOptional({"language", "system_language", "citra_language"});
             v) {
             return *v;
