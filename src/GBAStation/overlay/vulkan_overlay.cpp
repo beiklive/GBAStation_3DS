@@ -18,6 +18,7 @@
 #include "GBAStation/input_mapping.h"
 #include "GBAStation/overlay/overlay_ui.h"
 #include "GBAStation/overlay/vulkan_menu_renderer.h"
+#include "GBAStation/overlay/gbastation_language.h"
 #include "GBAStation/overlay/vulkan_overlay.h"
 #include "audio_core/libnx_sink.h"
 #include "common/logging/log.h"
@@ -859,17 +860,17 @@ void Update(PadState* pad) {
                                       true);
                     } else {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
-                        OverlayUI::ShowToast("该存档位为空");
+                        OverlayUI::ShowToast(GBA_L("该存档位为空"));
                     }
                 } else if (item == VulkanMenuRenderer::Item::Cheats) {
                     const auto cheats = OverlayUI::GetCheats();
                     if (focus >= 0 && focus < static_cast<int>(cheats.size())) {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Click);
                         const bool toggled = OverlayUI::ToggleCheat(focus);
-                        OverlayUI::ShowToast(toggled ? "金手指已切换" : "金手指设置失败");
+                        OverlayUI::ShowToast(toggled ? GBA_L("金手指已切换") : GBA_L("金手指设置失败"));
                     } else {
                         AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
-                        OverlayUI::ShowToast("暂无可用金手指");
+                        OverlayUI::ShowToast(GBA_L("暂无可用金手指"));
                     }
                 } else if (item == VulkanMenuRenderer::Item::Display) {
                     if (focus == 2) {
@@ -901,7 +902,7 @@ void Update(PadState* pad) {
                     HandleRuntimeAdjustment(focus, 1);
                 } else {
                     AudioCore::PlayLibnxUiSound(AudioCore::LibnxUiSound::Error);
-                    OverlayUI::ShowToast("暂无可用金手指");
+                    OverlayUI::ShowToast(GBA_L("暂无可用金手指"));
                 }
             }
         }

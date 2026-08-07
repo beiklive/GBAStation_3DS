@@ -37,6 +37,7 @@
 #include "GBAStation/game_db.h"
 #include "GBAStation/input_mapping.h"
 #include "GBAStation/overlay/overlay_ui.h"
+#include "GBAStation/overlay/gbastation_language.h"
 #include "GBAStation/overlay/gbastation_config.h"
 #include "GBAStation/overlay/vulkan_overlay.h"
 #include "GBAStation/switch_keyboard.h"
@@ -1319,17 +1320,17 @@ CiaTitleKind ClassifyCiaTitle(u64 program_id) {
 const char* CiaTitleKindName(CiaTitleKind kind) {
     switch (kind) {
     case CiaTitleKind::Application:
-        return "游戏";
+        return GBA_L("游戏");
     case CiaTitleKind::Demo:
-        return "试玩";
+        return GBA_L("试玩");
     case CiaTitleKind::Update:
-        return "更新";
+        return GBA_L("更新");
     case CiaTitleKind::AddOnContent:
         return "DLC";
     case CiaTitleKind::System:
-        return "系统";
+        return GBA_L("系统");
     default:
-        return "其他";
+        return GBA_L("其他");
     }
 }
 
@@ -1581,7 +1582,7 @@ std::vector<CiaBrowserEntry> ListCiaInstallEntries(const std::string& directory)
     std::vector<CiaBrowserEntry> dirs;
     std::vector<CiaBrowserEntry> cias;
     if (!ParentDirectory(directory).empty()) {
-        dirs.push_back({CiaBrowserEntry::Type::Parent, "返回上一级", ParentDirectory(directory)});
+        dirs.push_back({CiaBrowserEntry::Type::Parent, GBA_L("返回上一级"), ParentDirectory(directory)});
     }
 
     DIR* dir = opendir(directory.c_str());
@@ -1627,17 +1628,17 @@ std::vector<CiaBrowserEntry> ListCiaInstallEntries(const std::string& directory)
 const char* InstallStatusText(Service::AM::InstallStatus status) {
     switch (status) {
     case Service::AM::InstallStatus::Success:
-        return "安装完成";
+        return GBA_L("安装完成");
     case Service::AM::InstallStatus::ErrorFileNotFound:
-        return "文件不存在";
+        return GBA_L("文件不存在");
     case Service::AM::InstallStatus::ErrorFailedToOpenFile:
-        return "无法打开文件";
+        return GBA_L("无法打开文件");
     case Service::AM::InstallStatus::ErrorAborted:
-        return "安装被中断";
+        return GBA_L("安装被中断");
     case Service::AM::InstallStatus::ErrorEncrypted:
-        return "CIA已加密，请先解密或补充aes_keys.txt";
+        return GBA_L("CIA已加密，请先解密或补充aes_keys.txt");
     default:
-        return "不是有效的CIA文件";
+        return GBA_L("不是有效的CIA文件");
     }
 }
 
@@ -1911,8 +1912,8 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
         return;
     }
     canvas.FillRect(0, 0, 1280, 90, {17, 22, 31, 255});
-    canvas.Text(44, 58, "CIA安装", 34, text);
-    const std::string toggle = std::string{"安装完成删除源文件 "} + (delete_source ? "开" : "关");
+    canvas.Text(44, 58, GBA_L("CIA安装"), 34, text);
+    const std::string toggle = std::string{GBA_L("安装完成删除源文件 ")} + (delete_source ? "开" : "关");
     canvas.Text(1280 - 44 - canvas.Measure(toggle, 22), 56, toggle, 22,
                 delete_source ? accent : dim);
     canvas.Text(44, 116, canvas.Truncate(directory, 20, 960), 20, accent);
@@ -1920,7 +1921,7 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
     canvas.FillRect(35, 131, 1210, 504, panel);
 
     if (entries.empty()) {
-        canvas.Text(74, 190, "当前目录没有CIA/zCIA文件或子目录", 24, dim);
+        canvas.Text(74, 190, GBA_L("当前目录没有CIA/zCIA文件或子目录"), 24, dim);
     }
 
     constexpr int row_h = 48;
@@ -1935,13 +1936,13 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
         Rgba name_color = entry.readable || entry.type != CiaBrowserEntry::Type::Cia ? text : error;
         std::string name = entry.name;
         if (entry.type == CiaBrowserEntry::Type::Parent) {
-            name = "..  返回上一级";
+            name = GBA_L("..  返回上一级");
         }
         canvas.Text(78, y + 30, canvas.Truncate(name, 21, 640), 21, name_color);
         if (entry.type == CiaBrowserEntry::Type::Directory) {
-            canvas.Text(1080, y + 30, "目录", 18, dim);
+            canvas.Text(1080, y + 30, GBA_L("目录"), 18, dim);
         } else if (entry.type == CiaBrowserEntry::Type::Cia) {
-            const std::string badge = entry.readable ? CiaTitleKindName(entry.kind) : "无效";
+            const std::string badge = entry.readable ? CiaTitleKindName(entry.kind) : GBA_L("无效");
             canvas.Text(790, y + 30, FormatBytes(entry.size), 18, dim);
             if (entry.readable) {
                 canvas.Text(900, y + 30, FormatTitleVersion(entry.version), 18, dim);
@@ -1953,8 +1954,8 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
     if (!notice.empty()) {
         canvas.Text(54, 674, canvas.Truncate(notice, 20, 560), 20, accent);
     }
-    canvas.Text(640, 656, "A 确认   B 返回/取消安装", 18, dim);
-    canvas.Text(640, 688, "X 删除源文件   Y 全部安装   + 返回", 18, dim);
+    canvas.Text(640, 656, GBA_L("A 确认   B 返回/取消安装"), 18, dim);
+    canvas.Text(640, 688, GBA_L("X 删除源文件   Y 全部安装   + 返回"), 18, dim);
 
     if (install_state.active.load(std::memory_order_acquire)) {
         const std::size_t written = install_state.written.load(std::memory_order_acquire);
@@ -1964,7 +1965,7 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
         canvas.FillRect(0, 0, 1280, 720, {0, 0, 0, 150});
         canvas.FillRect(360, 278, 560, 150, {28, 34, 45, 255});
         canvas.Border(360, 278, 560, 150, {80, 96, 120, 255});
-        std::string title = "正在安装 ";
+        std::string title = GBA_L("正在安装 ");
         if (batch_total > 1) {
             title += std::to_string(batch_index) + "/" + std::to_string(batch_total) + " ";
         }
@@ -1975,8 +1976,8 @@ void DrawCiaInstaller(CiaInstallerCanvas& canvas, const std::string& directory,
         canvas.FillRect(390, 350, std::clamp(fill, 0, 500), 12, accent);
         canvas.Text(390, 396, FormatBytes(written) + " / " + FormatBytes(total), 19, dim);
         canvas.Text(390, 418, install_state.cancel_requested.load(std::memory_order_acquire)
-                                 ? "正在取消当前安装..."
-                                 : "按 B 取消当前安装",
+                                 ? GBA_L("正在取消当前安装...")
+                                 : GBA_L("按 B 取消当前安装"),
                     18, accent);
     }
     canvas.End();
@@ -1992,7 +1993,7 @@ void DrawCiaMessage(CiaInstallerCanvas& canvas, const std::string& title,
     canvas.Border(320, 250, 640, 210, {80, 96, 120, 255});
     canvas.Text(360, 310, title, 30, {238, 243, 250, 255});
     canvas.Text(360, 360, canvas.Truncate(message, 22, 560), 22, {172, 184, 200, 255});
-    canvas.Text(360, 420, "按 A 或 B 返回文件列表", 20, {74, 170, 255, 255});
+    canvas.Text(360, 420, GBA_L("按 A 或 B 返回文件列表"), 20, {74, 170, 255, 255});
     canvas.End();
 }
 
@@ -2006,14 +2007,14 @@ void DrawCiaInstallAllConfirm(CiaInstallerCanvas& canvas, std::size_t count, boo
     canvas.FillRect(0, 0, 1280, 720, {13, 16, 22, 255});
     canvas.FillRect(260, 216, 760, 288, {28, 34, 45, 255});
     canvas.Border(260, 216, 760, 288, {80, 96, 120, 255});
-    canvas.Text(304, 276, "全部安装", 32, text);
-    canvas.Text(304, 328, "是否安装当前目录中的 " + std::to_string(count) + " 个CIA文件？", 24,
+    canvas.Text(304, 276, GBA_L("全部安装"), 32, text);
+    canvas.Text(304, 328, GBA_L("是否安装当前目录中的 ") + std::to_string(count) + GBA_L(" 个CIA文件？"), 24,
                 dim);
-    canvas.Text(304, 372, "安装顺序：游戏 > 更新 > DLC > 系统/其他", 21, accent);
+    canvas.Text(304, 372, GBA_L("安装顺序：游戏 > 更新 > DLC > 系统/其他"), 21, accent);
     canvas.Text(304, 412,
-                std::string{"安装成功后删除源文件："} + (delete_source ? "开" : "关"), 21,
+                std::string{GBA_L("安装成功后删除源文件：")} + (delete_source ? "开" : "关"), 21,
                 delete_source ? accent : dim);
-    canvas.Text(304, 466, "A 全部安装   B 取消", 21, accent);
+    canvas.Text(304, 466, GBA_L("A 全部安装   B 取消"), 21, accent);
     canvas.End();
 }
 
@@ -2107,7 +2108,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                                    std::size_t current_batch_index,
                                    std::size_t current_batch_total) {
         if (!entry.readable) {
-            notice = entry.name + ": 不是有效的CIA";
+            notice = entry.name + GBA_L(": 不是有效的CIA");
             return;
         }
         if (install_thread.joinable()) {
@@ -2171,22 +2172,22 @@ int RunCiaInstaller(const LaunchOptions& options) {
                             options.display_settings, logo_path, save_path,
                             TitleIdString(entry.program_id));
                     install_state.message = install_state.success
-                                                ? "安装成功，已添加到数据库"
-                                                : "安装成功，但写入数据库失败";
+                                                ? GBA_L("安装成功，已添加到数据库")
+                                                : GBA_L("安装成功，但写入数据库失败");
                 } else {
                     install_state.message =
-                        std::string{"安装成功，"} + CiaTitleKindName(entry.kind) +
-                        "类型未添加到数据库";
+                        std::string{GBA_L("安装成功，")} + CiaTitleKindName(entry.kind) +
+                        GBA_L("类型未添加到数据库");
                 }
                 if (install_state.success && delete_after_install) {
                     if (install_state.cancel_requested.load(std::memory_order_acquire)) {
-                        install_state.message += "，已取消删除源文件";
+                        install_state.message += GBA_L("，已取消删除源文件");
                     } else {
                         const int remove_rc = std::remove(entry.path.c_str());
                         DebugLog("CIA source delete path=%s rc=%d", entry.path.c_str(),
                                  remove_rc);
                         if (remove_rc != 0) {
-                            install_state.message += "，删除源文件失败";
+                            install_state.message += GBA_L("，删除源文件失败");
                         }
                     }
                 }
@@ -2209,7 +2210,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
             if ((down & HidNpadButton_B) &&
                 !install_state.done.load(std::memory_order_acquire)) {
                 install_state.cancel_requested = true;
-                notice = batch_active ? "正在取消当前安装，随后停止全部安装" : "正在取消当前安装";
+                notice = batch_active ? GBA_L("正在取消当前安装，随后停止全部安装") : GBA_L("正在取消当前安装");
                 DebugLog("CIA install cancel requested path=%s", install_state.source_path.c_str());
             }
             if (install_state.done.load(std::memory_order_acquire)) {
@@ -2220,8 +2221,8 @@ int RunCiaInstaller(const LaunchOptions& options) {
                 const bool cancelled = install_state.cancel_requested.load(std::memory_order_acquire) ||
                                        install_state.result == Service::AM::InstallStatus::ErrorAborted;
                 if (!batch_active) {
-                    acknowledge_result(cancelled ? "安装已取消"
-                                                : install_state.success ? "安装成功" : "安装失败",
+                    acknowledge_result(cancelled ? GBA_L("安装已取消")
+                                                : install_state.success ? GBA_L("安装成功") : GBA_L("安装失败"),
                                        install_state.message);
                     refresh();
                 } else {
@@ -2235,10 +2236,10 @@ int RunCiaInstaller(const LaunchOptions& options) {
                             batch_queue.size() - batch_index - (install_state.success ? 1 : 0);
                         batch_active = false;
                         acknowledge_result(
-                            "全部安装已取消",
-                            "已成功 " + std::to_string(batch_success) + " 个，失败 " +
-                                std::to_string(batch_failed) + " 个，剩余 " +
-                                std::to_string(remaining) + " 个未安装");
+                            GBA_L("全部安装已取消"),
+                            GBA_L("已成功 ") + std::to_string(batch_success) + GBA_L(" 个，失败 ") +
+                                std::to_string(batch_failed) + GBA_L(" 个，剩余 ") +
+                                std::to_string(remaining) + GBA_L(" 个未安装"));
                     } else {
                         ++batch_index;
                         if (batch_index < batch_queue.size()) {
@@ -2247,9 +2248,9 @@ int RunCiaInstaller(const LaunchOptions& options) {
                         } else {
                             batch_active = false;
                             acknowledge_result(
-                                batch_failed == 0 ? "全部安装完成" : "全部安装完成（有失败）",
-                                "成功 " + std::to_string(batch_success) + " 个，失败 " +
-                                    std::to_string(batch_failed) + " 个");
+                                batch_failed == 0 ? GBA_L("全部安装完成") : GBA_L("全部安装完成（有失败）"),
+                                GBA_L("成功 ") + std::to_string(batch_success) + GBA_L(" 个，失败 ") +
+                                    std::to_string(batch_failed) + GBA_L(" 个"));
                         }
                     }
                 }
@@ -2269,7 +2270,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
         if (down & HidNpadButton_Y) {
             std::vector<CiaBrowserEntry> queue = BuildCiaInstallQueue(entries);
             if (queue.empty()) {
-                notice = "当前目录没有可安装的CIA/zCIA文件";
+                notice = GBA_L("当前目录没有可安装的CIA/zCIA文件");
             } else if (ConfirmCiaInstallAll(canvas, queue.size(), delete_source)) {
                 batch_queue = std::move(queue);
                 batch_index = 0;
@@ -2279,7 +2280,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                 batch_delete_source = delete_source;
                 start_install(batch_queue.front(), batch_delete_source, 1, batch_queue.size());
             } else {
-                notice = "已取消全部安装";
+                notice = GBA_L("已取消全部安装");
             }
             DrawCiaInstaller(canvas, directory, entries, selected, scroll, delete_source,
                              install_state, notice);
@@ -2293,7 +2294,7 @@ int RunCiaInstaller(const LaunchOptions& options) {
                 scroll = 0;
                 refresh();
             } else {
-                notice = "已在根目录，按 + 返回主程序";
+                notice = GBA_L("已在根目录，按 + 返回主程序");
             }
         }
         if (down & HidNpadButton_Up) {
@@ -2424,9 +2425,9 @@ LaunchOptions ParseLaunchOptions(int argc, char** argv) {
         StartupLog("ParseLaunchOptions: no ROM argument, using fallback %s", FallbackRomPath);
     }
     if (options.install_cia_mode) {
-        options.title = "CIA安装";
+        options.title = GBA_L("CIA安装");
     } else if (options.uninstall_title_mode) {
-        options.title = "卸载3DS游戏";
+        options.title = GBA_L("卸载3DS游戏");
     } else {
         options.title = TitleFromPath(options.rom_path);
         const auto game_record = SwitchFrontend::GameDatabase::LoadGameRecord(options.rom_path);
@@ -3537,7 +3538,7 @@ int Run(int argc, char** argv) {
         }
         if (!menu_visible && cheat_settings_dirty->exchange(false, std::memory_order_acq_rel)) {
             system.CheatEngine().SaveLoadedCheatFile();
-            SwitchFrontend::OverlayUI::ShowToast("金手指设置已保存");
+            SwitchFrontend::OverlayUI::ShowToast(GBA_L("金手指设置已保存"));
             DebugLog("menu cheat settings persisted after close");
         }
         if (!menu_visible && block_game_input_until_release && padGetButtons(&pad) == 0) {
@@ -3551,7 +3552,7 @@ int Run(int argc, char** argv) {
             MirrorScreenSides(display);
             SwitchFrontend::VulkanOverlay::SetDisplaySettings(display);
             window.SetDisplaySettings(display);
-            SwitchFrontend::OverlayUI::ShowToast("已交换上下屏");
+            SwitchFrontend::OverlayUI::ShowToast(GBA_L("已交换上下屏"));
             DebugLog("hotkey swap screens: layout=%s swap=%d", display.screen_layout.c_str(),
                      Settings::values.swap_screen.GetValue() ? 1 : 0);
             block_game_input_until_release = true;
@@ -3564,12 +3565,12 @@ int Run(int argc, char** argv) {
                 mic_restore_input_type = Settings::values.input_type.GetValue();
                 Settings::values.input_type.SetValue(AudioCore::InputType::Static);
                 mic_input_simulated = true;
-                SwitchFrontend::OverlayUI::ShowToast("已开始模拟麦克风输入");
+                SwitchFrontend::OverlayUI::ShowToast(GBA_L("已开始模拟麦克风输入"));
                 DebugLog("hotkey microphone simulation on");
             } else {
                 Settings::values.input_type.SetValue(mic_restore_input_type);
                 mic_input_simulated = false;
-                SwitchFrontend::OverlayUI::ShowToast("已停止模拟麦克风输入");
+                SwitchFrontend::OverlayUI::ShowToast(GBA_L("已停止模拟麦克风输入"));
                 DebugLog("hotkey microphone simulation off");
             }
             Service::MIC::ReloadMic(system);
@@ -3613,16 +3614,16 @@ int Run(int argc, char** argv) {
                 char message[64]{};
                 if (slot == 0) {
                     std::snprintf(message, sizeof(message),
-                                  saving ? "准备快速存档" : "准备快速读档");
+                                  saving ? GBA_L("准备快速存档") : GBA_L("准备快速读档"));
                 } else {
-                    std::snprintf(message, sizeof(message), saving ? "准备保存到存档位 %d"
-                                                                    : "准备读取存档位 %d",
+                    std::snprintf(message, sizeof(message), saving ? GBA_L("准备保存到存档位 %d")
+                                                                    : GBA_L("准备读取存档位 %d"),
                                   slot);
                 }
                 SwitchFrontend::OverlayUI::ShowToast(message);
                 DebugLog("menu queued %s state slot=%d", saving ? "save" : "load", slot);
             } else {
-                SwitchFrontend::OverlayUI::ShowToast("已有状态操作正在进行");
+                SwitchFrontend::OverlayUI::ShowToast(GBA_L("已有状态操作正在进行"));
             }
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::Reset) {
@@ -3634,7 +3635,7 @@ int Run(int argc, char** argv) {
                 pending_overlay_reinit = true;
                 pause_frame_ready = false;
                 saw_guest_frame = false;
-                SwitchFrontend::OverlayUI::ShowToast("正在重置游戏");
+                SwitchFrontend::OverlayUI::ShowToast(GBA_L("正在重置游戏"));
                 DebugLog("menu requested game reset");
             }
             block_game_input_until_release = true;
@@ -3646,7 +3647,7 @@ int Run(int argc, char** argv) {
             LogSwitchDisplaySettings("preview", display);
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
-            SwitchFrontend::OverlayUI::ShowToast(saved ? "画面设置已保存" : "画面设置保存失败");
+            SwitchFrontend::OverlayUI::ShowToast(saved ? GBA_L("画面设置已保存") : GBA_L("画面设置保存失败"));
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::RuntimeSettingsChanged) {
             const auto runtime = SwitchFrontend::VulkanOverlay::GetRuntimeSettings();
@@ -3684,7 +3685,7 @@ int Run(int argc, char** argv) {
             SwitchFrontend::GBAStationConfig::SetConfigValue(
                 "movie_throttle_clock", std::to_string(runtime.movie_throttle_clock));
             const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
-            SwitchFrontend::OverlayUI::ShowToast(saved ? "运行设置已保存" : "运行设置保存失败");
+            SwitchFrontend::OverlayUI::ShowToast(saved ? GBA_L("运行设置已保存") : GBA_L("运行设置保存失败"));
             DebugLog("runtime menu settings: fps=%d custom_textures=%d texture_filter=%d "
                      "anisotropy=%dx right_eye_disabled=%d cpu_clock=%d movie_throttle=%d "
                      "movie_clock=%d pointer=%d saved=%d",
@@ -3710,8 +3711,8 @@ int Run(int argc, char** argv) {
             LogSwitchDisplaySettings("custom-commit-preview", display);
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
-            SwitchFrontend::OverlayUI::ShowToast(saved ? "自定义布局已保存"
-                                                        : "自定义布局保存失败");
+            SwitchFrontend::OverlayUI::ShowToast(saved ? GBA_L("自定义布局已保存")
+                                                        : GBA_L("自定义布局保存失败"));
             block_game_input_until_release = true;
         } else if (menu_action ==
                    SwitchFrontend::OverlayUI::Action::FastForwardMultiplierChanged) {
@@ -3722,8 +3723,8 @@ int Run(int argc, char** argv) {
             SwitchFrontend::GBAStationConfig::SetConfigValue("fastforward.multiplier", value);
             const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
             char message[64]{};
-            std::snprintf(message, sizeof(message), saved ? "快进倍率已设为 %.2fx"
-                                                         : "快进倍率保存失败",
+            std::snprintf(message, sizeof(message), saved ? GBA_L("快进倍率已设为 %.2fx")
+                                                         : GBA_L("快进倍率保存失败"),
                           multiplier);
             SwitchFrontend::OverlayUI::ShowToast(message);
             block_game_input_until_release = true;
@@ -3732,8 +3733,8 @@ int Run(int argc, char** argv) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
             const bool saved = SwitchFrontend::GameDatabase::SaveDisplaySettings(
                 launch_options.rom_path, launch_options.title, display);
-            SwitchFrontend::OverlayUI::ShowToast(saved ? "遮罩设置已保存"
-                                                        : "遮罩设置保存失败");
+            SwitchFrontend::OverlayUI::ShowToast(saved ? GBA_L("遮罩设置已保存")
+                                                        : GBA_L("遮罩设置保存失败"));
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::SyncOverlaySettings) {
             const auto display = SwitchFrontend::VulkanOverlay::GetDisplaySettings();
@@ -3748,8 +3749,8 @@ int Run(int argc, char** argv) {
                      current_saved ? 1 : 0, db_saved ? 1 : 0, config_saved ? 1 : 0, count,
                      display.overlay_enabled ? 1 : 0, display.overlay_path.c_str());
             char message[96]{};
-            std::snprintf(message, sizeof(message), saved ? "遮罩已同步到 %d 个游戏"
-                                                          : "遮罩同步失败",
+            std::snprintf(message, sizeof(message), saved ? GBA_L("遮罩已同步到 %d 个游戏")
+                                                          : GBA_L("遮罩同步失败"),
                           count);
             SwitchFrontend::OverlayUI::ShowToast(message);
             block_game_input_until_release = true;
@@ -3776,8 +3777,8 @@ int Run(int argc, char** argv) {
                      display.screen_layout.c_str(), display.screen_orientation,
                      display.internal_resolution, display.integer_scale ? 1 : 0);
             char message[96]{};
-            std::snprintf(message, sizeof(message), saved ? "画面设置已同步到 %d 个游戏"
-                                                          : "画面设置同步失败",
+            std::snprintf(message, sizeof(message), saved ? GBA_L("画面设置已同步到 %d 个游戏")
+                                                          : GBA_L("画面设置同步失败"),
                           count);
             SwitchFrontend::OverlayUI::ShowToast(message);
             block_game_input_until_release = true;
@@ -3819,8 +3820,8 @@ int Run(int argc, char** argv) {
                 if (!system.SendSignal(signal, static_cast<u32>(slot))) {
                     DebugLog("menu state signal rejected operation=%s slot=%d",
                              saving ? "save" : "load", slot);
-                    SwitchFrontend::OverlayUI::ShowToast(saving ? "状态保存失败"
-                                                                   : "状态读取失败");
+                    SwitchFrontend::OverlayUI::ShowToast(saving ? GBA_L("状态保存失败")
+                                                                   : GBA_L("状态读取失败"));
                     pending_state_request = {};
                 } else {
                     pending_state_request.signal_sent = true;
@@ -3887,7 +3888,7 @@ int Run(int argc, char** argv) {
                          saving ? "save" : "load", slot,
                          static_cast<long long>(elapsed_ms),
                          details.empty() ? "unknown" : details.c_str());
-                SwitchFrontend::OverlayUI::ShowToast(saving ? "状态保存失败" : "状态读取失败");
+                SwitchFrontend::OverlayUI::ShowToast(saving ? GBA_L("状态保存失败") : GBA_L("状态读取失败"));
                 pending_state_request = {};
                 menu_state_error_handled = true;
             } else if (run_result == Core::System::ResultStatus::Success &&
@@ -3906,10 +3907,10 @@ int Run(int argc, char** argv) {
                 char message[64]{};
                 if (slot == 0) {
                     std::snprintf(message, sizeof(message),
-                                  saving ? "快速存档完成" : "快速读档完成");
+                                  saving ? GBA_L("快速存档完成") : GBA_L("快速读档完成"));
                 } else {
-                    std::snprintf(message, sizeof(message), saving ? "已保存到存档位 %d"
-                                                                    : "已读取存档位 %d",
+                    std::snprintf(message, sizeof(message), saving ? GBA_L("已保存到存档位 %d")
+                                                                    : GBA_L("已读取存档位 %d"),
                                   slot);
                 }
                 SwitchFrontend::OverlayUI::ShowToast(message);
@@ -4390,7 +4391,7 @@ int Run(int argc, char** argv) {
                      static_cast<unsigned long long>(loop_count),
                      details.empty() ? "unknown error" : details.c_str());
             if (menu_initialized) {
-                SwitchFrontend::OverlayUI::ShowToast("状态操作失败");
+                SwitchFrontend::OverlayUI::ShowToast(GBA_L("状态操作失败"));
             }
             continue;
         }
