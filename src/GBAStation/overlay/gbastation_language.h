@@ -26,24 +26,22 @@ public:
 
     /// Returns true when the effective UI language is English.
     bool IsEnglish() {
-        EnsureLoaded();
-        return locale_ == "en-US" || locale_ == "English";
+        return CurrentLocale() == "en-US";
     }
 
     /// Returns true when the effective UI language is Japanese.
     bool IsJapanese() {
-        EnsureLoaded();
-        return locale_ == "ja-JP" || locale_ == "Japanese";
+        return CurrentLocale() == "ja-JP";
     }
 
     /// Translate a Chinese UI string; returns the input unchanged when the
     /// language is Chinese or the key is missing. The returned pointer stays
     /// valid until the next Tr() call (backed by the persistent table_).
     const char* Tr(const std::string& zh) {
-        EnsureLoaded();
-        if (locale_ == "zh-CN" || locale_ == "Chinese") {
+        if (CurrentLocale() == "zh-CN") {
             return zh.c_str();
         }
+        EnsureTable();
         const auto it = table_.find(zh);
         if (it != table_.end() && !it->second.empty()) {
             return it->second.c_str();
@@ -51,32 +49,49 @@ public:
         return zh.c_str();
     }
 
+    /// const char* overload: returns the caller's literal directly for the
+    /// Chinese fallback so no temporary std::string (and dangling pointer)
+    /// is ever created.
     const char* Tr(const char* zh) {
-        return Tr(zh ? std::string(zh) : std::string());
+        if (!zh) {
+            return zh;
+        }
+        if (CurrentLocale() == "zh-CN") {
+            return zh;
+        }
+        EnsureTable();
+        const auto it = table_.find(zh);
+        if (it != table_.end() && !it->second.empty()) {
+            return it->second.c_str();
+        }
+        return zh;
     }
 
 private:
     GBAStationLanguage() = default;
 
-    void EnsureLoaded() {
-        if (loaded_) {
-            return;
-        }
-        loaded_ = true;
-
+    /// Resolve the effective locale from the launcher config on every call so
+    /// early static-initialization lookups (before ReloadConfig) still pick up
+    /// the final language later.
+    std::string CurrentLocale() {
         const std::string language = GBAStationConfig::GetConfiguredSystemLanguage();
         if (language == "en-US" || language == "en" || language == "English") {
-            locale_ = "en-US";
-        } else if (language == "ja-JP" || language == "ja" || language == "Japanese") {
-            locale_ = "ja-JP";
-        } else {
-            locale_ = "zh-CN";
+            return "en-US";
         }
-        if (locale_ == "zh-CN") {
+        if (language == "ja-JP" || language == "ja" || language == "Japanese") {
+            return "ja-JP";
+        }
+        return "zh-CN";
+    }
+
+    void EnsureTable() {
+        if (table_loaded_) {
             return;
         }
+        table_loaded_ = true;
 
-        const std::string path = "romfs:/rescources/lang/" + locale_ + ".json";
+        const std::string locale = CurrentLocale();
+        const std::string path = "romfs:/rescources/lang/" + locale + ".json";
         std::FILE* fp = std::fopen(path.c_str(), "rb");
         if (!fp) {
             return;
@@ -107,8 +122,7 @@ private:
         }
     }
 
-    bool loaded_ = false;
-    std::string locale_ = "zh-CN";
+    bool table_loaded_ = false;
     std::unordered_map<std::string, std::string> table_;
 };
 

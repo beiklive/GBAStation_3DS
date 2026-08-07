@@ -155,9 +155,15 @@ void SetCanvasOrientation(int orientation) {
     }
 }
 
-static const std::array<std::string, static_cast<int>(Item::Count)> ItemLabels{{
-    GBA_L("返回游戏"), GBA_L("保存状态"), GBA_L("读取状态"), GBA_L("金手指"), GBA_L("画面设置"), GBA_L("运行设置"), GBA_L("重置游戏"), GBA_L("退出游戏"),
-}};
+// Item labels are resolved lazily on first render so the translation layer
+// has already loaded the launcher config (a file-scope static would capture
+// the pre-config "Chinese" fallback forever).
+static const std::array<std::string, static_cast<int>(Item::Count)>& GetItemLabels() {
+    static const std::array<std::string, static_cast<int>(Item::Count)> labels{{
+        GBA_L("返回游戏"), GBA_L("保存状态"), GBA_L("读取状态"), GBA_L("金手指"), GBA_L("画面设置"), GBA_L("运行设置"), GBA_L("重置游戏"), GBA_L("退出游戏"),
+    }};
+    return labels;
+}
 
 constexpr std::array<int, static_cast<int>(Item::Count)> ItemIcons{{
     0xE5C4, 0xE161, 0xE2C6, 0xE3AE, 0xE333, 0xE8B8, 0xE5D5, 0xE879,
@@ -1931,7 +1937,7 @@ void DrawPortraitMenu(const State& state) {
             }
         }
         IconCentered(x + 32, y + TabH * 0.5f, 25, focused ? White : Muted, ItemIcons[i]);
-        Text(x + 62, y + 44, 21, focused ? White : Muted, ItemLabels[i]);
+        Text(x + 62, y + 44, 21, focused ? White : Muted, GetItemLabels()[i]);
     }
     const float reset_separator_y =
         TabY + static_cast<int>(Item::Reset) * TabStep + 8.0f;
@@ -1939,7 +1945,7 @@ void DrawPortraitMenu(const State& state) {
 
     const Item item = static_cast<Item>(selected);
     if (item != Item::Display && item != Item::Runtime) {
-        Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
+        Text(ContentX, ContentHeader, 25, White, GetItemLabels()[selected]);
         Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
     }
 
@@ -2024,7 +2030,7 @@ void DrawPortraitMenu(const State& state) {
         const int focus = state.content_focused
                               ? std::clamp(state.content_focus, 0, static_cast<int>(RowY.size()) - 1)
                               : 0;
-        Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
+        Text(ContentX, ContentHeader, 25, White, GetItemLabels()[selected]);
         Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
         Text(ContentX, 200, 18, Cyan, GBA_L("基础画面设置"));
         Text(ContentX, 402, 18, Cyan, GBA_L("布局设置"));
@@ -2060,7 +2066,7 @@ void DrawPortraitMenu(const State& state) {
         const int focus = state.content_focused
                               ? std::clamp(state.content_focus, 0, static_cast<int>(RowY.size()) - 1)
                               : 0;
-        Text(ContentX, ContentHeader, 25, White, ItemLabels[selected]);
+        Text(ContentX, ContentHeader, 25, White, GetItemLabels()[selected]);
         Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
         Text(ContentX, 200, 18, Cyan, GBA_L("即时画面设置"));
         Text(ContentX, 404, 18, Cyan, GBA_L("性能视频和输入"));
@@ -2169,7 +2175,7 @@ void BuildMenu(const State& state) {
         }
         IconCentered(LeftX + 34, y + ItemH * 0.5f, 25,
                      focused ? White : Muted, ItemIcons[i]);
-        Text(LeftX + 64, y + 38, 21, focused ? White : Muted, ItemLabels[i]);
+        Text(LeftX + 64, y + 38, 21, focused ? White : Muted, GetItemLabels()[i]);
     }
     Rect(LeftX + 18, LeftY + 6 * Step - 9, MenuW - 36, 1, {1, 1, 1, 0.14f});
     Rect(404, 110, 1, 500, {1, 1, 1, 0.08f});
@@ -2179,7 +2185,7 @@ void BuildMenu(const State& state) {
     constexpr float ContentW = 790.0f;
     const Item item = static_cast<Item>(selected);
     if (item != Item::Display && item != Item::Runtime) {
-        Text(ContentX, ContentY + 28, 24, White, ItemLabels[selected]);
+        Text(ContentX, ContentY + 28, 24, White, GetItemLabels()[selected]);
         Rect(ContentX, ContentY + 50, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
     }
 
@@ -2260,7 +2266,7 @@ void BuildMenu(const State& state) {
         const float focused_center = RowY[focus] + RowH * 0.5f;
         const float max_scroll = std::max(0.0f, RowY.back() + RowH - ViewBottom);
         const float scroll_y = std::clamp(focused_center - TargetCenter, 0.0f, max_scroll);
-        Text(ContentX, HeaderY, HeaderSize, White, ItemLabels[selected]);
+        Text(ContentX, HeaderY, HeaderSize, White, GetItemLabels()[selected]);
         Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
         auto draw_section = [&](int index, const char* title) {
             const float y = SectionY[index] - scroll_y;
@@ -2332,7 +2338,7 @@ void BuildMenu(const State& state) {
                               ? std::clamp(state.content_focus, 0,
                                             static_cast<int>(RowY.size()) - 1)
                               : 0;
-        Text(ContentX, HeaderY, HeaderSize, White, ItemLabels[selected]);
+        Text(ContentX, HeaderY, HeaderSize, White, GetItemLabels()[selected]);
         Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
         Text(ContentX, 176.0f, SectionSize, Cyan, GBA_L("即时画面设置"));
         Text(ContentX, 404.0f, SectionSize, Cyan, GBA_L("性能视频和输入"));
