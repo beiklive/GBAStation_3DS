@@ -1,14 +1,17 @@
 /// @file gbastation_language.h
-/// @brief Lightweight zh/en translation helper for the 3DS overlay menus.
+/// @brief JSON-backed zh/en/ja translation helper for the 3DS overlay menus.
 ///
 /// Language comes from the launcher's UI.language (config.cfg) via
-/// GBAStationConfig::GetConfiguredSystemLanguage(). Returns the input
-/// Chinese string verbatim when the language is not English.
+/// GBAStationConfig::GetConfiguredSystemLanguage(). Translation tables are
+/// loaded from romfs:/rescources/lang/<locale>.json. Falls back to the
+/// input Chinese string when a key is missing.
 
 #pragma once
 
 #include <string>
 #include <unordered_map>
+
+#include <json.hpp>
 
 #include "GBAStation/overlay/gbastation_config.h"
 
@@ -24,18 +27,25 @@ public:
     /// Returns true when the effective UI language is English.
     bool IsEnglish() {
         EnsureLoaded();
-        return is_english_;
+        return locale_ == "en-US" || locale_ == "English";
     }
 
-    /// Translate a Chinese UI string; returns the input unchanged for zh.
-    /// The returned pointer stays valid until the next Tr() call.
+    /// Returns true when the effective UI language is Japanese.
+    bool IsJapanese() {
+        EnsureLoaded();
+        return locale_ == "ja-JP" || locale_ == "Japanese";
+    }
+
+    /// Translate a Chinese UI string; returns the input unchanged when the
+    /// language is Chinese or the key is missing. The returned pointer stays
+    /// valid until the next Tr() call (backed by the persistent table_).
     const char* Tr(const std::string& zh) {
         EnsureLoaded();
-        if (!is_english_) {
+        if (locale_ == "zh-CN" || locale_ == "Chinese") {
             return zh.c_str();
         }
         const auto it = table_.find(zh);
-        if (it != table_.end()) {
+        if (it != table_.end() && !it->second.empty()) {
             return it->second.c_str();
         }
         return zh.c_str();
@@ -53,81 +63,52 @@ private:
             return;
         }
         loaded_ = true;
+
         const std::string language = GBAStationConfig::GetConfiguredSystemLanguage();
-        is_english_ = (language == "en-US" || language == "en" || language == "English");
-        if (!is_english_) {
+        if (language == "en-US" || language == "en" || language == "English") {
+            locale_ = "en-US";
+        } else if (language == "ja-JP" || language == "ja" || language == "Japanese") {
+            locale_ = "ja-JP";
+        } else {
+            locale_ = "zh-CN";
+        }
+        if (locale_ == "zh-CN") {
             return;
         }
-        table_ = {
-            {"返回游戏", "Resume Game"},
-            {"保存状态", "Save State"},
-            {"读取状态", "Load State"},
-            {"金手指", "Cheats"},
-            {"画面设置", "Display Settings"},
-            {"运行设置", "Runtime Settings"},
-            {"重置游戏", "Reset Game"},
-            {"退出游戏", "Exit Game"},
-            {"继续当前游戏。", "Resume the current game."},
-            {"创建即时存档。", "Create an instant save."},
-            {"读取即时存档。", "Load an instant save."},
-            {"管理游戏金手指。", "Manage game cheats."},
-            {"调整画面比例和缩放方式。", "Adjust aspect ratio and scaling."},
-            {"调整可即时生效的核心选项。", "Adjust core options applied immediately."},
-            {"重新启动当前游戏。", "Restart the current game."},
-            {"关闭模拟器并返回 GBAStation。", "Close the emulator and return to GBAStation."},
-            {"下屏优先", "Bottom Priority"},
-            {"仅上屏", "Top Only"},
-            {"仅下屏", "Bottom Only"},
-            {"自定义", "Custom"},
-            {"上屏优先", "Top Priority"},
-            {"自定义画面布局", "Custom Layout"},
-            {"上屏布局", "Top Screen Layout"},
-            {"下屏布局", "Bottom Screen Layout"},
-            {"X 偏移", "X Offset"},
-            {"Y 偏移", "Y Offset"},
-            {"透明度", "Opacity"},
-            {"档位已有状态空存档槽继续按确定返回列表不可用", "Slot In Use | Empty | Continue | Confirm | Back to List | Unavailable"},
-            {"自定义画面布局调整当前项上屏布局下屏布局缩放偏移", "Custom layout | Adjust item | Top layout | Bottom layout | Scale | Offset"},
-            {"同步遮罩同步画面设置执行已同步到个游戏失败", "Sync masks | Sync display settings | Executed | Synced to games | Failed"},
-            {"CPU时钟频率视频节流", "CPU clock | Video throttle"},
-            {"安全关闭模拟器未保存的游戏进度可能丢失", "Shut down safely? Unsaved progress may be lost"},
-            {"该存档位为空", "This save slot is empty"},
-            {"金手指已切换", "Cheat toggled"},
-            {"金手指设置失败", "Failed to set cheat"},
-            {"暂无可用金手指", "No cheats available"},
-            {"保存", "Save"},
-            {"读取", "Load"},
-            {"返回", "Back"},
-            {"返回列表", "Back to List"},
-            {"确认", "Confirm"},
-            {"确定", "OK"},
-            {"取消", "Cancel"},
-            {"关闭", "Off"},
-            {"开启", "On"},
-            {"默认", "Default"},
-            {"自动", "Auto"},
-            {"选择", "Select"},
-            {"设置", "Settings"},
-            {"显示", "Display"},
-            {"大小", "Size"},
-            {"拉伸", "Stretch"},
-            {"原始", "Original"},
-            {"重置", "Reset"},
-            {"更改", "Change"},
-            {"已保存", "Saved"},
-            {"空存档槽", "Empty Slot"},
-            {"存档槽 ", "Slot "},
-            {"不可用", "Unavailable"},
-            {"继续", "Continue"},
-            {"执行", "Execute"},
-            {"已同步到", "Synced to"},
-            {"个游戏", " games"},
-            {"失败", "Failed"},
-        };
+
+        const std::string path = "romfs:/rescources/lang/" + locale_ + ".json";
+        std::FILE* fp = std::fopen(path.c_str(), "rb");
+        if (!fp) {
+            return;
+        }
+        std::fseek(fp, 0, SEEK_END);
+        const long size = std::ftell(fp);
+        std::fseek(fp, 0, SEEK_SET);
+        if (size <= 0) {
+            std::fclose(fp);
+            return;
+        }
+        std::string content(static_cast<std::size_t>(size), '\0');
+        const std::size_t read = std::fread(content.data(), 1, content.size(), fp);
+        std::fclose(fp);
+        content.resize(read);
+
+        try {
+            nlohmann::json j = nlohmann::json::parse(content, nullptr, false);
+            if (j.is_discarded() || !j.is_object()) {
+                return;
+            }
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (it.value().is_string()) {
+                    table_[it.key()] = it.value().get<std::string>();
+                }
+            }
+        } catch (...) {
+        }
     }
 
     bool loaded_ = false;
-    bool is_english_ = false;
+    std::string locale_ = "zh-CN";
     std::unordered_map<std::string, std::string> table_;
 };
 
