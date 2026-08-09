@@ -219,6 +219,10 @@ std::size_t ImportBeikliveFlatConfig(const char* path, OptionMap& options) {
             // Shared launcher values are defaults. Preserve values saved by the 3DS in-game menu.
             options.try_emplace(key, DecodeFlatConfigValue(raw_value));
             ++imported;
+        } else if (key == "UI.language") {
+            // Launcher UI language drives the 3DS menu translations.
+            options[key] = DecodeFlatConfigValue(raw_value);
+            ++imported;
         }
     }
     return imported;
