@@ -3365,6 +3365,8 @@ int Run(int argc, char** argv) {
         settings.movie_cpu_throttle = movie_cpu_throttle.enabled.load(std::memory_order_acquire);
         settings.movie_throttle_clock =
             movie_cpu_throttle.throttle_clock.load(std::memory_order_acquire);
+        settings.lsfg_frame_generation = ParseConfigBool(
+            SwitchFrontend::GBAStationConfig::GetConfigValue("lsfg_frame_generation"), false);
         settings.controller_pointer = window.IsControllerPointerEnabled();
         return settings;
     };
@@ -3695,16 +3697,21 @@ int Run(int argc, char** argv) {
                 "movie_cpu_throttle", runtime.movie_cpu_throttle ? "true" : "false");
             SwitchFrontend::GBAStationConfig::SetConfigValue(
                 "movie_throttle_clock", std::to_string(runtime.movie_throttle_clock));
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "lsfg_frame_generation", runtime.lsfg_frame_generation ? "true" : "false");
             const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
-            SwitchFrontend::OverlayUI::ShowToast(saved ? GBA_L("运行设置已保存") : GBA_L("运行设置保存失败"));
+            SwitchFrontend::OverlayUI::ShowToast(
+                saved ? GBA_L("运行设置已保存；LSFG 重启游戏后生效")
+                      : GBA_L("运行设置保存失败"));
             DebugLog("runtime menu settings: fps=%d custom_textures=%d texture_filter=%d "
                      "anisotropy=%dx right_eye_disabled=%d cpu_clock=%d movie_throttle=%d "
-                     "movie_clock=%d pointer=%d saved=%d",
+                     "movie_clock=%d lsfg=%d pointer=%d saved=%d",
                      runtime.fps_counter ? 1 : 0, runtime.custom_textures ? 1 : 0,
                      runtime.texture_filter, 1 << runtime.anisotropic_filtering,
                      runtime.disable_right_eye ? 1 : 0,
                      runtime.cpu_clock_percentage, runtime.movie_cpu_throttle ? 1 : 0,
-                     runtime.movie_throttle_clock, runtime.controller_pointer ? 1 : 0,
+                     runtime.movie_throttle_clock, runtime.lsfg_frame_generation ? 1 : 0,
+                     runtime.controller_pointer ? 1 : 0,
                      saved ? 1 : 0);
             block_game_input_until_release = true;
         } else if (menu_action == SwitchFrontend::OverlayUI::Action::CustomLayoutChanged) {
