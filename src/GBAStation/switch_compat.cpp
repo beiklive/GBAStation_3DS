@@ -102,6 +102,7 @@ int UI_method_set_writer(UI_METHOD* method, int (*writer)(UI* ui, UI_STRING* uis
 int UI_method_set_reader(UI_METHOD* method, int (*reader)(UI* ui, UI_STRING* uis));
 int UI_method_set_closer(UI_METHOD* method, int (*closer)(UI* ui));
 
+#ifndef GBASTATION_USE_SWITCH_NVK
 ssize_t pread(int fd, void* buf, size_t count, off_t offset) {
     const off_t original_offset = lseek(fd, 0, SEEK_CUR);
     if (original_offset == static_cast<off_t>(-1)) {
@@ -118,15 +119,19 @@ ssize_t pread(int fd, void* buf, size_t count, off_t offset) {
     errno = saved_errno;
     return result;
 }
+#endif
 
 // Horizon has no setuid/AT_SECURE process model, so getenv is the secure variant here.
+#ifndef GBASTATION_USE_SWITCH_NVK
 char* secure_getenv(const char* name) {
     return std::getenv(name);
 }
+#endif
 
 // Mesa's built-in driconf table supports regular-expression match fields even when XML
 // file parsing is disabled. Switch has the newlib declarations but no regex runtime; an
 // unmatched result preserves the default NVK options used by the validated probes.
+#ifndef GBASTATION_USE_SWITCH_NVK
 int regcomp(regex_t* regex, const char* pattern, int flags) {
     (void)regex;
     (void)pattern;
@@ -147,7 +152,9 @@ int regexec(const regex_t* regex, const char* string, size_t count, regmatch_t m
 void regfree(regex_t* regex) {
     (void)regex;
 }
+#endif
 
+#ifndef GBASTATION_USE_SWITCH_NVK
 uid_t getuid(void) {
     return 0;
 }
@@ -163,6 +170,7 @@ gid_t getgid(void) {
 gid_t getegid(void) {
     return 0;
 }
+#endif
 
 struct passwd* getpwuid(uid_t) {
     static char name[] = "switch";
@@ -178,6 +186,7 @@ struct passwd* getpwuid(uid_t) {
     return &entry;
 }
 
+#ifndef GBASTATION_USE_SWITCH_NVK
 int getpwuid_r(uid_t uid, struct passwd* pwd, char* buffer, size_t buffer_size,
                struct passwd** result) {
     constexpr char name[] = "switch";
@@ -209,7 +218,9 @@ int getpwuid_r(uid_t uid, struct passwd* pwd, char* buffer, size_t buffer_size,
     *result = pwd;
     return 0;
 }
+#endif
 
+#ifndef GBASTATION_USE_SWITCH_NVK
 int flock(int fd, int operation) {
     (void)fd;
     (void)operation;
@@ -257,6 +268,7 @@ long sysconf(int name) {
     errno = EINVAL;
     return -1;
 }
+#endif
 
 int getpagesize(void) {
     return 0x1000;
@@ -269,6 +281,7 @@ int sigprocmask(int, const sigset_t*, sigset_t* oldset) {
     return 0;
 }
 
+#ifndef GBASTATION_USE_SWITCH_NVK
 int pthread_sigmask(int how, const sigset_t* set, sigset_t* oldset) {
     return sigprocmask(how, set, oldset);
 }
@@ -291,6 +304,7 @@ int munmap(void* address, size_t length) {
     (void)length;
     return 0;
 }
+#endif
 
 int _getentropy_r(struct _reent*, void* buf, size_t len) {
     randomGet(buf, len);

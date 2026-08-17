@@ -27,6 +27,7 @@ create_target_directory_groups(gbastation)
 set_target_properties(gbastation PROPERTIES OUTPUT_NAME "azahar-switch.elf")
 target_compile_definitions(gbastation PRIVATE
     __SWITCH__
+    GBASTATION_USE_SWITCH_NVK=1
     VK_NO_PROTOTYPES
 )
 option(GBASTATION_SWITCH_DIAGNOSTIC_LOGS "Enable first-boot Switch filesystem logs" OFF)
@@ -157,6 +158,13 @@ target_link_libraries(gbastation PRIVATE
 
 foreach(_symbol IN LISTS SWITCH_NVK_KEEP_SYMBOLS)
     target_link_options(gbastation PRIVATE "LINKER:-u,${_symbol}")
+endforeach()
+
+# switchVK routes its synthetic DRM render node through the libc wrappers in
+# switch_libc_shim.o.  Static-library consumers must request these GNU ld
+# wrappers themselves so calls from Mesa and the app resolve to __real_*.
+foreach(_symbol IN ITEMS open close stat lstat)
+    target_link_options(gbastation PRIVATE "LINKER:--wrap=${_symbol}")
 endforeach()
 
 set(SWITCH_LINKER_MAP "${CMAKE_BINARY_DIR}/azahar-switch.map" CACHE FILEPATH

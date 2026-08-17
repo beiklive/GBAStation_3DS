@@ -187,7 +187,9 @@ if [ -s "${UNDEFINED_SYMBOLS}" ]; then
     exit 1
 fi
 
-if grep -Eqi 'drm_shim|drm_nouveau|GLESv2|libglapi|allow-multiple-definition' \
+# switchVK provides its own drm_shim inside libvulkan.a; only a real nouveau
+# DRM dependency (or OpenGL/duplicate-definition fallback) is forbidden here.
+if grep -Eqi 'drm_nouveau|GLESv2|libglapi|allow-multiple-definition' \
         "${LINKER_MAP}" "${BUILD_DIR}/build.ninja"; then
     echo "ERROR: forbidden DRM/OpenGL/duplicate-definition fallback found in final link" >&2
     exit 1

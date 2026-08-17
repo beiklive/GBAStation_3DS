@@ -207,6 +207,14 @@ if (ENABLE_VULKAN)
         shader/generator/spv_fs_shader_gen.cpp
         shader/generator/spv_fs_shader_gen.h
     )
+    # devkitA64 GCC 16.1 can ICE while optimizing fmt's floating-point
+    # formatting templates included by this platform-only translation unit.
+    # Keep the workaround tightly scoped; renderer hot paths retain -O3.
+    if (SWITCH)
+        set_source_files_properties(renderer_vulkan/vk_platform.cpp PROPERTIES
+            COMPILE_OPTIONS "-O0"
+        )
+    endif()
     target_link_libraries(video_core PRIVATE vulkan-headers vma sirit SPIRV glslang)
 endif()
 
