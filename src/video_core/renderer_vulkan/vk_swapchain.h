@@ -9,6 +9,8 @@
 #include "common/common_types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
+struct LsfgNxRuntime;
+
 namespace Vulkan {
 
 class Instance;
@@ -69,6 +71,12 @@ public:
         return present_ready[image_index];
     }
 
+    /// LSFG owns an additional acquire/present cycle, so presentation must
+    /// stay synchronous whenever it was requested for this swapchain.
+    [[nodiscard]] bool IsLsfgEnabled() const noexcept {
+        return lsfg_requested;
+    }
+
 private:
     /// Selects the best available swapchain image format
     void FindPresentFormat();
@@ -88,6 +96,9 @@ private:
     /// Creates the image acquired and present ready semaphores
     void RefreshSemaphores();
 
+    void CreateLsfgRuntime();
+    void DestroyLsfgRuntime();
+
 private:
     const Instance& instance;
     vk::SwapchainKHR swapchain{VK_NULL_HANDLE};
@@ -100,6 +111,8 @@ private:
     std::vector<vk::Image> images;
     std::vector<vk::Semaphore> image_acquired;
     std::vector<vk::Semaphore> present_ready;
+    std::vector<VkImage> lsfg_images;
+    LsfgNxRuntime* lsfg_runtime{};
     u32 width = 0;
     u32 height = 0;
     u32 image_count = 0;
@@ -107,6 +120,7 @@ private:
     u32 frame_index = 0;
     bool needs_recreation = true;
     bool low_refresh_rate;
+    bool lsfg_requested{};
 };
 
 } // namespace Vulkan

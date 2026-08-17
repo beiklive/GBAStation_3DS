@@ -216,6 +216,24 @@ if (ENABLE_VULKAN)
         )
     endif()
     target_link_libraries(video_core PRIVATE vulkan-headers vma sirit SPIRV glslang)
+    if (SWITCH)
+        file(GLOB_RECURSE LSFG_VK_SOURCES CONFIGURE_DEPENDS
+            "${PROJECT_SOURCE_DIR}/externals/lsfg-vk/lsfg-vk-common/src/*.cpp"
+            "${PROJECT_SOURCE_DIR}/externals/lsfg-vk/lsfg-vk-backend/src/*.cpp"
+        )
+        target_sources(video_core PRIVATE
+            renderer_vulkan/lsfg/lsfg_bridge.cpp
+            renderer_vulkan/lsfg/lsfg_bridge.h
+            ${LSFG_VK_SOURCES}
+        )
+        target_include_directories(video_core PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/video_core/renderer_vulkan/lsfg
+            ${PROJECT_SOURCE_DIR}/externals/lsfg-vk/lsfg-vk-common/include
+            ${PROJECT_SOURCE_DIR}/externals/lsfg-vk/lsfg-vk-backend/include
+            ${PROJECT_SOURCE_DIR}/externals/lsfg-vk/lsfg-vk-backend/src
+        )
+        target_compile_definitions(video_core PRIVATE GBASTATION_SWITCH_LSFG)
+    endif()
 endif()
 
 if(ENABLE_SDL2)

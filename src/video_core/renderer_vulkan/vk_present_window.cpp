@@ -141,7 +141,8 @@ PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& i
       vsync_enabled{Settings::values.use_vsync.GetValue()},
       blit_supported{
           CanBlitToSwapchain(instance.GetPhysicalDevice(), swapchain.GetSurfaceFormat().format)},
-      use_present_thread{Settings::values.async_presentation.GetValue()},
+      use_present_thread{Settings::values.async_presentation.GetValue() &&
+                         !swapchain.IsLsfgEnabled()},
       last_render_surface{emu_window.GetWindowInfo().render_surface} {
 
     const u32 num_images = swapchain.GetImageCount();
