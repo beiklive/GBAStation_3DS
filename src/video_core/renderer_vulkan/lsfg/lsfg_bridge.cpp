@@ -12,6 +12,7 @@
 #include "lsfg-vk-common/vulkan/vulkan.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -120,6 +121,47 @@ struct LsfgNxRuntime {
 
     [[nodiscard]] bool handles(VkSwapchainKHR candidate) const {
         return candidate == swapchain;
+    }
+
+    // A single generated frame consumes an additional display refresh.  It is
+    // therefore only useful for titles that submit at about 30 FPS or below.
+    // Probe normal presentation first so 60 FPS titles retain their native
+    // cadence instead of being forced down to 30 FPS.
+    [[nodiscard]] bool shouldGenerate() {
+        using namespace std::chrono;
+        constexpr auto MaxInputIntervalForFullRate = 25ms;
+        constexpr uint32_t ProbeSamples = 8;
+
+        const auto now = steady_clock::now();
+        if (lastApplicationPresent != steady_clock::time_point{}) {
+            probeIntervalSum += now - lastApplicationPresent;
+            ++probeSampleCount;
+        }
+        lastApplicationPresent = now;
+
+        if (pacingMode == PacingMode::eBypass) {
+            return false;
+        }
+        if (pacingMode == PacingMode::eGenerate) {
+            return true;
+        }
+        if (probeSampleCount < ProbeSamples) {
+            return false;
+        }
+
+        const auto averageInterval = probeIntervalSum / probeSampleCount;
+        if (averageInterval < MaxInputIntervalForFullRate) {
+            pacingMode = PacingMode::eBypass;
+            LOG_INFO(Render_Vulkan,
+                     "LSFG bypassed: application submits at native 60 Hz (average {} ms)",
+                     duration_cast<milliseconds>(averageInterval).count());
+            return false;
+        }
+
+        pacingMode = PacingMode::eGenerate;
+        LOG_INFO(Render_Vulkan, "LSFG enabled: application cadence is {} ms",
+                 duration_cast<milliseconds>(averageInterval).count());
+        return true;
     }
 
     VkResult present(VkQueue queue, const VkPresentInfoKHR& info) {
@@ -322,6 +364,15 @@ private:
     std::vector<FrameSlot> slots;
 
     std::array<bool, 2> sourceInitialized{false, false};
+    enum class PacingMode {
+        eProbe,
+        eGenerate,
+        eBypass,
+    };
+    PacingMode pacingMode{PacingMode::eProbe};
+    std::chrono::steady_clock::time_point lastApplicationPresent{};
+    std::chrono::steady_clock::duration probeIntervalSum{};
+    uint32_t probeSampleCount{};
     uint64_t realFrameIndex{};
     size_t slotCursor{};
 };
@@ -351,6 +402,10 @@ extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
             !presentInfo->pImageIndices ||
             !runtime->handles(presentInfo->pSwapchains[0]))
         return false;
+
+    if (!runtime->shouldGenerate()) {
+        return false;
+    }
 
     try {
         *result = runtime->present(queue, *presentInfo);
