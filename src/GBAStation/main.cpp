@@ -113,6 +113,7 @@ constexpr const char* MemMapLogPath = "sdmc:/GBAStation/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
 constexpr const char* SwitchFastmemEnv = "GBASTATION_SWITCH_FASTMEM";
 constexpr const char* SwitchJitFastDispatchEnv = "GBASTATION_SWITCH_JIT_FAST_DISPATCH";
+constexpr const char* LsfgFrameGenerationEnv = "GBASTATION_LSFG";
 constexpr const char* DisableNvkShaderCacheMarkerPath =
     "sdmc:/GBAStation/3ds/disable_nvk_shader_cache";
 constexpr const char* NvkFullIdleCompletionMarkerPath =
@@ -2453,6 +2454,7 @@ void ConfigureSettings() {
     Settings::RestoreGlobalState(false);
     setenv(SwitchFastmemEnv, "0", 1);
     setenv(SwitchJitFastDispatchEnv, "0", 1);
+    setenv(LsfgFrameGenerationEnv, "0", 1);
     Settings::values.use_cpu_jit.SetValue(true);
     Settings::values.cpu_clock_percentage.SetValue(100);
     Settings::values.is_new_3ds.SetValue(true);
@@ -2873,6 +2875,13 @@ bool ApplySwitchJitFastDispatchConfig() {
     return enabled;
 }
 
+bool ApplyLsfgFrameGenerationConfig() {
+    using SwitchFrontend::GBAStationConfig::GetConfigValue;
+    const bool enabled = ParseConfigBool(GetConfigValue("lsfg_frame_generation"), false);
+    setenv(LsfgFrameGenerationEnv, enabled ? "1" : "0", 1);
+    return enabled;
+}
+
 std::string FormatFloat(float value) {
     char text[32]{};
     std::snprintf(text, sizeof(text), "%.3f", value);
@@ -3130,6 +3139,7 @@ int Run(int argc, char** argv) {
     const VideoStreamOptions video_stream_options = LoadVideoStreamOptions();
     const bool switch_fastmem_enabled = ApplySwitchFastmemConfig();
     const bool switch_jit_fast_dispatch_enabled = ApplySwitchJitFastDispatchConfig();
+    const bool lsfg_frame_generation_enabled = ApplyLsfgFrameGenerationConfig();
     ApplyConfiguredDisplayDefaults(launch_options.display_settings,
                                    !launch_options.display_settings_from_game_db,
                                    !launch_options.display_settings_from_game_db);
@@ -3142,7 +3152,7 @@ int Run(int argc, char** argv) {
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u fast_forward=%.2f skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u fast_forward=%.2f skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d lsfg_frame_generation=%d movie_throttle=%d movie_clock=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
@@ -3155,6 +3165,7 @@ int Run(int argc, char** argv) {
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
              switch_fastmem_enabled ? 1 : 0,
              switch_jit_fast_dispatch_enabled ? 1 : 0,
+             lsfg_frame_generation_enabled ? 1 : 0,
              video_stream_options.movie_cpu_throttle ? 1 : 0,
              video_stream_options.movie_throttle_clock);
     StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
