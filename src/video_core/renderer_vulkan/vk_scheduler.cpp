@@ -87,7 +87,6 @@ void Scheduler::Finish(vk::Semaphore signal, vk::Semaphore wait) {
 
 void Scheduler::WaitWorker() {
     if (!use_worker_thread) {
-        DispatchWork();
         return;
     }
 
@@ -100,9 +99,14 @@ void Scheduler::WaitWorker() {
         event_cv.wait(ql, [this] { return work_queue.empty(); });
     }
 
-    // Now wait for execution to finish.
-    // This needs to be done in the same order as WorkerThread.
-    std::scoped_lock el{execution_mutex};
+    // Keep a small amount of GPU work in flight. Waiting for the worker execution lock here
+    // turns a transient worker slowdown into a foreground emulation stall; the fence/tick wait
+    // below still prevents resource reuse from getting too far ahead of the GPU.
+    static constexpr u64 kMaxTicksAhead = 2;
+    const u64 issued = master_semaphore->CurrentTick();
+    if (issued > kMaxTicksAhead) {
+        master_semaphore->Wait(issued - kMaxTicksAhead);
+    }
 }
 
 void Scheduler::Wait(u64 tick) {
@@ -145,6 +149,9 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
     // Allow cores 0 and 1; prefer core 1 (main is on core 2).
     // Core 0 absorbs overflow when core 1 is busy.
     Common::SetCurrentThreadAffinityMask(1, (1ULL << 0) | (1ULL << 1));
+    // This worker drains commands that the emulation thread may need to synchronize
+    // with. Give it precedence over optional shader/pipeline compilation workers.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
 
     const auto TryPopQueue{[this](auto& work) -> bool {
         if (work_queue.empty()) {

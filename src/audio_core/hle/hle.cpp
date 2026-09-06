@@ -559,12 +559,24 @@ void DspHle::Impl::AudioTickCallback(s64 cycles_late) {
     }
 
     // Reschedule recurrent event
+    const bool realtime_audio = Settings::values.enable_realtime_audio.GetValue();
     const double time_scale =
-        Settings::values.enable_realtime_audio
+        realtime_audio
             ? std::max(0.01, // Arbitrary small value to prevent time_scale from approaching zero
                        Core::System::GetInstance().GetStableFrameTimeScale())
             : 1.0;
-    s64 adjusted_ticks = static_cast<s64>(audio_frame_ticks / time_scale - cycles_late);
+
+    // A long guest stall makes the stable frame scale very large.  Scheduling the DSP
+    // at that unbounded rate creates an event storm (thousands of callbacks in one
+    // heartbeat), which can extend a scene-transition hitch instead of letting the
+    // emulator recover.  Realtime audio may catch up, but cap that catch-up at 4x.
+    constexpr double max_realtime_audio_scale = 4.0;
+    const s64 minimum_ticks = realtime_audio
+                                  ? static_cast<s64>(audio_frame_ticks /
+                                                     max_realtime_audio_scale)
+                                  : 1;
+    const s64 requested_ticks = static_cast<s64>(audio_frame_ticks / time_scale);
+    const s64 adjusted_ticks = std::max(minimum_ticks, requested_ticks - cycles_late);
     core_timing.ScheduleEvent(adjusted_ticks, tick_event);
 }
 

@@ -147,7 +147,10 @@ void MasterSemaphoreFence::Refresh() {}
 
 void MasterSemaphoreFence::Wait(u64 tick) {
     std::unique_lock lk{free_mutex};
-    free_cv.wait(lk, [&] { return gpu_tick.load(std::memory_order_relaxed) >= tick; });
+    free_cv.wait(lk, [&] {
+        return gpu_failed.load(std::memory_order_acquire) ||
+               gpu_tick.load(std::memory_order_relaxed) >= tick;
+    });
 }
 
 void MasterSemaphoreFence::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wait,
@@ -185,7 +188,11 @@ void MasterSemaphoreFence::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wa
                 .count()));
 #endif
     } catch (vk::DeviceLostError& err) {
-        UNREACHABLE_MSG("Device lost during submit: {}", err.what());
+        LOG_CRITICAL(Render_Vulkan, "Device lost during submit: {}", err.what());
+        gpu_failed.store(true, std::memory_order_release);
+        free_cv.notify_all();
+        wait_cv.notify_all();
+        return;
     }
 
     std::scoped_lock lock{wait_mutex};
@@ -196,6 +203,9 @@ void MasterSemaphoreFence::SubmitWork(vk::CommandBuffer cmdbuf, vk::Semaphore wa
 void MasterSemaphoreFence::WaitThread(std::stop_token token) {
     Common::SetCurrentThreadName("VulkanFenceWait");
     Common::SetCurrentThreadAffinityMask(1, (1ULL << 0) | (1ULL << 1));
+    // Fence retirement unblocks resource reuse and synchronous GPU operations. It
+    // must not be starved by shader compilation on the same two host cores.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
 
     const vk::Device device{instance.GetDevice()};
     while (!token.stop_requested()) {
@@ -211,9 +221,27 @@ void MasterSemaphoreFence::WaitThread(std::stop_token token) {
             wait_queue.pop();
         }
 
-        const vk::Result result = device.waitForFences(fence, true, WAIT_TIMEOUT);
+        u32 transient_failures = 0;
+        vk::Result result{};
+        do {
+            result = device.waitForFences(fence, true, 100'000'000ULL);
+            if (result == vk::Result::eTimeout ||
+                result == vk::Result::eErrorInitializationFailed) {
+                // Bound a lost/stalled fence to two seconds. The old 100 retries
+                // converted one missed frame into an approximately 10-second freeze.
+                if (++transient_failures < 20) {
+                    continue;
+                }
+            }
+            break;
+        } while (!token.stop_requested());
         if (result != vk::Result::eSuccess) {
-            UNREACHABLE_MSG("Fence wait failed with error {}", vk::to_string(result));
+            LOG_CRITICAL(Render_Vulkan, "Fence wait failed with error {}",
+                         vk::to_string(result));
+            gpu_failed.store(true, std::memory_order_release);
+            free_cv.notify_all();
+            wait_cv.notify_all();
+            return;
         }
 
         device.resetFences(fence);

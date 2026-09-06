@@ -754,9 +754,8 @@ void CpuLimiterMulti::UpdateAppCpuLimit() {
                                         .GetForCategory(Kernel::ResourceLimitCategory::Application)
                                         ->GetCurrentValue(Kernel::ResourceLimitType::CpuTime));
 #if defined(__SWITCH__)
-    // The 3DS kernel time-slices application and sysmodule work on Core1 using a very short
-    // preemption timer. On Switch this timer fragments ARM11 execution heavily during video
-    // playback, while HLE service work is already executed synchronously on the host.
+    // Keep the GBAStation Switch baseline for the HLE IPC A/B probe: the Core1 limiter remains
+    // disabled so only the synchronous HLE request delay changes in this round.
     active = false;
     kernel.timing.UnscheduleEvent(tick_event, 0);
     WakeupSleepingThreads();

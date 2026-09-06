@@ -50,7 +50,7 @@ public:
 private:
     void LoadPNG(std::span<const u8> input, bool flip_png);
 
-    void LoadDDS(std::span<const u8> input);
+    bool LoadDDS(std::span<const u8> input);
 
 public:
     Frontend::ImageInterface& image_interface;

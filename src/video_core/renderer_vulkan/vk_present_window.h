@@ -55,7 +55,7 @@ public:
     /// Waits for all queued frames to finish presenting.
     void WaitPresent();
 
-    /// Returns the last used render frame.
+    /// Returns a reusable render frame, or nullptr when presentation is stalled.
     Frame* GetRenderFrame();
 
     /// Recreates the render frame to match provided parameters.
@@ -66,6 +66,13 @@ public:
 
     /// This is called to notify the rendering backend of a surface change
     void NotifySurfaceChanged();
+
+    /// Stops new frames from reaching the swapchain and releases the surface for an applet
+    /// transition. Emulation must be paused before calling this method.
+    bool SuspendPresentation();
+
+    /// Recreates the surface and swapchain after SuspendPresentation().
+    void ResumePresentation();
 
     [[nodiscard]] vk::RenderPass Renderpass() const noexcept {
         return present_renderpass;
@@ -103,11 +110,16 @@ private:
     std::condition_variable free_cv;
     std::condition_variable recreate_surface_cv;
     std::condition_variable_any frame_cv;
-    std::mutex swapchain_mutex;
+    std::timed_mutex swapchain_mutex;
     std::mutex recreate_surface_mutex;
     std::mutex queue_mutex;
     std::mutex free_mutex;
     std::jthread present_thread;
+    std::atomic_bool surface_recreate_requested{false};
+    // Guarded by queue_mutex for Present() ordering; atomic reads are used by status probes.
+    std::atomic_bool presentation_suspended{false};
+    u32 suspended_width{};
+    u32 suspended_height{};
     bool vsync_enabled{};
     bool blit_supported;
     bool use_present_thread{true};

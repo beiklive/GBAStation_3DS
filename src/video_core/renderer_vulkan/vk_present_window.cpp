@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "vk_platform.h"
 
+#include <chrono>
 #include <vk_mem_alloc.h>
 
 MICROPROFILE_DEFINE(Vulkan_WaitPresent, "Vulkan", "Wait For Present", MP_RGB(128, 128, 128));
@@ -140,9 +141,8 @@ PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& i
       graphics_queue{instance.GetGraphicsQueue()}, present_renderpass{CreateRenderpass()},
       vsync_enabled{Settings::values.use_vsync.GetValue()},
       blit_supported{
-          CanBlitToSwapchain(instance.GetPhysicalDevice(), swapchain.GetSurfaceFormat().format)},
-      use_present_thread{Settings::values.async_presentation.GetValue() &&
-                         !swapchain.IsLsfgEnabled()},
+           CanBlitToSwapchain(instance.GetPhysicalDevice(), swapchain.GetSurfaceFormat().format)},
+      use_present_thread{Settings::values.async_presentation.GetValue()},
       last_render_surface{emu_window.GetWindowInfo().render_surface} {
 
     const u32 num_images = swapchain.GetImageCount();
@@ -188,6 +188,17 @@ PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& i
 
 PresentWindow::~PresentWindow() {
     scheduler.Finish();
+    // jthread requests stop only during member destruction, which is too late for
+    // the Vulkan objects below. Stop and join the presentation worker explicitly
+    // after draining it so it cannot touch a destroyed command pool or swapchain.
+    if (use_present_thread) {
+        WaitPresent();
+        present_thread.request_stop();
+        frame_cv.notify_all();
+        if (present_thread.joinable()) {
+            present_thread.join();
+        }
+    }
     const vk::Device device = instance.GetDevice();
     device.destroyCommandPool(command_pool);
     device.destroyRenderPass(present_renderpass);
@@ -280,10 +291,19 @@ void PresentWindow::RecreateFrame(Frame* frame, u32 width, u32 height) {
 
 Frame* PresentWindow::GetRenderFrame() {
     MICROPROFILE_SCOPE(Vulkan_WaitPresent);
+    static std::atomic<u32> timeout_count{};
 
     // Wait for free presentation frames
     std::unique_lock lock{free_mutex};
-    free_cv.wait(lock, [this] { return !free_queue.empty(); });
+    if (!free_cv.wait_for(lock, std::chrono::milliseconds{100},
+                          [this] { return !free_queue.empty(); })) {
+        const u32 count = timeout_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count == 1 || count % 60 == 0) {
+            LOG_WARNING(Render_Vulkan, "Timed out waiting for a free presentation frame (count={})",
+                        count);
+        }
+        return nullptr;
+    }
 
     // Take the frame from the queue
     Frame* frame = free_queue.front();
@@ -292,25 +312,23 @@ Frame* PresentWindow::GetRenderFrame() {
     vk::Device device = instance.GetDevice();
     vk::Result result{};
 
-    const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
-        return result;
-    };
-
-    // Wait for the presentation to be finished so all frame resources are free
-    while (wait() != vk::Result::eSuccess) {
-        // Retry if the waiting times out
+    result = device.waitForFences(frame->present_done, false, 100'000'000ULL);
+    if (result != vk::Result::eSuccess) {
+        free_queue.push(frame);
+        free_cv.notify_one();
         if (result == vk::Result::eTimeout) {
-            continue;
+            const u32 count = timeout_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (count == 1 || count % 60 == 0) {
+                LOG_WARNING(Render_Vulkan, "Presentation fence wait timed out (count={})", count);
+            }
+        } else {
+            LOG_ERROR(Render_Vulkan, "Presentation fence wait failed with {}",
+                      vk::to_string(result));
         }
-
-        // eErrorInitializationFailed occurs on Mali GPU drivers due to them
-        // using the ppoll() syscall which isn't correctly restarted after a signal,
-        // we need to manually retry waiting in that case
-        if (result == vk::Result::eErrorInitializationFailed) {
-            continue;
-        }
+        return nullptr;
     }
+
+    timeout_count.store(0, std::memory_order_relaxed);
 
     device.resetFences(frame->present_done);
     return frame;
@@ -319,13 +337,29 @@ Frame* PresentWindow::GetRenderFrame() {
 void PresentWindow::Present(Frame* frame) {
     if (!use_present_thread) {
         scheduler.WaitWorker();
-        CopyToSwapchain(frame);
-        free_queue.push(frame);
+        {
+            std::scoped_lock lock{queue_mutex, swapchain_mutex};
+            if (!presentation_suspended.load(std::memory_order_relaxed)) {
+                CopyToSwapchain(frame);
+            }
+        }
+        {
+            std::scoped_lock lock{free_mutex};
+            free_queue.push(frame);
+            free_cv.notify_one();
+        }
         return;
     }
 
     scheduler.Record([this, frame](vk::CommandBuffer) {
         std::unique_lock lock{queue_mutex};
+        if (presentation_suspended.load(std::memory_order_relaxed)) {
+            lock.unlock();
+            std::scoped_lock fl{free_mutex};
+            free_queue.push(frame);
+            free_cv.notify_one();
+            return;
+        }
         present_queue.push(frame);
         frame_cv.notify_one();
     });
@@ -367,10 +401,10 @@ void PresentWindow::PresentThread(std::stop_token token) {
         present_queue.pop();
         frame_cv.notify_one();
 
-        // By exchanging the lock ownership we take the swapchain lock
-        // before the queue lock goes out of scope. This way the swapchain
-        // lock in WaitPresent is guaranteed to occur after here.
-        std::exchange(lock, std::unique_lock{swapchain_mutex});
+        // Take the swapchain lock before releasing the queue lock. This keeps WaitPresent and
+        // SuspendPresentation ordered after the actual CopyToSwapchain call.
+        std::unique_lock swapchain_lock{swapchain_mutex};
+        lock.unlock();
 
         CopyToSwapchain(frame);
 
@@ -382,6 +416,8 @@ void PresentWindow::PresentThread(std::stop_token token) {
 }
 
 void PresentWindow::NotifySurfaceChanged() {
+    surface_recreate_requested.store(true, std::memory_order_release);
+    frame_cv.notify_all();
 #ifdef ANDROID
     std::scoped_lock lock{recreate_surface_mutex};
     next_surface = CreateSurface(instance.GetInstance(), emu_window);
@@ -389,7 +425,70 @@ void PresentWindow::NotifySurfaceChanged() {
 #endif
 }
 
+bool PresentWindow::SuspendPresentation() {
+    if (presentation_suspended.load(std::memory_order_relaxed)) {
+        return true;
+    }
+
+    // Gate future frames before observing the queue. Present() records its callback on the
+    // scheduler, so the gate must be checked under queue_mutex to close the enqueue race.
+    {
+        std::unique_lock lock{queue_mutex};
+        presentation_suspended.store(true, std::memory_order_relaxed);
+        frame_cv.wait(lock, [this] { return present_queue.empty(); });
+    }
+
+    // An empty queue only means the presentation thread has taken the last frame. The timed lock
+    // also waits for any in-flight CopyToSwapchain call without turning a wedged driver into an
+    // unbounded HOME-button hang.
+    std::unique_lock swapchain_lock{swapchain_mutex, std::defer_lock};
+    if (!swapchain_lock.try_lock_for(std::chrono::seconds(5))) {
+        LOG_ERROR(Render_Vulkan,
+                  "Presentation suspend timed out waiting for the swapchain lock");
+        std::scoped_lock lock{queue_mutex};
+        presentation_suspended.store(false, std::memory_order_relaxed);
+        return false;
+    }
+
+    suspended_width = swapchain.GetWidth();
+    suspended_height = swapchain.GetHeight();
+    scheduler.Finish();
+    graphics_queue.waitIdle();
+    {
+        std::scoped_lock submit_lock{scheduler.submit_mutex};
+        instance.GetDevice().waitIdle();
+    }
+
+    swapchain.DestroyResources();
+    if (surface) {
+        instance.GetInstance().destroySurfaceKHR(surface);
+    }
+    surface = vk::SurfaceKHR{};
+    next_surface = surface;
+    LOG_INFO(Render_Vulkan, "Presentation suspended at {}x{}", suspended_width, suspended_height);
+    return true;
+}
+
+void PresentWindow::ResumePresentation() {
+    if (!presentation_suspended.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    std::scoped_lock swapchain_lock{swapchain_mutex};
+    surface = CreateSurface(instance.GetInstance(), emu_window);
+    next_surface = surface;
+    swapchain.Create(suspended_width, suspended_height, surface, low_refresh_rate);
+    surface_recreate_requested.store(false, std::memory_order_release);
+    {
+        std::scoped_lock queue_lock{queue_mutex};
+        presentation_suspended.store(false, std::memory_order_relaxed);
+    }
+    LOG_INFO(Render_Vulkan, "Presentation resumed at {}x{}", suspended_width, suspended_height);
+}
+
 void PresentWindow::CopyToSwapchain(Frame* frame) {
+    const bool forced_recreate = surface_recreate_requested.exchange(false,
+                                                                      std::memory_order_acq_rel);
     const auto recreate_swapchain = [&] {
 #ifdef ANDROID
         {
@@ -414,7 +513,7 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
     const bool vsync_changed = vsync_enabled != use_vsync;
-    if (vsync_changed || size_changed) [[unlikely]] {
+    if (forced_recreate || vsync_changed || size_changed) [[unlikely]] {
         vsync_enabled = use_vsync;
         recreate_swapchain();
     }

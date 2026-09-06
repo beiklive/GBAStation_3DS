@@ -99,6 +99,7 @@ private:
     std::condition_variable free_cv;
     std::condition_variable_any wait_cv;
     std::jthread wait_thread;
+    std::atomic_bool gpu_failed{false};
 };
 
 } // namespace Vulkan

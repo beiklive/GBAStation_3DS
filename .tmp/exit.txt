@@ -1,0 +1,14 @@
+=== Azahar Switch exit diagnostics start ===
+[exit +2 ms] main entry argc=4
+[exit +50 ms] Run entry argc=4 appletLockExit=0x0
+[exit +104 ms] clock apply: module=cpu requested_hz=1785000000 set_rc=0x0 get_rc=0x0 actual_hz=1785000000
+[exit +122 ms] clock apply: module=gpu requested_hz=921600000 set_rc=0x0 get_rc=0x0 actual_hz=921600000
+[exit +134 ms] clock apply: module=memory requested_hz=1600000000 set_rc=0x0 get_rc=0x0 actual_hz=1600000000
+[exit +380 ms] nwindow[graphics-entry]: valid=1 connected=1 dimensions_rc=0x0 size=1280x720 configured=0x0 requested=0x0 cur_slot=-1 swap_interval=1
+[exit +396 ms] nwindow[graphics-entry-done]: valid=1 connected=1 dimensions_rc=0x0 size=1280x720 configured=0x0 requested=0x0 cur_slot=-1 swap_interval=1
+[exit +919915 ms] std::terminate called
+[exit +919935 ms] fatal signal 6
+[exit +919941 ms] userAppExit entry
+[exit +919944 ms] memsummary[userAppExit-entry]: regions=249 suspects=137 suspect_bytes=0x8d3d4000
+[exit +919960 ms] userAppExit closing logs
+=== Azahar Switch exit diagnostics end ===

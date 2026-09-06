@@ -92,6 +92,8 @@
     "CPU 时钟频率": "CPU Clock Speed",
     "视频 CPU 节流": "Video CPU Throttle",
     "视频节流时钟": "Video Throttle Clock",
+    "严格 GPU 同步": "Strict GPU Synchronization",
+    "禁用管线快速路径": "Disable Pipeline Fast Path",
     "暂无金手指": "No Cheats",
     "已加载的金手指会在这里显示": "Loaded cheats will be shown here",
     "基础画面设置": "Basic Display Settings",

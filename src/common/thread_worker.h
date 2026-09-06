@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -90,6 +91,9 @@ public:
             Common::SetCurrentThreadName(thread_name.data());
 #ifdef __SWITCH__
             SwitchThreadWorker::PinWorkerThread(thread_name, index);
+            // Shader and pipeline construction is intentionally asynchronous. Do not
+            // let it compete with the emulation dispatcher or Vulkan submission path.
+            Common::SetCurrentThreadPriority(ThreadPriority::Low);
 #endif
             {
                 [[maybe_unused]] std::conditional_t<with_state, StateType, int> state{func(index)};
@@ -119,10 +123,17 @@ public:
                             ++recent_first_count;
                         }
                     }
-                    if constexpr (with_state) {
-                        task(&state);
-                    } else {
-                        task();
+                    try {
+                        if constexpr (with_state) {
+                            task(&state);
+                        } else {
+                            task();
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_CRITICAL(Common, "Unhandled exception in {} worker: {}", thread_name,
+                                     e.what());
+                    } catch (...) {
+                        LOG_CRITICAL(Common, "Unknown exception in {} worker", thread_name);
                     }
                     ++work_done;
                 }

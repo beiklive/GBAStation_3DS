@@ -85,8 +85,17 @@ public:
 
     void NotifySurfaceChanged(bool second) override;
 
+    bool SuspendPresentation() override {
+        return main_present_window.SuspendPresentation();
+    }
+
+    void ResumePresentation() override {
+        main_present_window.ResumePresentation();
+    }
+
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override;
+    void WaitIdle() override;
 
     // Re-renders the most recently uploaded 3DS screen textures without advancing the core.
     // The Switch menu uses this to keep navigation responsive while emulation is paused.

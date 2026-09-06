@@ -113,7 +113,6 @@ constexpr const char* MemMapLogPath = "sdmc:/GBAStation/3ds/debug/memmap.txt";
 constexpr const char* LauncherPath = "sdmc:/switch/GBAStation.nro";
 constexpr const char* SwitchFastmemEnv = "GBASTATION_SWITCH_FASTMEM";
 constexpr const char* SwitchJitFastDispatchEnv = "GBASTATION_SWITCH_JIT_FAST_DISPATCH";
-constexpr const char* LsfgFrameGenerationEnv = "GBASTATION_LSFG";
 constexpr const char* DisableNvkShaderCacheMarkerPath =
     "sdmc:/GBAStation/3ds/disable_nvk_shader_cache";
 constexpr const char* NvkFullIdleCompletionMarkerPath =
@@ -157,6 +156,11 @@ FILE* exit_log{};
 auto exit_log_started = std::chrono::steady_clock::now();
 bool raw_marker_enabled = true;
 PadState pad{};
+std::atomic_bool applet_resume_pending{false};
+std::atomic_bool applet_background{false};
+std::atomic_bool applet_presentation_suspended{false};
+std::atomic_bool applet_background_prepared{false};
+bool applet_auto_muted = false;
 
 bool ParseDiagnosticLogEnvValue(const char* value, bool fallback) {
     if (!value || !*value) {
@@ -685,6 +689,27 @@ bool PumpAppletMessages() {
 
     DebugLog("applet message: %u (%s)", message, AppletMessageName(message));
     const bool keep_running = appletProcessMessage(message);
+    if (keep_running && message == AppletMessage_FocusStateChanged) {
+        // FocusStateChanged is emitted for all focus transitions, not only HOME/sleep. Treat both
+        // OutOfFocus and Background as non-running applet states; only InFocus is a valid resume
+        // path when a separate Resume message is not emitted.
+        const AppletFocusState focus_state = appletGetFocusState();
+        const bool background = focus_state != AppletFocusState_InFocus;
+        const bool was_background = applet_background.exchange(background, std::memory_order_acq_rel);
+        if (background) {
+            DebugLog("applet focus changed: background, suspending emulation");
+        } else if (was_background && focus_state == AppletFocusState_InFocus) {
+            applet_resume_pending.store(true, std::memory_order_release);
+            DebugLog("applet focus changed: foreground, queuing Vulkan surface recreation");
+        } else {
+            DebugLog("applet focus changed: state=%u", static_cast<unsigned>(focus_state));
+        }
+    }
+    if (keep_running && message == AppletMessage_Resume) {
+        applet_background.store(false, std::memory_order_release);
+        applet_resume_pending.store(true, std::memory_order_release);
+        DebugLog("applet resume queued for Vulkan surface recreation");
+    }
     if (!keep_running) {
         DebugLog("applet message requested exit: %u (%s)", message, AppletMessageName(message));
     }
@@ -2454,7 +2479,6 @@ void ConfigureSettings() {
     Settings::RestoreGlobalState(false);
     setenv(SwitchFastmemEnv, "0", 1);
     setenv(SwitchJitFastDispatchEnv, "0", 1);
-    setenv(LsfgFrameGenerationEnv, "0", 1);
     Settings::values.use_cpu_jit.SetValue(true);
     Settings::values.cpu_clock_percentage.SetValue(100);
     Settings::values.is_new_3ds.SetValue(true);
@@ -2590,7 +2614,7 @@ void ConfigureSettings() {
     profile.use_touch_from_button = false;
     profile.touch_from_button_map_index = 0;
 
-    DebugLog("switch settings: cpu_jit=%d cpu_clock=%d new3ds=%d vulkan=%d hw_shader=%d shader_jit=%d async_shader=%d async_present=%d disk_cache=%d audio_hle=%d audio_stretch=%d realtime_audio=%d res=%u",
+    DebugLog("switch settings: cpu_jit=%d cpu_clock=%d new3ds=%d vulkan=%d hw_shader=%d shader_jit=%d async_shader=%d strict_gpu_sync=%d disable_pipeline_fast_path=%d async_present=%d disk_cache=%d audio_hle=%d audio_stretch=%d realtime_audio=%d res=%u",
              Settings::values.use_cpu_jit.GetValue() ? 1 : 0,
              Settings::values.cpu_clock_percentage.GetValue(),
              Settings::values.is_new_3ds.GetValue() ? 1 : 0,
@@ -2598,6 +2622,8 @@ void ConfigureSettings() {
              Settings::values.use_hw_shader.GetValue() ? 1 : 0,
              Settings::values.use_shader_jit.GetValue() ? 1 : 0,
              Settings::values.async_shader_compilation.GetValue() ? 1 : 0,
+             Settings::values.strict_gpu_sync.GetValue() ? 1 : 0,
+             Settings::values.disable_pipeline_fast_path.GetValue() ? 1 : 0,
              Settings::values.async_presentation.GetValue() ? 1 : 0,
              Settings::values.use_disk_shader_cache.GetValue() ? 1 : 0,
              Settings::values.audio_emulation.GetValue() == Settings::AudioEmulation::HLE ? 1 : 0,
@@ -2875,13 +2901,6 @@ bool ApplySwitchJitFastDispatchConfig() {
     return enabled;
 }
 
-bool ApplyLsfgFrameGenerationConfig() {
-    using SwitchFrontend::GBAStationConfig::GetConfigValue;
-    const bool enabled = ParseConfigBool(GetConfigValue("lsfg_frame_generation"), false);
-    setenv(LsfgFrameGenerationEnv, enabled ? "1" : "0", 1);
-    return enabled;
-}
-
 std::string FormatFloat(float value) {
     char text[32]{};
     std::snprintf(text, sizeof(text), "%.3f", value);
@@ -3083,6 +3102,16 @@ int Run(int argc, char** argv) {
     StartupLog("Run: appletLockExit");
     const LibnxResult lock_exit_rc = appletLockExit();
     StartupLog("Run: appletLockExit rc=0x%x", lock_exit_rc);
+    applet_resume_pending.store(false, std::memory_order_release);
+    applet_background.store(false, std::memory_order_release);
+    applet_presentation_suspended.store(false, std::memory_order_release);
+    applet_background_prepared.store(false, std::memory_order_release);
+    applet_auto_muted = false;
+    const LibnxResult focus_mode_rc =
+        appletSetFocusHandlingMode(AppletFocusHandlingMode_SuspendHomeSleep);
+    const LibnxResult resume_message_rc = appletSetRestartMessageEnabled(true);
+    StartupLog("Run: applet focus handling rc=0x%x resume message rc=0x%x", focus_mode_rc,
+               resume_message_rc);
     DebugOpen();
     ExitLogOpen("w");
     ExitLog("Run entry argc=%d appletLockExit=0x%x", argc, lock_exit_rc);
@@ -3121,6 +3150,10 @@ int Run(int argc, char** argv) {
 
     StartupLog("Run: pin main thread affinity");
     PinCurrentThreadToCore(2, "main");
+    // Keep the emulator dispatcher ahead of optional rendering work. Vulkan workers
+    // are confined to cores 0/1, but driver and kernel activity can still preempt this
+    // thread during a scene transition at the default app priority.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
 
     StartupLog("Run: pad init");
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -3139,7 +3172,6 @@ int Run(int argc, char** argv) {
     const VideoStreamOptions video_stream_options = LoadVideoStreamOptions();
     const bool switch_fastmem_enabled = ApplySwitchFastmemConfig();
     const bool switch_jit_fast_dispatch_enabled = ApplySwitchJitFastDispatchConfig();
-    const bool lsfg_frame_generation_enabled = ApplyLsfgFrameGenerationConfig();
     ApplyConfiguredDisplayDefaults(launch_options.display_settings,
                                    !launch_options.display_settings_from_game_db,
                                    !launch_options.display_settings_from_game_db);
@@ -3152,7 +3184,7 @@ int Run(int argc, char** argv) {
     // duplicate-frame skipping enabled that leaves VI displaying the initial black image even
     // though the emulated system and renderer are still advancing.
     Settings::values.use_skip_duplicate_frames.SetValue(false);
-    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u fast_forward=%.2f skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d lsfg_frame_generation=%d movie_throttle=%d movie_clock=%d",
+    DebugLog("GBAStation config applied: path=%s options=%zu upscale=%s game_db_display=%d launch_layout=%s launch_orientation=%d launch_res=%d effective_res=%u fast_forward=%.2f skip_duplicate=%d switch_fastmem=%d switch_jit_fast_dispatch=%d movie_throttle=%d movie_clock=%d",
              SwitchFrontend::GBAStationConfig::GetLoadedConfigPath().c_str(),
              SwitchFrontend::GBAStationConfig::GetLoadedOptionCount(),
              SwitchFrontend::GBAStationConfig::GetConfigValue("upscale", "default").c_str(),
@@ -3165,7 +3197,6 @@ int Run(int argc, char** argv) {
              Settings::values.use_skip_duplicate_frames.GetValue() ? 1 : 0,
              switch_fastmem_enabled ? 1 : 0,
              switch_jit_fast_dispatch_enabled ? 1 : 0,
-             lsfg_frame_generation_enabled ? 1 : 0,
              video_stream_options.movie_cpu_throttle ? 1 : 0,
              video_stream_options.movie_throttle_clock);
     StartupLog("Run: FileUtil::SetUserPath %s/", SystemDir);
@@ -3365,8 +3396,9 @@ int Run(int argc, char** argv) {
         settings.movie_cpu_throttle = movie_cpu_throttle.enabled.load(std::memory_order_acquire);
         settings.movie_throttle_clock =
             movie_cpu_throttle.throttle_clock.load(std::memory_order_acquire);
-        settings.lsfg_frame_generation = ParseConfigBool(
-            SwitchFrontend::GBAStationConfig::GetConfigValue("lsfg_frame_generation"), false);
+        settings.strict_gpu_sync = Settings::values.strict_gpu_sync.GetValue();
+        settings.disable_pipeline_fast_path =
+            Settings::values.disable_pipeline_fast_path.GetValue();
         settings.controller_pointer = window.IsControllerPointerEnabled();
         return settings;
     };
@@ -3476,6 +3508,46 @@ int Run(int argc, char** argv) {
         }
 
         auto& renderer = system.GPU().Renderer();
+
+        if (applet_resume_pending.exchange(false, std::memory_order_acq_rel)) {
+            DebugLog("applying applet resume: restoring Vulkan presentation");
+            const bool was_presentation_suspended =
+                applet_presentation_suspended.exchange(false, std::memory_order_acq_rel);
+            if (was_presentation_suspended) {
+                renderer.ResumePresentation();
+            } else {
+                renderer.NotifySurfaceChanged(false);
+            }
+            window.SetInputSuppressed(false);
+            InputCommon::SwitchHID::SetInputSuppressed(false);
+            if (applet_auto_muted) {
+                Settings::values.audio_muted = false;
+                applet_auto_muted = false;
+            }
+            applet_background_prepared.store(false, std::memory_order_release);
+            block_game_input_until_release = true;
+        }
+
+        if (applet_background.load(std::memory_order_acquire)) {
+            if (!applet_background_prepared.exchange(true, std::memory_order_acq_rel)) {
+                if (!Settings::values.audio_muted) {
+                    Settings::values.audio_muted = true;
+                    applet_auto_muted = true;
+                }
+                DebugLog("applet background: waiting for Vulkan GPU work before suspend");
+                renderer.WaitIdle();
+                if (renderer.SuspendPresentation()) {
+                    applet_presentation_suspended.store(true, std::memory_order_release);
+                    DebugLog("applet background: Vulkan presentation suspended");
+                } else {
+                    DebugLog("applet background: Vulkan presentation suspend failed");
+                }
+            }
+            window.SetInputSuppressed(true);
+            InputCommon::SwitchHID::SetInputSuppressed(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds{16});
+            continue;
+        }
 
         if (!saw_guest_frame && now - last_keepalive >= std::chrono::seconds(2)) {
             keepalive_count++;
@@ -3672,6 +3744,9 @@ int Run(int argc, char** argv) {
             Settings::values.anisotropic_filtering.SetValue(
                 static_cast<Settings::AnisotropicFiltering>(runtime.anisotropic_filtering));
             Settings::values.disable_right_eye_render.SetValue(runtime.disable_right_eye);
+            Settings::values.strict_gpu_sync.SetValue(runtime.strict_gpu_sync);
+            Settings::values.disable_pipeline_fast_path.SetValue(
+                runtime.disable_pipeline_fast_path);
             movie_cpu_throttle.enabled.store(runtime.movie_cpu_throttle,
                                              std::memory_order_release);
             movie_cpu_throttle.throttle_clock.store(runtime.movie_throttle_clock,
@@ -3698,19 +3773,24 @@ int Run(int argc, char** argv) {
             SwitchFrontend::GBAStationConfig::SetConfigValue(
                 "movie_throttle_clock", std::to_string(runtime.movie_throttle_clock));
             SwitchFrontend::GBAStationConfig::SetConfigValue(
-                "lsfg_frame_generation", runtime.lsfg_frame_generation ? "true" : "false");
+                "strict_gpu_sync", runtime.strict_gpu_sync ? "true" : "false");
+            SwitchFrontend::GBAStationConfig::SetConfigValue(
+                "disable_pipeline_fast_path",
+                runtime.disable_pipeline_fast_path ? "true" : "false");
             const bool saved = SwitchFrontend::GBAStationConfig::SaveConfig();
             SwitchFrontend::OverlayUI::ShowToast(
-                saved ? GBA_L("运行设置已保存；LSFG 重启游戏后生效")
+                saved ? GBA_L("运行设置已保存")
                       : GBA_L("运行设置保存失败"));
             DebugLog("runtime menu settings: fps=%d custom_textures=%d texture_filter=%d "
                      "anisotropy=%dx right_eye_disabled=%d cpu_clock=%d movie_throttle=%d "
-                     "movie_clock=%d lsfg=%d pointer=%d saved=%d",
+                     "movie_clock=%d strict_gpu_sync=%d disable_pipeline_fast_path=%d pointer=%d saved=%d",
                      runtime.fps_counter ? 1 : 0, runtime.custom_textures ? 1 : 0,
                      runtime.texture_filter, 1 << runtime.anisotropic_filtering,
                      runtime.disable_right_eye ? 1 : 0,
                      runtime.cpu_clock_percentage, runtime.movie_cpu_throttle ? 1 : 0,
-                     runtime.movie_throttle_clock, runtime.lsfg_frame_generation ? 1 : 0,
+                     runtime.movie_throttle_clock,
+                     runtime.strict_gpu_sync ? 1 : 0,
+                     runtime.disable_pipeline_fast_path ? 1 : 0,
                      runtime.controller_pointer ? 1 : 0,
                      saved ? 1 : 0);
             block_game_input_until_release = true;
@@ -4456,6 +4536,16 @@ int Run(int argc, char** argv) {
     system.SetMoviePlaying(false);
     ExitLog("shutdown step: restore temporary settings done");
     const auto shutdown_started = Clock::now();
+    if (system.IsPoweredOn() && applet_presentation_suspended.exchange(false, std::memory_order_acq_rel)) {
+        ExitLog("shutdown step: resume suspended Vulkan presentation begin");
+        system.GPU().Renderer().ResumePresentation();
+        ExitLog("shutdown step: resume suspended Vulkan presentation done");
+    }
+    applet_background_prepared.store(false, std::memory_order_release);
+    if (applet_auto_muted) {
+        Settings::values.audio_muted = false;
+        applet_auto_muted = false;
+    }
     if (menu_initialized) {
         ExitLog("shutdown step: VulkanOverlay::PrepareForShutdown begin");
         SwitchFrontend::VulkanOverlay::PrepareForShutdown();

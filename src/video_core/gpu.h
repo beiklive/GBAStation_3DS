@@ -71,6 +71,9 @@ public:
     /// Flushes and invalidates all memory in the rasterizer cache and removes any leftover state.
     void ClearAll(bool flush);
 
+    /// Waits until guest and renderer GPU work required by the current backend has completed.
+    void WaitIdle();
+
     /// Executes the provided GSP command.
     void Execute(const Service::GSP::Command& command);
 

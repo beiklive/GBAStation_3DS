@@ -164,6 +164,13 @@ void GPU::ClearAll(bool flush) {
     impl->rasterizer->ClearAll(flush);
 }
 
+void GPU::WaitIdle() {
+    // Guest GPU commands execute synchronously on the core thread. The active
+    // renderer may still have queued backend work, so let it drain that work
+    // before serializing or replacing GPU state.
+    impl->renderer->WaitIdle();
+}
+
 void GPU::Execute(const Service::GSP::Command& command) {
     using Service::GSP::CommandId;
     auto& regs = impl->pica.regs;

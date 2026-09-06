@@ -449,7 +449,7 @@ bool BuildFontAtlas() {
         "基础画面设置布局设置个性化设置快进倍率三维分辨率遮罩选择遮罩开关遮罩文件"
         "同步遮罩同步画面设置执行已同步到个游戏失败"
         "运行设置即时画面设置性能视频和输入显示禁用右眼渲染各向异性过滤"
-        "CPU时钟频率视频节流"
+        "CPU时钟频率视频节流严格 GPU 同步禁用管线快速路径"
         "选择遮罩未选择文件夹图片列表目录上级目录预览加载失败暂无可用文件"
         "竖向横向上屏优先下屏优先混合仅上屏仅下屏自定义开启关闭°"
         "安全关闭模拟器未保存的游戏进度可能丢失"
@@ -2047,13 +2047,13 @@ void DrawPortraitMenu(const State& state) {
             }
         }
     } else if (item == Item::Runtime) {
-        const std::array<const char*, 7> labels{{
+        const std::array<const char*, 8> labels{{
             GBA_L("FPS 显示"), GBA_L("禁用右眼渲染"), GBA_L("各向异性过滤"), GBA_L("CPU 时钟频率"), GBA_L("视频 CPU 节流"),
-            GBA_L("视频节流时钟"), GBA_L("LSFG 插帧（重启生效）"),
+            GBA_L("视频节流时钟"), GBA_L("严格 GPU 同步"), GBA_L("禁用管线快速路径"),
         }};
-        const std::array<int, 7> icons{{0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5,
-                                         0xE02C}};
-        const std::array<std::string, 7> values{{
+        const std::array<int, 8> icons{{0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5,
+                                         0xE8E5, 0xE8E5}};
+        const std::array<std::string, 8> values{{
             state.runtime.fps_counter ? GBA_L("开启") : GBA_L("关闭"),
             state.runtime.disable_right_eye ? GBA_L("开启") : GBA_L("关闭"),
             state.runtime.anisotropic_filtering == 0
@@ -2062,21 +2062,42 @@ void DrawPortraitMenu(const State& state) {
             std::to_string(state.runtime.cpu_clock_percentage) + "%",
             state.runtime.movie_cpu_throttle ? GBA_L("开启") : GBA_L("关闭"),
             std::to_string(state.runtime.movie_throttle_clock) + "%",
-            state.runtime.lsfg_frame_generation ? GBA_L("开启") : GBA_L("关闭"),
+            state.runtime.strict_gpu_sync ? GBA_L("开启") : GBA_L("关闭"),
+            state.runtime.disable_pipeline_fast_path ? GBA_L("开启") : GBA_L("关闭"),
         }};
-        constexpr std::array<float, 7> RowY{{220.0f, 278.0f, 336.0f, 426.0f, 484.0f, 542.0f,
-                                              600.0f}};
+        constexpr std::array<float, 8> BaseRowY{{220.0f, 278.0f, 336.0f, 416.0f, 464.0f, 512.0f,
+                                                  560.0f, 608.0f}};
         const int focus = state.content_focused
-                              ? std::clamp(state.content_focus, 0, static_cast<int>(RowY.size()) - 1)
+                              ? std::clamp(state.content_focus, 0,
+                                           static_cast<int>(BaseRowY.size()) - 1)
                               : 0;
+        constexpr float ViewTop = 208.0f;
+        constexpr float ViewBottom = 600.0f;
+        constexpr float RowH = 48.0f;
+        const float content_bottom = BaseRowY.back() + RowH;
+        const float max_scroll = std::max(0.0f, content_bottom - ViewBottom);
+        const float scroll_y = std::clamp(
+            BaseRowY[focus] + RowH - ViewBottom, 0.0f, max_scroll);
         Text(ContentX, ContentHeader, 25, White, GetItemLabels()[selected]);
         Rect(ContentX, ContentHeader + 20, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
-        Text(ContentX, 200, 18, Cyan, GBA_L("即时画面设置"));
-        Text(ContentX, 404, 18, Cyan, GBA_L("性能视频和输入"));
+        Text(ContentX, 200.0f - scroll_y, 18, Cyan, GBA_L("即时画面设置"));
+        Text(ContentX, 404.0f - scroll_y, 18, Cyan, GBA_L("性能视频和输入"));
         for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
-            draw_row(RowY[row], 48.0f, icons[row], labels[row], values[row],
-                     state.content_focused && focus == row, row == 2 || row == 3 || row == 5,
-                     White);
+            const float y = BaseRowY[row] - scroll_y;
+            if (y + RowH < ViewTop || y > ViewBottom) {
+                continue;
+            }
+            draw_row(y, RowH, icons[row], labels[row], values[row],
+                      state.content_focused && focus == row, row == 2 || row == 3 || row == 5,
+                      White);
+        }
+        if (max_scroll > 0.0f) {
+            if (scroll_y > 0.0f) {
+                Text(ContentX + ContentW - 24.0f, ViewTop - 8.0f, 18, Cyan, "^");
+            }
+            if (scroll_y < max_scroll) {
+                Text(ContentX + ContentW - 24.0f, ViewBottom + 16.0f, 18, Cyan, "v");
+            }
         }
     } else if (item == Item::Cheats) {
         const int count = static_cast<int>(state.cheats.size());
@@ -2313,15 +2334,13 @@ void BuildMenu(const State& state) {
             }
         }
     } else if (item == Item::Runtime) {
-        const std::array<const char*, 7> labels{{
+        const std::array<const char*, 8> labels{{
             GBA_L("FPS 显示"), GBA_L("禁用右眼渲染"), GBA_L("各向异性过滤"), GBA_L("CPU 时钟频率"), GBA_L("视频 CPU 节流"),
-            GBA_L("视频节流时钟"), GBA_L("LSFG 插帧（重启生效）"),
+            GBA_L("视频节流时钟"), GBA_L("严格 GPU 同步"), GBA_L("禁用管线快速路径"),
         }};
-        const std::array<int, 7> icons{{
-            0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5,
-            0xE02C,
-        }};
-        std::array<std::string, 7> values{};
+        const std::array<int, 8> icons{{0xE8E5, 0xE8A1, 0xE3F4, 0xE8E5, 0xE8EF, 0xE8E5,
+                                         0xE8E5, 0xE8E5}};
+        std::array<std::string, 8> values{};
         values[0] = state.runtime.fps_counter ? GBA_L("开启") : GBA_L("关闭");
         values[1] = state.runtime.disable_right_eye ? GBA_L("开启") : GBA_L("关闭");
         values[2] = state.runtime.anisotropic_filtering == 0
@@ -2330,25 +2349,35 @@ void BuildMenu(const State& state) {
         values[3] = std::to_string(state.runtime.cpu_clock_percentage) + "%";
         values[4] = state.runtime.movie_cpu_throttle ? GBA_L("开启") : GBA_L("关闭");
         values[5] = std::to_string(state.runtime.movie_throttle_clock) + "%";
-        values[6] = state.runtime.lsfg_frame_generation ? GBA_L("开启") : GBA_L("关闭");
+        values[6] = state.runtime.strict_gpu_sync ? GBA_L("开启") : GBA_L("关闭");
+        values[7] = state.runtime.disable_pipeline_fast_path ? GBA_L("开启") : GBA_L("关闭");
         constexpr float HeaderY = 150.0f;
         constexpr float HeaderSize = 27.0f;
         constexpr float SectionSize = 18.0f;
         constexpr float LabelSize = 20.0f;
         constexpr float ValueSize = 18.0f;
         constexpr float RowH = 42.0f;
-        constexpr std::array<float, 7> RowY{{204.0f, 252.0f, 300.0f, 436.0f, 484.0f,
-                                              532.0f, 580.0f}};
+        constexpr std::array<float, 8> BaseRowY{{204.0f, 252.0f, 300.0f, 428.0f, 476.0f, 524.0f,
+                                                  572.0f, 620.0f}};
         const int focus = state.content_focused
                               ? std::clamp(state.content_focus, 0,
-                                            static_cast<int>(RowY.size()) - 1)
+                                            static_cast<int>(BaseRowY.size()) - 1)
                               : 0;
+        constexpr float ViewTop = 190.0f;
+        constexpr float ViewBottom = 600.0f;
+        const float content_bottom = BaseRowY.back() + RowH;
+        const float max_scroll = std::max(0.0f, content_bottom - ViewBottom);
+        const float scroll_y = std::clamp(
+            BaseRowY[focus] + RowH - ViewBottom, 0.0f, max_scroll);
         Text(ContentX, HeaderY, HeaderSize, White, GetItemLabels()[selected]);
         Rect(ContentX, HeaderY + 40.0f, ContentW, 1, {0.0f, 0.48f, 0.80f, 0.28f});
-        Text(ContentX, 176.0f, SectionSize, Cyan, GBA_L("即时画面设置"));
-        Text(ContentX, 404.0f, SectionSize, Cyan, GBA_L("性能视频和输入"));
+        Text(ContentX, 176.0f - scroll_y, SectionSize, Cyan, GBA_L("即时画面设置"));
+        Text(ContentX, 404.0f - scroll_y, SectionSize, Cyan, GBA_L("性能视频和输入"));
         for (int row = 0; row < static_cast<int>(labels.size()); ++row) {
-            const float y = RowY[row];
+            const float y = BaseRowY[row] - scroll_y;
+            if (y + RowH < ViewTop || y > ViewBottom) {
+                continue;
+            }
             const bool focused = state.content_focused && focus == row;
             Rect(ContentX, y, ContentW, RowH,
                  focused ? std::array<float, 4>{0.0f, 0.30f, 0.50f, 0.52f}
@@ -2364,6 +2393,14 @@ void BuildMenu(const State& state) {
                 SelectorValue(ContentX, y, ContentW, RowH, values[row], Cyan);
             } else {
                 TextRight(ContentX + ContentW - 18.0f, y + 30, ValueSize, Cyan, values[row]);
+            }
+        }
+        if (max_scroll > 0.0f) {
+            if (scroll_y > 0.0f) {
+                Text(ContentX + ContentW - 24.0f, ViewTop - 8.0f, 18, Cyan, "^");
+            }
+            if (scroll_y < max_scroll) {
+                Text(ContentX + ContentW - 24.0f, ViewBottom + 16.0f, 18, Cyan, "v");
             }
         }
     } else if (item == Item::Cheats) {

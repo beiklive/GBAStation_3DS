@@ -160,6 +160,10 @@ LibnxSink::LibnxSink(std::string_view) {
             LOG_ERROR(Audio_Sink, "Failed to allocate audio buffer {}", i);
             audoutStopAudioOut();
             audoutExit();
+            for (int j = 0; j < i; ++j) {
+                free(s_audio_data[j]);
+                s_audio_data[j] = nullptr;
+            }
             return;
         }
         std::memset(s_audio_data[i], 0, kAlignedSize);
@@ -226,55 +230,65 @@ void LibnxSink::AudioThread() {
         if (rc != 0 || count == 0 || released == nullptr)
             continue;
 
-        input_acc += kOutSamples * static_cast<std::size_t>(native_sample_rate);
-        const std::size_t n_in = input_acc / kAudoutRate;
-        input_acc %= kAudoutRate;
+        // audoutWaitPlayFinish() can return a linked list when the thread was delayed. Every
+        // released buffer must be refilled and appended; recycling only the head permanently
+        // removes the remaining buffers from the hardware queue.
+        while (released != nullptr) {
+            AudioOutBuffer* next = released->next;
 
-        if (callback) {
-            callback(s_input_buf, n_in);
-        } else {
-            std::memset(s_input_buf, 0, n_in * sizeof(s16) * 2);
-        }
+            input_acc += kOutSamples * static_cast<std::size_t>(native_sample_rate);
+            const std::size_t n_in = input_acc / kAudoutRate;
+            input_acc %= kAudoutRate;
 
-        // Linear interpolation: native_sample_rate Hz → kAudoutRate Hz
-        auto* out = reinterpret_cast<s16*>(released->buffer);
-        constexpr float kRatio = static_cast<float>(native_sample_rate) / static_cast<float>(kAudoutRate);
-        for (std::size_t i = 0; i < kOutSamples; i++) {
-            const float src  = static_cast<float>(i) * kRatio;
-            const std::size_t idx0 = std::min(static_cast<std::size_t>(src), n_in - 1);
-            const float frac = src - static_cast<float>(idx0);
-            const std::size_t idx1 = std::min(idx0 + 1, n_in - 1);
-            for (int ch = 0; ch < 2; ch++) {
-                const float a = static_cast<float>(s_input_buf[idx0 * 2 + ch]);
-                const float b = static_cast<float>(s_input_buf[idx1 * 2 + ch]);
-                out[i * 2 + ch] = static_cast<s16>(a + frac * (b - a));
+            if (callback) {
+                callback(s_input_buf, n_in);
+            } else {
+                std::memset(s_input_buf, 0, n_in * sizeof(s16) * 2);
             }
-        }
 
-        const int requested_sound = s_pending_ui_sound.exchange(-1, std::memory_order_acq_rel);
-        if (requested_sound >= 0 && requested_sound < static_cast<int>(s_ui_clips.size()) &&
-            !s_ui_clips[requested_sound].samples.empty()) {
-            active_ui_sound = requested_sound;
-            ui_frame = 0;
-        }
-        if (active_ui_sound >= 0) {
-            const auto& ui_samples = s_ui_clips[active_ui_sound].samples;
-            const std::size_t ui_frames = ui_samples.size() / 2;
-            for (std::size_t i = 0; i < kOutSamples && ui_frame < ui_frames; ++i, ++ui_frame) {
-                for (int ch = 0; ch < 2; ++ch) {
-                    const int mixed = static_cast<int>(out[i * 2 + ch]) +
-                                      static_cast<int>(ui_samples[ui_frame * 2 + ch]);
-                    out[i * 2 + ch] = static_cast<s16>(std::clamp(mixed, -32768, 32767));
+            // Linear interpolation: native_sample_rate Hz → kAudoutRate Hz
+            auto* out = reinterpret_cast<s16*>(released->buffer);
+            constexpr float kRatio = static_cast<float>(native_sample_rate) /
+                                     static_cast<float>(kAudoutRate);
+            for (std::size_t i = 0; i < kOutSamples; i++) {
+                const float src = static_cast<float>(i) * kRatio;
+                const std::size_t idx0 = std::min(static_cast<std::size_t>(src), n_in - 1);
+                const float frac = src - static_cast<float>(idx0);
+                const std::size_t idx1 = std::min(idx0 + 1, n_in - 1);
+                for (int ch = 0; ch < 2; ch++) {
+                    const float a = static_cast<float>(s_input_buf[idx0 * 2 + ch]);
+                    const float b = static_cast<float>(s_input_buf[idx1 * 2 + ch]);
+                    out[i * 2 + ch] = static_cast<s16>(a + frac * (b - a));
                 }
             }
-            if (ui_frame >= ui_frames) {
-                active_ui_sound = -1;
+
+            const int requested_sound = s_pending_ui_sound.exchange(-1, std::memory_order_acq_rel);
+            if (requested_sound >= 0 && requested_sound < static_cast<int>(s_ui_clips.size()) &&
+                !s_ui_clips[requested_sound].samples.empty()) {
+                active_ui_sound = requested_sound;
                 ui_frame = 0;
             }
-        }
+            if (active_ui_sound >= 0) {
+                const auto& ui_samples = s_ui_clips[active_ui_sound].samples;
+                const std::size_t ui_frames = ui_samples.size() / 2;
+                for (std::size_t i = 0; i < kOutSamples && ui_frame < ui_frames; ++i, ++ui_frame) {
+                    for (int ch = 0; ch < 2; ++ch) {
+                        const int mixed = static_cast<int>(out[i * 2 + ch]) +
+                                          static_cast<int>(ui_samples[ui_frame * 2 + ch]);
+                        out[i * 2 + ch] = static_cast<s16>(std::clamp(mixed, -32768, 32767));
+                    }
+                }
+                if (ui_frame >= ui_frames) {
+                    active_ui_sound = -1;
+                    ui_frame = 0;
+                }
+            }
 
-        released->data_size = kOutBytes;
-        audoutAppendAudioOutBuffer(released);
+            released->next = nullptr;
+            released->data_size = kOutBytes;
+            audoutAppendAudioOutBuffer(released);
+            released = next;
+        }
     }
 }
 

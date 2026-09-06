@@ -34,7 +34,7 @@ namespace {
 constexpr const char* Tag = "[gbastation-3ds-menu]";
 constexpr int MenuItemCount = static_cast<int>(VulkanMenuRenderer::Item::Count);
 constexpr int DisplayControlCount = 10;
-constexpr int RuntimeControlCount = 7;
+constexpr int RuntimeControlCount = 8;
 constexpr int CustomLayoutControlCount = 7;
 constexpr float SelectorInitialDelayMs = 320.0f;
 constexpr float NavigationInitialDelayMs = 280.0f;
@@ -79,7 +79,8 @@ std::atomic_bool runtime_disable_right_eye{true};
 std::atomic_int runtime_cpu_clock{100};
 std::atomic_bool runtime_movie_cpu_throttle{true};
 std::atomic_int runtime_movie_throttle_clock{50};
-std::atomic_bool runtime_lsfg_frame_generation{};
+std::atomic_bool runtime_strict_gpu_sync{};
+std::atomic_bool runtime_disable_pipeline_fast_path{};
 std::atomic_bool runtime_controller_pointer{};
 std::atomic_bool overlay_sidebar{};
 std::atomic_int overlay_focus{};
@@ -452,8 +453,12 @@ void HandleRuntimeAdjustment(int row, int direction) {
             std::memory_order_release);
         break;
     case 6:
-        runtime_lsfg_frame_generation.store(
-            !runtime_lsfg_frame_generation.load(std::memory_order_relaxed),
+        runtime_strict_gpu_sync.store(
+            !runtime_strict_gpu_sync.load(std::memory_order_relaxed), std::memory_order_release);
+        break;
+    case 7:
+        runtime_disable_pipeline_fast_path.store(
+            !runtime_disable_pipeline_fast_path.load(std::memory_order_relaxed),
             std::memory_order_release);
         break;
     default:
@@ -1014,7 +1019,9 @@ void SetRuntimeSettings(const GBAStationRuntimeSettings& settings) {
     runtime_movie_cpu_throttle.store(settings.movie_cpu_throttle, std::memory_order_release);
     runtime_movie_throttle_clock.store(std::clamp(settings.movie_throttle_clock, 10, 100),
                                        std::memory_order_release);
-    runtime_lsfg_frame_generation.store(settings.lsfg_frame_generation, std::memory_order_release);
+    runtime_strict_gpu_sync.store(settings.strict_gpu_sync, std::memory_order_release);
+    runtime_disable_pipeline_fast_path.store(settings.disable_pipeline_fast_path,
+                                             std::memory_order_release);
     runtime_controller_pointer.store(settings.controller_pointer, std::memory_order_release);
 }
 
@@ -1029,8 +1036,9 @@ GBAStationRuntimeSettings GetRuntimeSettings() {
     settings.cpu_clock_percentage = runtime_cpu_clock.load(std::memory_order_acquire);
     settings.movie_cpu_throttle = runtime_movie_cpu_throttle.load(std::memory_order_acquire);
     settings.movie_throttle_clock = runtime_movie_throttle_clock.load(std::memory_order_acquire);
-    settings.lsfg_frame_generation =
-        runtime_lsfg_frame_generation.load(std::memory_order_acquire);
+    settings.strict_gpu_sync = runtime_strict_gpu_sync.load(std::memory_order_acquire);
+    settings.disable_pipeline_fast_path =
+        runtime_disable_pipeline_fast_path.load(std::memory_order_acquire);
     settings.controller_pointer = runtime_controller_pointer.load(std::memory_order_acquire);
     return settings;
 }

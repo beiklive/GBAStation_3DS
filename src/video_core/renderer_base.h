@@ -64,6 +64,17 @@ public:
     // if second == true then it is the second screen
     virtual void NotifySurfaceChanged(bool second) {}
 
+    /// Temporarily gates presentation and releases the native surface for an applet transition.
+    virtual bool SuspendPresentation() {
+        return true;
+    }
+
+    /// Reclaims the native surface after SuspendPresentation().
+    virtual void ResumePresentation() {}
+
+    /// Drains renderer work before a core operation needs a stable GPU state.
+    virtual void WaitIdle() {}
+
     /// Returns the resolution scale factor relative to the native 3DS screen resolution
     u32 GetResolutionScaleFactor();
 

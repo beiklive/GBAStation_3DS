@@ -8,6 +8,8 @@
 #include "core/frontend/image_interface.h"
 #include "video_core/custom_textures/material.h"
 
+#include <exception>
+
 namespace VideoCore {
 
 namespace {
@@ -61,7 +63,14 @@ void CustomTexture::LoadFromDisk(bool flip_png) {
     }
 
     FileUtil::IOFile file{path, "rb"};
-    std::vector<u8> input(file.GetSize());
+    if (!file.IsOpen()) {
+        LOG_ERROR(Render, "Failed to open custom texture: {}", path);
+        return;
+    }
+    const auto file_size = file.GetSize();
+    LOG_DEBUG(Render, "Loading custom texture: path={} format={} bytes={}", path,
+              static_cast<u32>(file_format), file_size);
+    std::vector<u8> input(file_size);
     if (file.ReadBytes(input.data(), input.size()) != input.size()) {
         LOG_CRITICAL(Render, "Failed to open custom texture: {}", path);
         return;
@@ -72,7 +81,9 @@ void CustomTexture::LoadFromDisk(bool flip_png) {
         break;
     case CustomFileFormat::DDS:
     case CustomFileFormat::KTX:
-        LoadDDS(input);
+        if (!LoadDDS(input)) {
+            LOG_ERROR(Render, "Failed to decode custom texture: {}", path);
+        }
         break;
     default:
         LOG_ERROR(Render, "Unknown file format {}", file_format);
@@ -90,55 +101,78 @@ void CustomTexture::LoadPNG(std::span<const u8> input, bool flip_png) {
     format = CustomPixelFormat::RGBA8;
 }
 
-void CustomTexture::LoadDDS(std::span<const u8> input) {
+bool CustomTexture::LoadDDS(std::span<const u8> input) {
     ddsktx_format dds_format{};
-    image_interface.DecodeDDS(data, width, height, dds_format, input);
+    if (!image_interface.DecodeDDS(data, width, height, dds_format, input)) {
+        data.clear();
+        return false;
+    }
     format = ToCustomPixelFormat(dds_format);
+    return true;
 }
 
 void Material::LoadFromDisk(bool flip_png) noexcept {
-    if (IsDecoded()) {
-        return;
-    }
-    for (CustomTexture* const texture : textures) {
-        if (!texture || texture->IsLoaded()) {
-            continue;
+    try {
+        if (IsDecoded()) {
+            return;
         }
-        texture->LoadFromDisk(flip_png);
-        size += texture->data.size();
-        LOG_DEBUG(Render, "Loading {} map {}", MapTypeName(texture->type), texture->path);
-    }
-    if (!textures[0]) {
-        LOG_ERROR(Render, "Unable to create material without color texture!");
+        size = 0;
+        for (CustomTexture* const texture : textures) {
+            if (!texture || texture->IsLoaded()) {
+                continue;
+            }
+            texture->LoadFromDisk(flip_png);
+            size += texture->data.size();
+            LOG_DEBUG(Render, "Loaded {} map {} decoded_bytes={}", MapTypeName(texture->type),
+                      texture->path, texture->data.size());
+            if (!texture->IsLoaded()) {
+                LOG_ERROR(Render, "Custom texture produced no decoded data: {}", texture->path);
+                state = DecodeState::Failed;
+                return;
+            }
+        }
+        if (!textures[0]) {
+            LOG_ERROR(Render, "Unable to create material without color texture!");
+            state = DecodeState::Failed;
+            return;
+        }
+        width = textures[0]->width;
+        height = textures[0]->height;
+        format = textures[0]->format;
+        for (const CustomTexture* texture : textures) {
+            if (!texture) {
+                continue;
+            }
+            if (texture->width != width || texture->height != height) {
+                LOG_ERROR(Render,
+                          "{} map {} of material with hash {:#016X} has dimensions {}x{} "
+                          "which do not match the color texture dimensions {}x{}",
+                          MapTypeName(texture->type), texture->path, hash, texture->width,
+                          texture->height, width, height);
+                state = DecodeState::Failed;
+                return;
+            }
+            if (texture->format != format) {
+                LOG_ERROR(
+                    Render, "{} map {} is stored with {} format which does not match color format {}",
+                    MapTypeName(texture->type), texture->path,
+                    CustomPixelFormatAsString(texture->format), CustomPixelFormatAsString(format));
+                state = DecodeState::Failed;
+                return;
+            }
+        }
+        LOG_INFO(Render, "Decoded custom material hash={:#016X} dimensions={}x{} bytes={}", hash,
+                 width, height, size);
+        state = DecodeState::Decoded;
+    } catch (const std::exception& e) {
+        LOG_CRITICAL(Render, "Exception while decoding custom material hash={:#016X}: {}", hash,
+                     e.what());
         state = DecodeState::Failed;
-        return;
+    } catch (...) {
+        LOG_CRITICAL(Render, "Unknown exception while decoding custom material hash={:#016X}",
+                     hash);
+        state = DecodeState::Failed;
     }
-    width = textures[0]->width;
-    height = textures[0]->height;
-    format = textures[0]->format;
-    for (const CustomTexture* texture : textures) {
-        if (!texture) {
-            continue;
-        }
-        if (texture->width != width || texture->height != height) {
-            LOG_ERROR(Render,
-                      "{} map {} of material with hash {:#016X} has dimentions {}x{} "
-                      "which do not match the color texture dimentions {}x{}",
-                      MapTypeName(texture->type), texture->path, hash, texture->width,
-                      texture->height, width, height);
-            state = DecodeState::Failed;
-            return;
-        }
-        if (texture->format != format) {
-            LOG_ERROR(
-                Render, "{} map {} is stored with {} format which does not match color format {}",
-                MapTypeName(texture->type), texture->path,
-                CustomPixelFormatAsString(texture->format), CustomPixelFormatAsString(format));
-            state = DecodeState::Failed;
-            return;
-        }
-    }
-    state = DecodeState::Decoded;
 }
 
 void Material::AddMapTexture(CustomTexture* texture) noexcept {

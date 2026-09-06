@@ -58,8 +58,8 @@ std::atomic<u32> dynarmic_last_write_callback_addr{};
 #endif
 
 // libnx backs every JIT CodeMemory mapping with an equally sized writable allocation, while
-// Dynarmic also keeps per-block metadata. Four 64 MiB caches plus cached page-table variants
-// consume enough memory to make accelerated New 3DS workloads unstable.
+// Dynarmic also keeps per-block metadata. Keep this intermediate size for the next A/B probe:
+// it reduces cache churn without reserving the eight 128 MiB buffers seen in the high-memory test.
 constexpr std::size_t SwitchCodeCacheSize = 32 * 1024 * 1024;
 
 } // namespace
@@ -497,9 +497,8 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
 #ifdef __SWITCH__
     config.optimizations = Dynarmic::all_safe_optimizations;
     config.always_little_endian = true;
-    // Video codecs often use PLD/PLI prefetch hints in their inner loops. Hooking every hint
-    // instruction forces a callback out of generated code, so keep hints as JIT-side NOPs on
-    // Switch and rely on SVC sleep/wait paths for real guest blocking.
+    // Keep PLD/WFI/WFE/YIELD as JIT-side NOPs. This preserves the baseline hook-hint behavior
+    // while the cache and Vulkan worker changes are tested as a joint runtime variant.
     config.hook_hint_instructions = false;
     config.code_cache_size = SwitchCodeCacheSize;
     if (current_page_table) {

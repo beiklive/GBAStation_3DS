@@ -1,0 +1,18 @@
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0xc4f9a0000 rx=0x3faaa4000 range_sync=1
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0x6a2524000 rx=0x7f2ce1000 range_sync=1
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0x6cb554000 rx=0xbf705e000 range_sync=1
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0xdc6aec000 rx=0x4af654000 range_sync=1
+WARNING: NVK is not a conformant Vulkan implementation, testing use only.
+MESA: info: shader cache: sdmc:/switch/mesa_shader_cache/cache.bin, 2860 entries, 65535 KiB
+MESA: info: nvk wsi: zero-copy ENABLED
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0x5f9b16000 rx=0x45a336000 range_sync=1
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0xbbccaf000 rx=0xe4caf000 range_sync=1
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0x861cc7000 rx=0xe1f776000 range_sync=1
+[azahar-switch] JIT buffer: size=134217728 type=CodeMemory rw=0x4ce32d000 rx=0xc88f02000 range_sync=1
+[azahar-switch] JIT buffer: size=118784 type=CodeMemory rw=0xaf104a000 rx=0xbb1311000 range_sync=1
+[azahar-switch] JIT buffer: size=122880 type=CodeMemory rw=0xc83b19000 rx=0xb3c48000 range_sync=1
+[azahar-switch] JIT buffer: size=180224 type=CodeMemory rw=0x5916ba000 rx=0xcd305d000 range_sync=1
+[azahar-switch] JIT buffer: size=122880 type=CodeMemory rw=0x3a243f000 rx=0x39f9e6000 range_sync=1
+[azahar-switch] JIT buffer: size=122880 type=CodeMemory rw=0xba13f6000 rx=0x406b8a000 range_sync=1
+[azahar-switch] JIT buffer: size=122880 type=CodeMemory rw=0xb4ebb2000 rx=0xb00172000 range_sync=1
+MESA: info: shader cache: full at 65535 KiB, no longer growing

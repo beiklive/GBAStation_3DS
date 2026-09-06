@@ -243,6 +243,10 @@ void RendererVulkan::WaitForOverlayShutdown() {
     LOG_INFO(Render_Vulkan, "Overlay shutdown: renderer is idle");
 }
 
+void RendererVulkan::WaitIdle() {
+    scheduler.WaitWorker();
+}
+
 void RendererVulkan::PrepareRendertarget() {
     const auto& framebuffer_config = pica.regs.framebuffer_config;
     const auto& regs_lcd = pica.regs_lcd;
@@ -322,6 +326,9 @@ void RendererVulkan::RenderToWindow(PresentWindow& window, const Layout::Framebu
     if (force_present || !Settings::values.use_skip_duplicate_frames.GetValue() ||
         Core::PerfStats::game_frames_updated) {
         Frame* frame = window.GetRenderFrame();
+        if (frame == nullptr) {
+            return;
+        }
 
         if (layout.width != frame->width || layout.height != frame->height) {
             window.WaitPresent();
@@ -358,6 +365,9 @@ void RendererVulkan::TryPresent([[maybe_unused]] int timeout_ms, bool is_seconda
     }
 
     Frame* frame = window->GetRenderFrame();
+    if (frame == nullptr) {
+        return;
+    }
     if (layout->width != frame->width || layout->height != frame->height) {
         window->WaitPresent();
         scheduler.Finish();
@@ -2726,7 +2736,19 @@ void RendererVulkan::SwapBuffers() {
     }
 #endif
     if (!screenRendered) {
+#ifdef __SWITCH__
+        // This branch does not use Azahar's split GPU command thread. Strict GPU sync therefore
+        // maps to waiting for the Vulkan submission itself; the default remains non-blocking.
+        if (Settings::values.strict_gpu_sync.GetValue()) {
+            scheduler.Finish();
+        } else {
+            // A transiently exhausted presentation queue must not turn a skipped visual frame
+            // into a blocking GPU wait on the emulation thread.
+            scheduler.Flush();
+        }
+#else
         scheduler.Finish();
+#endif
     }
 
     system.perf_stats->EndSwap();

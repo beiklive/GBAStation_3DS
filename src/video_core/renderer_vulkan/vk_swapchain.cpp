@@ -5,14 +5,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
-#include <string_view>
 #include "common/logging/log.h"
 #include "common/microprofile.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#ifdef GBASTATION_SWITCH_LSFG
-#include "video_core/renderer_vulkan/lsfg/lsfg_bridge.h"
-#endif
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 MICROPROFILE_DEFINE(Vulkan_Acquire, "Vulkan", "Swapchain Acquire", MP_RGB(185, 66, 245));
@@ -22,17 +18,7 @@ namespace Vulkan {
 
 namespace {
 
-constexpr char LsfgEnvironmentVariable[] = "GBASTATION_LSFG";
-constexpr char LsfgShaderPath[] = "sdmc:/GBAStation/3ds/lsfg/Lossless.dll";
-
-bool IsLsfgRequested() {
-#ifdef GBASTATION_SWITCH_LSFG
-    const char* value = std::getenv(LsfgEnvironmentVariable);
-    return value && std::string_view{value} == "1";
-#else
-    return false;
-#endif
-}
+constexpr u64 SwapchainAcquireTimeoutNs = 100'000'000ULL;
 
 } // Anonymous namespace
 
@@ -57,7 +43,6 @@ void Swapchain::Create(u32 width_, u32 height_, vk::SurfaceKHR surface_, bool lo
     needs_recreation = false;
 
     Destroy();
-    lsfg_requested = IsLsfgRequested();
 
     SetPresentMode();
     if (needs_recreation) {
@@ -110,7 +95,6 @@ void Swapchain::Create(u32 width_, u32 height_, vk::SurfaceKHR surface_, bool lo
 
     SetupImages();
     RefreshSemaphores();
-    CreateLsfgRuntime();
 }
 
 bool Swapchain::AcquireNextImage() {
@@ -121,7 +105,7 @@ bool Swapchain::AcquireNextImage() {
     MICROPROFILE_SCOPE(Vulkan_Acquire);
     const vk::Device device = instance.GetDevice();
     const vk::Result result =
-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+        device.acquireNextImageKHR(swapchain, SwapchainAcquireTimeoutNs,
                                    image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
 
     switch (result) {
@@ -130,6 +114,7 @@ bool Swapchain::AcquireNextImage() {
     case vk::Result::eSuboptimalKHR:
     case vk::Result::eErrorSurfaceLostKHR:
     case vk::Result::eErrorOutOfDateKHR:
+    case vk::Result::eTimeout:
         needs_recreation = true;
         break;
     default:
@@ -153,23 +138,7 @@ void Swapchain::Present() {
     MICROPROFILE_SCOPE(Vulkan_Present);
     try {
         vk::Result result{};
-#ifdef GBASTATION_SWITCH_LSFG
-        if (lsfg_runtime) {
-            const VkPresentInfoKHR raw_present_info =
-                static_cast<VkPresentInfoKHR>(present_info);
-            VkResult raw_result = VK_SUCCESS;
-            if (lsfg_nx_present(lsfg_runtime, static_cast<VkQueue>(instance.GetPresentQueue()),
-                                &raw_present_info, &raw_result)) {
-                result = static_cast<vk::Result>(raw_result);
-            } else {
-                result = instance.GetPresentQueue().presentKHR(present_info);
-            }
-        } else {
-            result = instance.GetPresentQueue().presentKHR(present_info);
-        }
-#else
         result = instance.GetPresentQueue().presentKHR(present_info);
-#endif
         if (result == vk::Result::eSuboptimalKHR || result == vk::Result::eErrorOutOfDateKHR ||
             result == vk::Result::eErrorSurfaceLostKHR) {
             needs_recreation = true;
@@ -290,17 +259,10 @@ void Swapchain::SetSurfaceProperties() {
     }
 
     // Select number of images in swap chain, we prefer one buffer in the background to work on
-    image_count = capabilities.minImageCount + (lsfg_requested ? 2 : 1);
+    image_count = capabilities.minImageCount + 1;
     if (capabilities.maxImageCount > 0) {
         image_count = std::min(image_count, capabilities.maxImageCount);
     }
-    if (lsfg_requested && image_count < 3) {
-        LOG_WARNING(Render_Vulkan,
-                    "LSFG disabled: surface exposes only {} swapchain images (need at least 3)",
-                    image_count);
-        lsfg_requested = false;
-    }
-
     // Prefer identity transform if possible
     transform = vk::SurfaceTransformFlagBitsKHR::eIdentity;
     if (!(capabilities.supportedTransforms & transform)) {
@@ -315,7 +277,6 @@ void Swapchain::SetSurfaceProperties() {
 }
 
 void Swapchain::Destroy() {
-    DestroyLsfgRuntime();
     vk::Device device = instance.GetDevice();
     if (swapchain) {
         device.destroySwapchainKHR(swapchain);
@@ -327,6 +288,9 @@ void Swapchain::Destroy() {
     }
     image_acquired.clear();
     present_ready.clear();
+    image_count = 0;
+    image_index = 0;
+    frame_index = 0;
 }
 
 void Swapchain::RefreshSemaphores() {
@@ -353,59 +317,12 @@ void Swapchain::SetupImages() {
     vk::Device device = instance.GetDevice();
     images = device.getSwapchainImagesKHR(swapchain);
     image_count = static_cast<u32>(images.size());
-    lsfg_images.clear();
-    lsfg_images.reserve(images.size());
-    for (const vk::Image image : images) {
-        lsfg_images.push_back(static_cast<VkImage>(image));
-    }
 
     if (instance.HasDebuggingToolAttached()) {
         for (u32 i = 0; i < image_count; ++i) {
             SetObjectName(device, images[i], "Swapchain Image {}", i);
         }
     }
-}
-
-void Swapchain::CreateLsfgRuntime() {
-#ifdef GBASTATION_SWITCH_LSFG
-    if (!lsfg_requested) {
-        return;
-    }
-
-    const LsfgNxCreateInfo create_info{
-        .instance = static_cast<VkInstance>(instance.GetInstance()),
-        .physical_device = static_cast<VkPhysicalDevice>(instance.GetPhysicalDevice()),
-        .device = static_cast<VkDevice>(instance.GetDevice()),
-        .queue = static_cast<VkQueue>(instance.GetPresentQueue()),
-        .queue_family_index = instance.GetPresentQueueFamilyIndex(),
-        .get_instance_proc_addr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
-        .swapchain = static_cast<VkSwapchainKHR>(swapchain),
-        .extent = static_cast<VkExtent2D>(extent),
-        .swapchain_images = lsfg_images.data(),
-        .swapchain_image_count = image_count,
-        .shader_dll_path = LsfgShaderPath,
-        .flow_scale = 0.25F,
-        .performance_mode = true,
-    };
-    lsfg_runtime = lsfg_nx_create(&create_info);
-    if (!lsfg_runtime) {
-        LOG_ERROR(Render_Vulkan,
-                  "LSFG was requested but could not initialize. Check {} and keep LSFG disabled.",
-                  LsfgShaderPath);
-    } else {
-        LOG_INFO(Render_Vulkan, "LSFG frame generation enabled (performance mode, flow scale 0.25)");
-    }
-#endif
-}
-
-void Swapchain::DestroyLsfgRuntime() {
-#ifdef GBASTATION_SWITCH_LSFG
-    if (lsfg_runtime) {
-        lsfg_nx_destroy(lsfg_runtime);
-        lsfg_runtime = nullptr;
-    }
-#endif
-    lsfg_images.clear();
 }
 
 } // namespace Vulkan

@@ -37,8 +37,8 @@ public:
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(vk::Semaphore signal = nullptr, vk::Semaphore wait = nullptr);
 
-    /// Waits for the worker thread to finish executing everything. After this function returns it's
-    /// safe to touch worker resources.
+    /// Dispatches pending work and waits for the worker queue to drain while keeping a small
+    /// bounded amount of GPU work in flight.
     void WaitWorker();
 
     /// Waits for the given tick to trigger on the GPU.

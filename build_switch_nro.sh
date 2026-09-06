@@ -195,12 +195,21 @@ if grep -Eqi 'drm_nouveau|GLESv2|libglapi|allow-multiple-definition' \
     exit 1
 fi
 
-for identity in 'Mesa 26.1.4' 'NVIDIA Tegra X1'; do
-    if ! "${STRINGS}" "${NRO_FILE}" | grep -F "${identity}" >/dev/null; then
-        echo "ERROR: final NRO is missing identity string: ${identity}" >&2
-        exit 1
+mesa_identity=''
+for identity in 'Mesa 26.2.1' 'Mesa 26.1.4'; do
+    if "${STRINGS}" "${NRO_FILE}" | grep -F "${identity}" >/dev/null; then
+        mesa_identity="${identity}"
+        break
     fi
 done
+if [ -z "${mesa_identity}" ]; then
+    echo "ERROR: final NRO is missing a supported Mesa identity string" >&2
+    exit 1
+fi
+if ! "${STRINGS}" "${NRO_FILE}" | grep -F 'NVIDIA Tegra X1' >/dev/null; then
+    echo "ERROR: final NRO is missing identity string: NVIDIA Tegra X1" >&2
+    exit 1
+fi
 
 {
     echo "M6 static-link audit: PASS"
@@ -208,7 +217,7 @@ done
     echo "Undefined ELF symbols: 0"
     echo "Forbidden DRM/OpenGL link dependencies: 0"
     echo "Multiple-definition linker fallback: absent"
-    echo "Mesa identity: 26.1.4 raw nvkmd/nvgpu"
+    echo "Mesa identity: ${mesa_identity#Mesa } raw nvkmd/nvgpu"
 } > "${AUDIT_LOG}"
 
 hash_files=(

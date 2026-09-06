@@ -95,6 +95,8 @@ void CustomTexManager::FindCustomTextures() {
 
     const u64 title_id = system.Kernel().GetCurrentProcess()->codeset->program_id;
     const auto textures = GetTextures(title_id);
+    LOG_INFO(Render, "Scanning custom textures: title_id={:016X} files={}", title_id,
+             textures.size());
     if (!ReadConfig(title_id)) {
         use_new_hash = false;
         skip_mipmap = true;
@@ -119,6 +121,8 @@ void CustomTexManager::FindCustomTextures() {
             material->AddMapTexture(texture);
         }
     }
+    LOG_INFO(Render, "Custom texture scan complete: parsed_files={} materials={}",
+             custom_textures.size(), material_map.size());
     textures_loaded = true;
 }
 
@@ -331,44 +335,74 @@ bool CustomTexManager::ReadConfig(u64 title_id, bool options_only) {
         return false;
     }
 
-    nlohmann::json json = nlohmann::json::parse(config, nullptr, false, true);
-
-    const auto& options = json["options"];
-    skip_mipmap = options["skip_mipmap"].get<bool>();
-    flip_png_files = options["flip_png_files"].get<bool>();
-    use_new_hash = options["use_new_hash"].get<bool>();
-
-    if (options_only) {
-        return true;
-    }
-
-    const auto& textures = json["textures"];
-    for (const auto& material : textures.items()) {
-        std::size_t idx{};
-        const u64 hash = std::stoull(material.key(), &idx, 16);
-        if (!idx) {
-            LOG_ERROR(Render, "Key {} is invalid, skipping", material.key());
-            continue;
+    try {
+        nlohmann::json json = nlohmann::json::parse(config, nullptr, false, true);
+        if (json.is_discarded() || !json.is_object() || !json.contains("options")) {
+            LOG_ERROR(Render, "Invalid custom texture pack config: {}", config_path);
+            return false;
         }
-        const auto parse = [&](const std::string& file) {
-            const std::string filename{FileUtil::GetFilename(file)};
-            auto [it, new_hash] = path_to_hash_map.try_emplace(filename);
-            it->second.push_back(hash);
-        };
-        const auto value = material.value();
-        if (value.is_string()) {
-            const auto file = value.get<std::string>();
-            parse(file);
-        } else if (value.is_array()) {
-            const auto files = value.get<std::vector<std::string>>();
-            for (const std::string& file : files) {
-                parse(file);
+
+        const auto& options = json["options"];
+        if (!options.is_object() || !options.contains("skip_mipmap") ||
+            !options.contains("flip_png_files") || !options.contains("use_new_hash") ||
+            !options["skip_mipmap"].is_boolean() || !options["flip_png_files"].is_boolean() ||
+            !options["use_new_hash"].is_boolean()) {
+            LOG_ERROR(Render, "Invalid custom texture pack options: {}", config_path);
+            return false;
+        }
+        skip_mipmap = options["skip_mipmap"].get<bool>();
+        flip_png_files = options["flip_png_files"].get<bool>();
+        use_new_hash = options["use_new_hash"].get<bool>();
+
+        if (options_only) {
+            return true;
+        }
+
+        const auto textures_it = json.find("textures");
+        if (textures_it == json.end() || !textures_it->is_object()) {
+            LOG_INFO(Render, "Custom texture pack has no texture mappings: {}", config_path);
+            return true;
+        }
+        for (const auto& material : textures_it->items()) {
+            std::size_t idx{};
+            u64 hash{};
+            try {
+                hash = std::stoull(material.key(), &idx, 16);
+            } catch (const std::exception& e) {
+                LOG_ERROR(Render, "Key {} is invalid: {}", material.key(), e.what());
+                continue;
             }
-        } else {
-            LOG_ERROR(Render, "Material with key {} is invalid", material.key());
+            if (!idx || idx != material.key().size()) {
+                LOG_ERROR(Render, "Key {} is invalid, skipping", material.key());
+                continue;
+            }
+            const auto parse = [&](const std::string& file) {
+                const std::string filename{FileUtil::GetFilename(file)};
+                auto [it, new_hash] = path_to_hash_map.try_emplace(filename);
+                it->second.push_back(hash);
+            };
+            const auto value = material.value();
+            if (value.is_string()) {
+                parse(value.get<std::string>());
+            } else if (value.is_array()) {
+                for (const auto& file : value) {
+                    if (file.is_string()) {
+                        parse(file.get<std::string>());
+                    }
+                }
+            } else {
+                LOG_ERROR(Render, "Material with key {} is invalid", material.key());
+            }
         }
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR(Render, "Exception while reading custom texture pack {}: {}", config_path,
+                  e.what());
+        return false;
+    } catch (...) {
+        LOG_ERROR(Render, "Unknown exception while reading custom texture pack {}", config_path);
+        return false;
     }
-    return true;
 }
 
 std::vector<FileUtil::FSTEntry> CustomTexManager::GetTextures(u64 title_id) {

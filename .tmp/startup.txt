@@ -1,0 +1,75 @@
+=== Azahar Switch startup log open (w) ===
+[startup] userAppInit: begin
+[startup] userAppInit: stdout/stderr logs enabled HOME=sdmc:/GBAStation/3ds
+[startup] main: entry argc=4
+[startup] Run: entry argc=4
+[startup] Run: appletLockExit
+[startup] Run: appletLockExit rc=0x0
+[startup] Run: applet focus handling rc=0x0 resume message rc=0x0
+[startup] DebugOpen: opening sdmc:/GBAStation/3ds/debug/azahar_switch.txt
+[startup] InstallFatalHandlers
+[azahar-switch] thread affinity capture: rc=0x0 preferred=0 affinity=0x1
+[azahar-switch] clock service initialize: backend=clkrst rc=0x0
+[startup] clock service initialize: backend=clkrst rc=0x0
+[azahar-switch] clock apply: module=cpu requested_hz=1785000000 set_rc=0x0 get_rc=0x0 actual_hz=1785000000
+[azahar-switch] clock apply: module=gpu requested_hz=921600000 set_rc=0x0 get_rc=0x0 actual_hz=921600000
+[azahar-switch] clock apply: module=memory requested_hz=1600000000 set_rc=0x0 get_rc=0x0 actual_hz=1600000000
+[azahar-switch] argc=4
+[azahar-switch] build flags: diagnostic_logs=1 hotpath_diagnostics=1
+[azahar-switch] argv[0]=/GBAStation/core/GBAStation3DSStub.nro
+[azahar-switch] argv[1]=/GBAStation/3ds/games/poke blue.cci
+[azahar-switch] argv[2]=--return
+[azahar-switch] argv[3]=sdmc:/switch/GBAStation.nro
+[startup] Run: parsing ROM path
+[startup] ParseLaunchOptions: mode=run rom=/GBAStation/3ds/games/poke blue.cci title=精灵宝可梦 始源蓝宝石 uninstall_title=0000000000000000 return=nro target=sdmc:/switch/GBAStation.nro
+[startup] Run: romfsInit
+[azahar-switch] romfsInit=0x0
+[startup] Run: pin main thread affinity
+[azahar-switch] thread affinity main: set core=2 mask=0x4 rc=0x0 get_rc=0x0 preferred=2 affinity=0x4
+[startup] Run: pad init
+[startup] Run: InputCommon::Init
+[startup] Run: input mapping
+[startup] Run: ConfigureSettings
+[azahar-switch] switch settings: cpu_jit=1 cpu_clock=100 new3ds=1 vulkan=1 hw_shader=1 shader_jit=1 async_shader=1 strict_gpu_sync=0 disable_pipeline_fast_path=0 async_present=1 disk_cache=1 audio_hle=1 audio_stretch=0 realtime_audio=1 res=1
+[azahar-switch] GBAStation config applied: path=sdmc:/GBAStation/3ds/config/cores/azahar.jsonc + sdmc:/GBAStation/config/config.cfg options=63 upscale=1 game_db_display=1 launch_layout=hybrid launch_orientation=0 launch_res=2 effective_res=2 fast_forward=4.00 skip_duplicate=0 switch_fastmem=0 switch_jit_fast_dispatch=0 movie_throttle=1 movie_clock=50
+[startup] Run: FileUtil::SetUserPath sdmc:/GBAStation/3ds/
+[startup] Run: Common::Log init
+[startup] Run: Core::System::GetInstance
+[startup] Run: frontend applets/image interface
+[azahar-switch] nwindow[graphics-entry]: ptr=0xfad5576f8 valid=1 connected=1 dimensions_rc=0x0 size=1280x720 configured=0x0 requested=0x0 cur_slot=-1 swap_interval=1
+[azahar-switch] nwindow[graphics-entry-done]: ptr=0xfad5576f8 valid=1 connected=1 dimensions_rc=0x0 size=1280x720 configured=0x0 requested=0x0 cur_slot=-1 swap_interval=1
+[startup] Run: creating NWindow frontend
+[azahar-switch] cartridge image inserted: /GBAStation/3ds/games/poke blue.cci
+[azahar-switch] loading ROM: /GBAStation/3ds/games/poke blue.cci
+[azahar-switch] cheats loaded but left disabled on startup; enable manually from menu
+[azahar-switch] configured 3ds language: zh-CN (6) rc=0x0
+[azahar-switch] renderer resolution scale factor=2
+[startup] Run: ApplySettings
+[azahar-switch] display settings post-apply-settings: layout=hybrid orientation=0 resolution=2 integer=0 gap=0 top_scale=1.00 bottom_scale=1.00 bottom_opacity=1.00 overlay=0 fast_forward=4.00
+[azahar-switch] shader compile notice visible=0
+[azahar-switch] GBAStation menu init=1 hotkey=ZL+ZR return=nro target=sdmc:/switch/GBAStation.nro
+[azahar-switch] startup keepalive armed
+[azahar-switch] entering main loop
+[azahar-switch] pause frame ready after state/reset baseline=0 frame=1
+[azahar-switch] first guest frame reached: renderer_frame=1 keepalives=0
+[azahar-switch] GBAStation menu visible=1
+[azahar-switch] GBAStation menu visible=0
+[azahar-switch] fast forward on multiplier=4.00 limit=400.0
+[azahar-switch] fast forward off multiplier=4.00 limit=0.0
+[azahar-switch] GBAStation menu visible=1
+[azahar-switch] GBAStation menu visible=0
+[azahar-switch] fast forward on multiplier=2.00 limit=200.0
+[azahar-switch] fast forward throttled: pending shader/pipeline work=5
+[azahar-switch] fast forward off multiplier=2.00 limit=0.0
+[azahar-switch] fast forward resumed: shader/pipeline queue drained
+[azahar-switch] fast forward on multiplier=2.00 limit=200.0
+[azahar-switch] fast forward throttled: pending shader/pipeline work=4
+[azahar-switch] fast forward off multiplier=2.00 limit=0.0
+[azahar-switch] fast forward resumed: shader/pipeline queue drained
+[azahar-switch] fast forward on multiplier=2.00 limit=200.0
+[azahar-switch] std::terminate called
+[startup] std::terminate called
+[azahar-switch] fatal signal 6
+[startup] fatal signal 6
+[startup] userAppExit
+=== Azahar Switch startup log close ===

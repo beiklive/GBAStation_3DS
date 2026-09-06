@@ -5,6 +5,7 @@
 #define DDSKTX_IMPLEMENT
 #include <dds-ktx.h>
 #include <lodepng.h>
+#include <limits>
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "core/frontend/image_interface.h"
@@ -23,7 +24,14 @@ bool ImageInterface::DecodePNG(std::vector<u8>& dst, u32& width, u32& height,
 
 bool ImageInterface::DecodeDDS(std::vector<u8>& dst, u32& width, u32& height, ddsktx_format& format,
                                std::span<const u8> src) {
+    dst.clear();
+    width = 0;
+    height = 0;
     ddsktx_texture_info tc{};
+    if (src.empty() || src.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        LOG_ERROR(Frontend, "Invalid DDS/KTX input size: {}", src.size());
+        return false;
+    }
     const int size = static_cast<int>(src.size());
 
     if (!ddsktx_parse(&tc, src.data(), size, nullptr)) {
@@ -36,6 +44,10 @@ bool ImageInterface::DecodeDDS(std::vector<u8>& dst, u32& width, u32& height, dd
 
     ddsktx_sub_data sub_data{};
     ddsktx_get_sub(&tc, &sub_data, src.data(), size, 0, 0, 0);
+    if (!sub_data.buff || sub_data.size_bytes == 0) {
+        LOG_ERROR(Frontend, "DDS/KTX has no readable base level");
+        return false;
+    }
 
     dst.resize(sub_data.size_bytes);
     std::memcpy(dst.data(), sub_data.buff, sub_data.size_bytes);

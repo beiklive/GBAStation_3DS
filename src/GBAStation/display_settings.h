@@ -37,7 +37,8 @@ struct GBAStationRuntimeSettings {
     int cpu_clock_percentage{100};
     bool movie_cpu_throttle{true};
     int movie_throttle_clock{50};
-    bool lsfg_frame_generation{};
+    bool strict_gpu_sync{};
+    bool disable_pipeline_fast_path{};
     bool controller_pointer{};
 };
 

@@ -539,6 +539,17 @@ public:
                 Settings::values.async_shader_compilation.SetValue(*b);
             }
         }
+        if (const auto v = GetFirstOptional({"strict_gpu_sync", "strictGpuSync"}); v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.strict_gpu_sync.SetValue(*b);
+            }
+        }
+        if (const auto v = GetFirstOptional(
+                {"disable_pipeline_fast_path", "disablePipelineFastPath"}); v) {
+            if (const auto b = ParseBool(*v)) {
+                Settings::values.disable_pipeline_fast_path.SetValue(*b);
+            }
+        }
         if (const auto v = GetFirstOptional({"async_presentation", "citra_async_presentation"});
             v) {
             if (const auto b = ParseBool(*v)) {
